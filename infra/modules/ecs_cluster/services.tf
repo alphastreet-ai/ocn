@@ -794,15 +794,13 @@ resource "aws_cloudwatch_event_target" "news_retrieval_geopolitical_news_expire_
 }
 
 resource "aws_cloudwatch_event_rule" "news_retrieval_china_market_signal_policy" {
+  # Enabled 2026-10-11, after the backfill: 8,879 articles
+  # (2022-08 to 2026-10), 84 baseline series, and a reclassify whose
+  # distribution matched the local reference run. Explicit rather
+  # than omitted - an absent `state` leaves whatever AWS already has,
+  # so removing the DISABLED line did NOT re-enable these.
+  state = "ENABLED"
   name = "${var.env}-news-retrieval-china-market-signal-policy"
-  # DISABLED until the China backfill completes. The daily schedule is
-  # incremental (--days-back 1) and the classifier skips source_ids it
-  # has already stored, both of which assume history is already loaded.
-  # Firing against a half-loaded company_financials would judge filings
-  # against the hardcoded universe fallback instead of real baselines.
-  # Set to "ENABLED" only after baselines + filings are backfilled and
-  # reconciled. See the matching flags on the other five china rules.
-  state = "DISABLED"
   # Every 4 hours bounded to 00:00-12:00 UTC (08:00-20:00 Beijing, CST =
   # UTC+8 year-round, no DST), Mon-Fri. This is the one group where lag is
   # the product rather than a tolerance: the China Signals spec's own
@@ -863,10 +861,8 @@ resource "aws_cloudwatch_event_target" "news_retrieval_china_market_signal_polic
 }
 
 resource "aws_cloudwatch_event_rule" "news_retrieval_china_market_signal_filings" {
+  state = "ENABLED"
   name = "${var.env}-news-retrieval-china-market-signal-filings"
-  # DISABLED until the China backfill completes - see the policy rule
-  # above for why. Enable all six together.
-  state = "DISABLED"
   # Twice daily, anchored to the real mainland session (09:30-15:00 CST =
   # 01:30-07:00 UTC) in the same shape as Japan's pre-open/post-close
   # pair: 01:00 UTC catches anything filed overnight ahead of the open,
@@ -919,10 +915,8 @@ resource "aws_cloudwatch_event_target" "news_retrieval_china_market_signal_filin
 }
 
 resource "aws_cloudwatch_event_rule" "news_retrieval_china_market_signal_monthly" {
+  state = "ENABLED"
   name = "${var.env}-news-retrieval-china-market-signal-monthly"
-  # DISABLED until the China backfill completes - see the policy rule
-  # above for why. Enable all six together.
-  state = "DISABLED"
   # The ONLY schedule that ever includes the two C6 trade sources
   # (comtrade_china_trade and nbs_ic_output, both frequency_name
   # "monthly", min_days_back 30) - the rules above run --days-back 2 and
@@ -1712,11 +1706,8 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_japan_signals_pos
 }
 
 resource "aws_cloudwatch_event_rule" "signal_detection_agent_china_signals_filings" {
+  state = "ENABLED"
   name = "${var.env}-signal-detection-agent-china-signals-filings"
-  # DISABLED until the China backfill completes - see
-  # news_retrieval_china_market_signal_policy for why. Enable all six
-  # together, and only after the backfill classification is reconciled.
-  state = "DISABLED"
   description = "Classify pooled china_market_signal news-retrieval runs (Gate 1 triage, C1-C7, read-through, confirmation, translate) - after the daily mainland filings fetches"
   # Anchored to the three news-retrieval china_market_signal fetch rules
   # above, not to a round number: without this rule the domain fetches
@@ -1773,11 +1764,8 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_china_signals_fil
 }
 
 resource "aws_cloudwatch_event_rule" "signal_detection_agent_china_baselines" {
+  state = "ENABLED"
   name = "${var.env}-signal-detection-agent-china-baselines"
-  # DISABLED until the China backfill completes - see
-  # news_retrieval_china_market_signal_policy for why. Enable all six
-  # together.
-  state = "DISABLED"
   description = "Recompute China C2/C3 per-company baselines from stored history, and re-fetch the underlying revenue figures"
   # THIS RULE ONLY REFETCHES. Rebuilding the baselines themselves is
   # no longer its job - classify-china-signals does that in-process
@@ -1829,11 +1817,8 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_china_baselines" 
 }
 
 resource "aws_cloudwatch_event_rule" "signal_detection_agent_china_signals_evening" {
+  state = "ENABLED"
   name = "${var.env}-signal-detection-agent-china-signals-evening"
-  # DISABLED until the China backfill completes - see
-  # news_retrieval_china_market_signal_policy for why. Enable all six
-  # together, and only after the backfill classification is reconciled.
-  state = "DISABLED"
   description = "Classify pooled china_market_signal news-retrieval runs - second daily pass, catching the afternoon/evening policy and press fetches"
   # 14:00 UTC = 22:00 Beijing, after the 12:00 UTC fetch that ends the
   # policy rule's 00:00-12:00 UTC 4-hourly series (cron(0 0-12/4 ...)).
