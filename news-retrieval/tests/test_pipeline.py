@@ -249,7 +249,15 @@ def test_cross_run_dedup_excludes_previously_stored_url() -> None:
         )
 
     urls = {a["url"] for a in result["articles"]}
-    assert urls == {"http://example.com/brand-new"}
+    # Membership, not equality. `ai_news` also has SerpAPI, GDELT and
+    # NewsAPI sources, and only feedparser is patched here - so a real
+    # network response from any of those lands in the same list and an
+    # equality assertion fails on articles this test is not about
+    # (confirmed live: 262 unrelated articles, one from cio.com). What
+    # this test exists to prove is the dedup decision on the two entries
+    # it supplied.
+    assert "http://example.com/brand-new" in urls
+    assert seen_url not in urls
 
 
 def test_cross_domain_dedup_excludes_url_stored_under_different_domain() -> None:
@@ -276,7 +284,11 @@ def test_cross_domain_dedup_excludes_url_stored_under_different_domain() -> None
             days_back=7,
         )
 
-    assert result["articles"] == []
+    # The supplied entry must be dropped. Checked by membership rather
+    # than by an empty list, for the same reason as the sibling test
+    # above: `ai_news` carries unpatched SerpAPI/GDELT/NewsAPI sources
+    # whose real responses arrive in the same list.
+    assert seen_url not in {a["url"] for a in result["articles"]}
 
 
 def test_fetch_gdelt_parses_doc_response() -> None:

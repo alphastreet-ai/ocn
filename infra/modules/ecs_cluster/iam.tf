@@ -107,8 +107,33 @@ resource "aws_iam_role" "github_actions" {
         }
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
+          # The `@<id>` segments are NOT a typo. This organisation has
+          # GitHub's "immutable org/repo IDs in OIDC claims" setting
+          # enabled, so the token's subject carries the numeric org and
+          # repository IDs alongside their names:
+          #
+          #   repo:alphastreet-ai@333030073/ocn@1216920516:ref:refs/heads/main
+          #
+          # read verbatim from the CloudTrail record of the denied
+          # AssumeRoleWithWebIdentity call. A plain
+          # "repo:alphastreet-ai/ocn:ref:refs/heads/main" never matches
+          # it, which is why every deploy failed from the rename date
+          # onward even with the org name corrected.
+          #
+          # The IDs are immutable: they survive renaming the org or the
+          # repo, which is the point of the setting - a renamed repo
+          # cannot impersonate the old one. Matching on them is
+          # therefore MORE robust than matching on names, and this
+          # condition needs no edit if the org is ever renamed again.
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:alphastreet-ai/ocn:ref:refs/heads/main"
+            "token.actions.githubusercontent.com:sub" = "repo:alphastreet-ai@333030073/ocn@1216920516:ref:refs/heads/main"
+          }
+          # The audience the aws-actions/configure-aws-credentials action
+          # requests. Unconditioned, any GitHub-minted token for this
+          # provider could be presented; pinning it is standard practice
+          # for this integration.
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
         }
       }
