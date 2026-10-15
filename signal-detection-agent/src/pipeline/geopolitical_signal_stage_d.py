@@ -26,10 +26,12 @@ Three independent checks, each true/false:
     first place - this check exists for completeness/documentation, not
     because it meaningfully differentiates rows in practice.
   - specific: the headline itself contains a digit (a concrete number -
-    percentage, dollar amount, count, etc), OR Stage C's Layer 1 found a
-    direct company-name match in the headline (impacted_companies_direct
-    non-empty). Either is evidence the story is about something concrete
-    rather than a vague, unquantified claim.
+    percentage, dollar amount, count, etc), OR Stage C extracted at
+    least one named entity from the headline and body. Either is
+    evidence the story is about something concrete rather than a vague,
+    unquantified claim. This read Layer 1's headline-only company match
+    until that proved null on every geopolitical row - these headlines
+    name countries, not companies - which left the check digit-only.
 
 Grade: TOP (all 3 true), STRONG (exactly 2 true), STANDARD (0 or 1 true).
 """
@@ -100,11 +102,12 @@ def _corroborating_domains(also_reported_by: list[str] | None) -> list[str]:
     return matched
 
 
-def _is_specific(title: str, impacted_companies_direct: list[dict[str, str]] | None) -> bool:
-    # only checked for truthiness (non-empty) - shape-agnostic to whatever
-    # find_direct_company_matches returns (a list of ticker strings
-    # previously, now [{ticker, company_name}] objects).
-    return bool(_DIGIT_RE.search(title or "")) or bool(impacted_companies_direct)
+def _is_specific(title: str, named_entities: list[dict[str, Any]] | None) -> bool:
+    # Only checked for truthiness - shape-agnostic to whatever the
+    # caller passes. Reads Stage C's extracted entities (headline AND
+    # body) rather than the old headline-only company match, which was
+    # null on every geopolitical row and left this check digit-only.
+    return bool(_DIGIT_RE.search(title or "")) or bool(named_entities)
 
 
 def grade_geopolitical_signal_article(
@@ -112,7 +115,7 @@ def grade_geopolitical_signal_article(
     url: str | None,
     title: str | None,
     also_reported_by: list[str] | None,
-    impacted_companies_direct: list[dict[str, str]] | None,
+    named_entities: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     """Return {grade, corroborated, corroborating_domains, primary_source,
     specific} for one Stage-C-tagged article. Pure/free - no model call,
@@ -129,7 +132,7 @@ def grade_geopolitical_signal_article(
     corroborating_domains = _corroborating_domains(also_reported_by)
     corroborated = bool(corroborating_domains)
     primary_source = _extract_domain(url) in ALLOWED_DOMAINS
-    specific = _is_specific(title or "", impacted_companies_direct)
+    specific = _is_specific(title or "", named_entities)
 
     true_count = sum((corroborated, primary_source, specific))
     if true_count == 3:

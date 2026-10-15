@@ -170,6 +170,11 @@ def rank_revenue_by_yoy(
     of adding today's new articles to the field, so the caller can decide
     whether/how to persist that (this module has no DB access itself).
 
+    A filing present on both sides - re-fetched today AND already stored -
+    is counted once, as the fresh article. Ranks within a period are
+    therefore always 1..n over distinct (ticker, period) filings, with no
+    repeated or skipped rank and no inflation of ``n``.
+
     Adds to each qualifying article's ``metadata``, in place:
         - ``revenue_rank_signal``: "HIGH" or "WEAK"
         - ``revenue_yoy_rank``: 1-indexed rank by YoY% within its period
@@ -180,21 +185,70 @@ def rank_revenue_by_yoy(
         revenue_yoy_rank, or revenue_rank_reason changed - empty if no
         context_articles were passed, or if none of them changed.
     """
-    def _collect(source: list[dict], into: dict[str, list[dict]]) -> None:
+    # One filing = one entry in the field, keyed by (ticker, period) - the
+    # same identity insert_taiwan_signal_classification's source_id uses,
+    # rebuilt here because that source_id is only derived later, in
+    # classify_taiwan_signal_batch, after ranking has already run.
+    #
+    # Both sides of the field can carry the same filing twice. The caller
+    # pools every completed news-retrieval run in the window and dedups
+    # those by URL, but one filing can be re-fetched under a new URL across
+    # polls, so it survives URL-dedup into `articles`; and the stored rows
+    # read back as context are selected by period alone, so they include
+    # the filings today's batch just re-delivered. Concatenating the two
+    # ranked one company twice - two consecutive ranks for one filing,
+    # every company below it shifted down, and the field size `n` inflated
+    # past the real universe. The duplicate row was then correctly blocked
+    # at insert by source_id, so only the ranks were wrong, invisibly.
+    def _collect(source: list[dict], into: dict[str, list[dict]], seen: set) -> None:
         for a in source:
             meta = a.get("metadata") or {}
             if meta.get("source_category") != "mops_revenue":
                 continue
             if meta.get("yoy_pct") is None:
                 continue
+            # A row with no ticker has no filing identity to dedupe on -
+            # every such row would collide on (None, period) and all but
+            # the first would vanish from the field, understating n. The
+            # fetcher filters to a fixed ticker universe so this should
+            # never happen; if it ever does, keep the row (a duplicated
+            # rank is recoverable, a silently dropped company is not) and
+            # say so, rather than deduping on a key that isn't an identity.
+            ticker = meta.get("ticker")
+            if ticker is None:
+                logger.warning(
+                    "[TAIWAN_RANK] mops_revenue row with no ticker in period=%s"
+                    " - ranked without dedup", meta["period_gregorian"],
+                )
+            else:
+                key = (ticker, meta["period_gregorian"])
+                if key in seen:
+                    continue
+                seen.add(key)
             into.setdefault(meta["period_gregorian"], []).append(a)
 
-    by_period: dict[str, list[dict]] = {}
-    _collect(articles, by_period)
-
+    # CONTEXT rows claim their key first, so when a filing is both stored
+    # and re-delivered today it is the STORED row that gets ranked and the
+    # fresh duplicate that is dropped. This precedence is load-bearing, not
+    # cosmetic: the caller filters already-stored source_ids out of its
+    # insert list, so a rank computed onto the fresh copy of an existing
+    # filing is never written anywhere. Ranking the stored row instead
+    # routes a genuine change through changed_context ->
+    # update_taiwan_revenue_rank, which is the only path that can correct a
+    # row after insert. Ranking the fresh copy would silently discard the
+    # correction and leave the stale rank in the DB forever.
+    #
+    # This does not reintroduce per-run revision churn: the loop below only
+    # appends to rank_revision_history when the recomputed rank/signal
+    # actually differs from what is stored, so a re-delivery that changes
+    # nothing is a true no-op.
+    seen_keys: set = set()
     context_by_period: dict[str, list[dict]] = {}
     if context_articles:
-        _collect(context_articles, context_by_period)
+        _collect(context_articles, context_by_period, seen_keys)
+
+    by_period: dict[str, list[dict]] = {}
+    _collect(articles, by_period, seen_keys)
 
     changed_context: list[dict[str, Any]] = []
 

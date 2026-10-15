@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
@@ -16,6 +17,16 @@ import httpx
 import trafilatura
 from openai import OpenAI
 from trafilatura.settings import use_config
+
+# Optional - only used as a second attempt for URLs Trafilatura cannot
+# fetch (see _fetch_body_impersonated). Imported defensively so an
+# environment without it keeps working exactly as before rather than
+# failing to start: every call site already treats a null body as a
+# normal outcome.
+try:
+    from curl_cffi import requests as _curl_cffi_requests
+except ImportError:  # pragma: no cover - depends on the installed env
+    _curl_cffi_requests = None
 
 from china_code import resolve_cninfo_org_ids, resolve_hkex_stock_ids
 from dart_corp_code import resolve_corp_codes
@@ -122,7 +133,409 @@ def _clean_summary(raw: str) -> str:
 _EXTRACT_LOCK = threading.Lock()
 
 
-def _fetch_body(url: str) -> str | None:
+# A subscription wall extracts cleanly and is NOT an article. Confirmed
+# live: ft.com answers curl_cffi with HTTP 200 and 146KB, from which
+# trafilatura pulls 1,046 characters reading "Try unlimited access - Only
+# Rs100 for 4 weeks. Then Rs4499 per month..." - a plausible-looking body
+# of plausible length. The article's own words ("Beijing", "national
+# security") are not in that HTML at all; the server never sent them.
+#
+# Storing that is worse than storing nothing: downstream would tag a
+# sales page as a geopolitical signal, and no length threshold
+# distinguishes it from a short real article. Matched on the offer
+# vocabulary instead, and only in the first 400 characters - a real
+# article may mention a subscription further down, but one that OPENS
+# with an offer is the wall itself.
+_PAYWALL_TEASER_MARKERS: tuple[str, ...] = (
+    "subscribe to unlock",
+    "try unlimited access",
+    "complete digital access",
+    "cancel anytime during your trial",
+    "subscribe to continue",
+    "to read this article",
+    "already a subscriber",
+    "sign in to read",
+    "create a free account to",
+    # Bot checks, which are not paywalls but fail the same way: a 200
+    # response carrying a few hundred characters of plausible-looking
+    # text that is not the article. Confirmed live on bloomberg.com -
+    # the first request returned the real story, repeat requests
+    # returned "To continue, please click the box below to let us know
+    # you're not a robot", which no subscription-offer marker catches
+    # and which is short enough to look like a brief article.
+    "let us know you're not a robot",
+    "please click the box below",
+    "browser supports javascript",
+    "enable javascript and cookies",
+    "verify you are a human",
+    "checking your browser before",
+)
+_PAYWALL_TEASER_SCAN_CHARS = 400
+
+
+def _looks_like_paywall_teaser(text: str) -> bool:
+    head = " ".join(text[:_PAYWALL_TEASER_SCAN_CHARS].lower().split())
+    return any(m in head for m in _PAYWALL_TEASER_MARKERS)
+
+
+# Domains whose fetchers opt into the curl_cffi second attempt. One entry
+# today, deliberately: the blocks it works around (US/EU paper-of-record
+# WAFs and TLS-fingerprint rejection) are specific to geopolitical_news's
+# own source allowlist. Every other domain fetches exchange filings,
+# government notices or regional press, none of which exhibited this
+# failure. Kept as a set rather than an `if slug == ...` so adding the
+# next domain is a one-line change with a visible list of who opted in.
+_IMPERSONATE_FALLBACK_DOMAINS: frozenset[str] = frozenset({"geopolitical_news"})
+
+
+def _impersonate_for(domain_slug: str) -> bool:
+    return domain_slug in _IMPERSONATE_FALLBACK_DOMAINS
+
+
+# Source domains whose articles are worth paying a body fetch for, per
+# news domain. A body fetch is the single most expensive step in
+# retrieval - a Trafilatura download plus a serialized extract (see
+# _EXTRACT_LOCK for the segfaults that forced the serialization) - and
+# for geopolitical_news it was being spent on articles the consumer
+# discards minutes later.
+#
+# Measured on the stored history: signal-detection-agent's Stage A drops
+# every article whose domain is not on its own allowlist, and that was
+# 5,280 of 5,487 rows - so roughly 9 of every 10 body fetches produced
+# text that nothing ever read. A single run fetched bodies from
+# kalkine.ca, britannica.com, facebook.com and einnews.com, none of
+# which can ever become a signal.
+#
+# The article itself is STILL FETCHED AND STORED - only the body is
+# skipped. Dropping the row instead would break the consumer: its Stage
+# A skips by article_id, so an article with no row is re-examined on
+# every later pass forever, and a dropped article would stop being
+# distinguishable from one that was never retrieved.
+#
+# MUST STAY IN SYNC with ALLOWED_DOMAINS in signal-detection-agent's
+# pipeline/geopolitical_signal_classifier.py, which remains the
+# authority on what becomes a signal. This copy only decides where a
+# body is worth fetching; a domain present there but missing here still
+# classifies, just headline-only, which is the safe direction for a
+# drift. Kept as a copy rather than a shared import because the two
+# services deploy independently and a cross-service import would couple
+# their release cycles for a list that changes a few times a year.
+_BODY_FETCH_DOMAINS: dict[str, frozenset[str]] = {
+    "geopolitical_news": frozenset({
+        # wire services / papers of record
+        "reuters.com", "apnews.com", "bloomberg.com", "ft.com", "wsj.com",
+        "aljazeera.com", "asia.nikkei.com", "afp.com", "upi.com",
+        "nhk.or.jp", "dw.com", "theguardian.com", "economist.com",
+        # US government
+        "federalregister.gov", "whitehouse.gov", "state.gov",
+        "treasury.gov", "commerce.gov", "defense.gov",
+        # regional / defense
+        "militarnyi.com", "kyivpost.com", "interfax.com.ua",
+        "en.interfax.com.ua", "armenpress.am", "newsukraine.rbc.ua",
+        "aa.com.tr", "france24.com", "haaretz.com",
+        "nytimes.com", "politico.com", "spglobal.com", "agenceurope.eu",
+        "cnbc.com", "gcaptain.com", "tradewindsnews.com", "oilprice.com",
+        "scmp.com", "channelnewsasia.com", "jpost.com", "defensenews.com",
+        "breakingdefense.com", "latimes.com", "cbc.ca", "abcnews.com",
+        "rferl.org",
+        # AI-economy channels
+        "tomshardware.com", "semiconductor-digest.com", "globalsources.com",
+        "miningweekly.com", "argusmedia.com", "lloydslist.com",
+        "taipeitimes.com", "koreaherald.com", "politico.eu",
+        "themoscowtimes.com", "cnn.com", "nbcnews.com", "globalnews.ca",
+        "theglobeandmail.com",
+    }),
+}
+
+
+def _fetch_body_or_none(
+    url: str | None, *, impersonate_fallback: bool = False,
+) -> str | None:
+    """_fetch_body, but a None url means "deliberately not fetched".
+
+    Lets a caller decide per-article whether to spend a fetch while still
+    mapping over one list, so the result stays positionally aligned with
+    the articles it belongs to.
+    """
+    if not url:
+        return None
+    return _fetch_body(url, impersonate_fallback=impersonate_fallback)
+
+
+def _should_fetch_body(url: str, domain_slug: str) -> bool:
+    """Whether this article's body is worth fetching for this news domain.
+
+    True for every domain with no entry in _BODY_FETCH_DOMAINS - the
+    filter is opt-in, so no existing domain's behaviour changes.
+
+    The host is derived from the URL rather than from the article's own
+    ``source`` field, and "www." is stripped while any other subdomain is
+    kept whole - the same two rules signal-detection-agent's Stage A
+    uses, and for the same confirmed reason: ``source`` is not reliably a
+    domain (it can be a display name like "Reuters" or a native-script
+    name), so trusting it silently skips real articles.
+    """
+    allowed = _BODY_FETCH_DOMAINS.get(domain_slug)
+    if allowed is None:
+        return True
+    host = (urlparse(url or "").hostname or "").lower()
+    if host.startswith("www."):
+        host = host[len("www."):]
+    return host in allowed
+
+
+def _fetch_body_impersonated(url: str) -> str | None:
+    """Second attempt for a URL Trafilatura could not fetch: re-request it
+    with a real browser's TLS/HTTP2 fingerprint via curl_cffi.
+
+    Some WAFs reject on the TLS handshake rather than on the User-Agent,
+    so a browser UA alone (which _get_trafilatura_config already sets) is
+    not enough - the connection is refused before any header is read.
+    Confirmed live on apnews.com: 403 with Trafilatura's fetch AND with a
+    browser UA on plain curl, but HTTP 200 and 4,616 characters of real
+    article text when the TLS fingerprint matches Chrome.
+
+    It changes how we look at the transport layer and nothing else - no
+    credentials, no JS execution. A site that refuses an unauthenticated
+    request still refuses it (confirmed: reuters.com answers 401 to every
+    impersonation profile tried, and the Internet Archive's own crawler
+    recorded the same 401).
+
+    Also clears globalsources.com's HTTP 429. That one looked like rate
+    limiting and is not: five requests spaced four seconds apart all
+    returned 429 with `Retry-After: 300`, while this same call returns
+    200 and 12,539 characters immediately. The 429 is CloudFront
+    rejecting the TLS fingerprint, so throttling would have waited five
+    minutes to be refused again.
+    """
+    if _curl_cffi_requests is None:
+        return None
+    try:
+        resp = _curl_cffi_requests.get(
+            url, impersonate="chrome124", timeout=20,
+        )
+        if resp.status_code == 429:
+            # The server told us how long to wait. Honouring it matters
+            # more than this one article: ignoring Retry-After is what
+            # turns a soft throttle into an IP block, and the next run
+            # needs this domain to still answer.
+            retry_after = resp.headers.get("Retry-After")
+            logger.warning(
+                "[BODY_FETCH] %s rate-limited (429), Retry-After=%s - "
+                "skipping this article", url, retry_after or "unset",
+            )
+            host = (urlparse(url or "").hostname or "").lower()
+            if host.startswith("www."):
+                host = host[len("www."):]
+            try:
+                penalty = float(retry_after) if retry_after else 60.0
+            except (TypeError, ValueError):
+                penalty = 60.0
+            with _DOMAIN_FETCH_LOCK:
+                _domain_last_fetch_at[host] = time.monotonic() + penalty
+            return None
+        if resp.status_code != 200 or not resp.text:
+            return None
+        with _EXTRACT_LOCK:
+            text = trafilatura.extract(resp.text)
+    except Exception as exc:
+        logger.debug("[BODY_FETCH] impersonated fetch failed url=%r: %s", url, exc)
+        return None
+    if not text or _looks_like_paywall_teaser(text):
+        return None
+    return text
+
+
+# Third and last attempt, for articles whose publisher serves no body to
+# an unauthenticated reader at all. Measured against the real stored
+# failures, after the two attempts above had already failed:
+#
+#   ft.com        6,064 chars   bloomberg.com  4,224 chars
+#   scmp.com      5,841 chars   nytimes.com    8,315-63,399 chars
+#   wsj.com       3,954 chars   reuters.com    not archived (404)
+#
+# Two alternatives were tested on the same URLs and rejected:
+#   - The Wayback availability API returns `archived_snapshots: {}` for
+#     reuters/wsj/nytimes, and where it DOES hold a Reuters snapshot the
+#     snapshot is itself a 401 - the crawler was refused too.
+#   - Publisher RSS carries teasers, not articles: WSJ/NYT/BBC feeds
+#     return descriptions around 180 characters, and WSJ's feed contains
+#     zero <content:encoded> blocks (an earlier count of 20 was matching
+#     the namespace declaration, not content).
+#   - A headless browser does WORSE than this: Playwright extracted 1,054
+#     chars from scmp.com against 5,841 here, and bloomberg.com answered
+#     403 to a real Chromium. It also pulls a browser binary per
+#     architecture, which this service's AMD64 ECS target makes its own
+#     problem.
+#
+# Runs ONLY after both direct attempts have failed, so a reachable
+# publisher is never routed through a mirror. Rate-limited to one
+# in-flight request at a time: archive.ph is an unaffiliated service with
+# no SLA, and a fetch loop hitting it concurrently is both rude and
+# likely to be throttled.
+# Only these publishers are ever looked up in the archive. Everything
+# else that fails both direct attempts is simply left without a body.
+#
+# This is the real rate-limit control, not the interval below. archive.ph
+# is fronted by Cloudflare and starts answering 429 after a short burst
+# (measured during development: a handful of back-to-back lookups earned
+# a block lasting minutes, and the 429 page is itself 59KB of challenge
+# HTML that looks like a successful fetch). Restricting WHO gets looked
+# up bounds the request count structurally - a day's run makes at most a
+# handful of archive calls instead of one per failed body.
+#
+# Each entry earned its place by failing both direct attempts AND
+# returning real article text from a snapshot:
+#   ft.com 6,064 chars · bloomberg.com 4,224 · scmp.com 5,841
+#   nytimes.com 8,315-63,399 · wsj.com 3,954
+# reuters.com is deliberately ABSENT: it is not archived (404), and the
+# one Wayback snapshot that exists is itself a 401 - the crawler was
+# refused the same way we are. Adding it would spend a lookup to learn
+# nothing, every single run.
+_ARCHIVE_LOOKUP_DOMAINS: frozenset[str] = frozenset({
+    "ft.com",
+    "bloomberg.com",
+    "nytimes.com",
+    "wsj.com",
+    "scmp.com",
+})
+
+_ARCHIVE_SNAPSHOT_URL = "https://archive.ph/newest/"
+_ARCHIVE_LOCK = threading.Lock()
+# 2.0 was measured to be too aggressive - a short burst of requests
+# earned a 429 within a handful of calls. This path only ever runs on
+# articles two direct attempts already failed on (a few per day at most),
+# so a slow interval costs nothing real.
+_ARCHIVE_MIN_INTERVAL_SECS = 6.0
+_archive_last_request_at = 0.0
+
+# Below this, a snapshot page is the mirror's own "not archived" notice
+# (measured at 322-4,573 characters across reuters/ft/apnews misses)
+# rather than an article. Set above the largest observed miss so a real
+# short article still has room, and paired with the teaser check below.
+_ARCHIVE_MIN_USABLE_CHARS = 600
+
+
+def _fetch_body_from_archive(url: str) -> str | None:
+    """Last attempt: read a public archive snapshot of the article.
+
+    Returns None - never a partial - when the publisher is not on
+    _ARCHIVE_LOOKUP_DOMAINS, when no snapshot exists, when the mirror
+    answers with its own miss page, or when the snapshot itself turns
+    out to be a subscription wall.
+    """
+    global _archive_last_request_at
+    if not _curl_cffi_requests:
+        return None
+    host = (urlparse(url or "").hostname or "").lower()
+    if host.startswith("www."):
+        host = host[len("www."):]
+    if host not in _ARCHIVE_LOOKUP_DOMAINS:
+        return None
+    try:
+        # Skip rather than wait. An earlier version slept inside this
+        # lock to honour the interval, which made every other worker that
+        # reached this path queue behind it - with 10 GDELT workers and a
+        # 6s interval, one slow mirror could stall a whole batch for a
+        # minute. A body is optional by design, so declining to look up
+        # THIS article is strictly better than blocking the fetch of
+        # others: the article still gets a row, just without a body.
+        with _ARCHIVE_LOCK:
+            since = time.monotonic() - _archive_last_request_at
+            if since < _ARCHIVE_MIN_INTERVAL_SECS:
+                logger.debug(
+                    "[BODY_FETCH] archive interval not elapsed, skipping %r", url,
+                )
+                return None
+            _archive_last_request_at = time.monotonic()
+        resp = _curl_cffi_requests.get(
+            f"{_ARCHIVE_SNAPSHOT_URL}{url}",
+            impersonate="chrome124",
+            timeout=35,
+            allow_redirects=True,
+        )
+        # Status is checked, never bypassed. A 429 here still returns a
+        # large page that redirected to a real snapshot URL - 59KB in the
+        # case measured - but the content is Cloudflare's rate-limit
+        # notice ("What can I do to prevent this in the future?"), not
+        # the article. Reading the body on a 429 looks like it recovers
+        # content and actually stores a challenge page.
+        if resp.status_code != 200 or not resp.text:
+            if resp.status_code == 429:
+                logger.warning(
+                    "[BODY_FETCH] archive rate-limited (429) - backing off"
+                    " for %r", url,
+                )
+            return None
+        with _EXTRACT_LOCK:
+            text = trafilatura.extract(resp.text)
+    except Exception as exc:
+        logger.debug("[BODY_FETCH] archive fetch failed url=%r: %s", url, exc)
+        return None
+    if not text or len(text) < _ARCHIVE_MIN_USABLE_CHARS:
+        return None
+    if _looks_like_paywall_teaser(text):
+        return None
+    logger.info("[BODY_FETCH] recovered %d chars from archive for %r", len(text), url)
+    return text
+
+
+# Per-domain pacing for geopolitical_news body fetches. Without it a run with several
+# articles from one publisher fires them concurrently - the GDELT and
+# SerpAPI paths both use ThreadPoolExecutor(max_workers=10) - and a
+# burst is exactly what trips an edge WAF. Confirmed live on
+# bloomberg.com, which had 3 articles in one real run: the first
+# request returned the article, later ones returned "To continue,
+# please click the box below to let us know you're not a robot".
+#
+# The interval is per HOST, not global: two different publishers are
+# unrelated as far as either one's WAF is concerned, so serialising
+# across all of them would slow the run for no benefit. Jittered rather
+# than fixed - an exactly-periodic request pattern is itself a bot
+# signature.
+_DOMAIN_FETCH_INTERVALS: dict[str, float] = {
+    "bloomberg.com": 12.0,   # TLS fingerprinting + Kasada challenges
+    "reuters.com": 8.0,      # token-gated, 401s on anonymous reads
+    "wsj.com": 8.0,
+    "nytimes.com": 8.0,
+    "ft.com": 8.0,
+    "scmp.com": 4.0,
+    "abcnews.com": 4.0,
+    "globalsources.com": 4.0,  # plain 429 with Retry-After
+    # Named explicitly rather than left on the 1.0s default: confirmed
+    # live that an unpaced burst of full-text fetches gets every
+    # subsequent one 302'd to unblock.federalregister.gov, on any user
+    # agent, while the JSON API keeps answering 200. A real day carries
+    # ~9 documents, so 2s each costs 18 seconds on a once-daily job -
+    # nothing, against a block that silently empties every body.
+    "federalregister.gov": 2.0,
+}
+_DEFAULT_DOMAIN_INTERVAL_SECS = 1.0
+_DOMAIN_FETCH_LOCK = threading.Lock()
+_domain_last_fetch_at: dict[str, float] = {}
+
+
+def _throttle_domain(url: str) -> None:
+    """Sleep just long enough that this host is not hit faster than its
+    own interval allows.
+
+    Blocking is correct here, unlike the archive lookup's skip-if-busy:
+    a body fetch has nothing else to fall back on, so waiting two
+    seconds beats being served a CAPTCHA page that then has to be
+    detected and discarded.
+    """
+    host = (urlparse(url or "").hostname or "").lower()
+    if host.startswith("www."):
+        host = host[len("www."):]
+    interval = _DOMAIN_FETCH_INTERVALS.get(host, _DEFAULT_DOMAIN_INTERVAL_SECS)
+    with _DOMAIN_FETCH_LOCK:
+        wait = interval - (time.monotonic() - _domain_last_fetch_at.get(host, 0.0))
+        if wait > 0:
+            time.sleep(wait + random.uniform(0, interval * 0.25))
+        _domain_last_fetch_at[host] = time.monotonic()
+
+
+def _fetch_body(url: str, *, impersonate_fallback: bool = False) -> str | None:
     """Fetch url and return its extracted body text, or None when the fetch
     or extraction yields nothing (paywall/bot-detection block, or a dead
     source URL).
@@ -134,12 +547,50 @@ def _fetch_body(url: str) -> str | None:
     Shared by all three Trafilatura-backed body-fetch call sites (RSS
     content:encoded fallback, SerpAPI, GDELT) so the behavior stays
     identical across all of them rather than drifting.
+
+    ``impersonate_fallback`` opts a caller into a second attempt via
+    curl_cffi when Trafilatura comes back empty (see
+    _fetch_body_impersonated). **Off by default, and currently passed
+    only by the geopolitical_news fetch path.** Not a general default,
+    for two reasons: it doubles the work on every genuinely dead URL
+    (every other domain's fetchers walk large listings where a failed
+    body is routine), and the domains it was built for - US/EU
+    paper-of-record paywalls - are specific to geopolitical_news's own
+    allowlist. Taiwan, Japan, Korea and China fetch from exchange
+    filings, government notices and regional press, none of which block
+    on a TLS fingerprint. Widening it should follow the same discipline
+    as the allowlist itself: a confirmed live miss first, not a
+    speculative default.
+
+    The paywall-teaser check applies to BOTH paths, since a wall can come
+    back from the normal fetch too - that check belongs to the result,
+    not to the transport.
     """
+    # Scoped to the callers that opt into the geopolitical fetch chain,
+    # the same gate the curl_cffi and archive tiers use. The eight
+    # throttled hosts are geopolitical-only in practice (Taiwan, Japan,
+    # Korea and China fetch exchange filings and regional press), and
+    # leaving it global would serialise those domains' own GDELT paths,
+    # which can pull many articles from ONE outlet in a run and have
+    # never had a WAF problem.
+    if impersonate_fallback:
+        _throttle_domain(url)
     downloaded = trafilatura.fetch_url(url, config=_get_trafilatura_config())
-    if not downloaded:
+    text = None
+    if downloaded:
+        with _EXTRACT_LOCK:
+            text = trafilatura.extract(downloaded)
+        if text and _looks_like_paywall_teaser(text):
+            # The publisher answered, but with a wall. Treat that as "no
+            # body from the direct path" rather than as a result, so the
+            # fallbacks below still get their turn - this is exactly the
+            # ft.com case, which returns HTTP 200 and an offer.
+            text = None
+    if text:
+        return text
+    if not impersonate_fallback:
         return None
-    with _EXTRACT_LOCK:
-        return trafilatura.extract(downloaded)
+    return _fetch_body_impersonated(url) or _fetch_body_from_archive(url)
 
 
 def _extract_body(entry: Any, url: str, no_fetch: bool) -> str | None:
@@ -333,7 +784,9 @@ def _parse_serpapi_date(date_str: str) -> datetime | None:
         return None
 
 
-def _fetch_one_serpapi(source: dict, days_back: int, api_key: str) -> list[dict]:
+def _fetch_one_serpapi(
+    source: dict, days_back: int, api_key: str, domain_slug: str = "",
+) -> list[dict]:
     """Fetch Google News results for a SerpAPI source.
 
     If ``config`` contains a ``queries`` list, all queries are fetched in
@@ -396,9 +849,15 @@ def _fetch_one_serpapi(source: dict, days_back: int, api_key: str) -> list[dict]
                     candidates.append(a)
 
     def _fetch_body_if_url(url: str) -> str | None:
-        if not url:
+        # Same body-fetch allowlist the GDELT path applies, for the same
+        # reason - a SerpAPI result from a domain the consumer drops at
+        # Stage A is not worth a Trafilatura fetch. The article is still
+        # stored; only the body is skipped.
+        if not url or not _should_fetch_body(url, domain_slug):
             return None
-        return _fetch_body(url)
+        return _fetch_body(
+            url, impersonate_fallback=_impersonate_for(domain_slug),
+        )
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         bodies = list(executor.map(_fetch_body_if_url, [a["url"] for a in candidates]))
@@ -417,6 +876,7 @@ def _fetch_serpapi(
     sources: list[dict],
     days_back: int,
     api_key: str,
+    domain_slug: str = "",
 ) -> list[dict]:
     """Fetch Google News articles from SerpAPI for multiple queries in parallel.
 
@@ -432,7 +892,10 @@ def _fetch_serpapi(
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=5) as executor:
         for source_articles in executor.map(
-            partial(_fetch_one_serpapi, days_back=days_back, api_key=api_key),
+            partial(
+                _fetch_one_serpapi, days_back=days_back, api_key=api_key,
+                domain_slug=domain_slug,
+            ),
             sources,
         ):
             articles.extend(source_articles)
@@ -883,6 +1346,118 @@ def _fetch_alpha_vantage(
 _FEDERAL_REGISTER_URL = "https://www.federalregister.gov/api/v1/documents.json"
 _FEDERAL_REGISTER_PAGE_SIZE = 100
 
+# The documents.json list response carries only 10 fields by default, none of
+# them the document text - `abstract` is the longest thing in it. Asking for
+# these explicitly is what makes the full text reachable at all; `fields[]`
+# REPLACES the default set rather than adding to it, so every field this
+# fetcher reads has to be named here, including the ones the default response
+# would have given for free.
+_FEDERAL_REGISTER_FIELDS = [
+    "title",
+    "html_url",
+    "publication_date",
+    "abstract",
+    "type",
+    "document_number",
+    "agencies",
+    "executive_order_number",
+    "raw_text_url",
+]
+
+# Measured over the 14 real stored documents: the abstract carries 1.5-20% of
+# the document where it exists at all, and is EMPTY on 5 of 14 - including
+# both Presidential Documents, which is the category Stage A's own Federal
+# Register rule exists to catch (a proclamation restricting polysilicon
+# imports has no abstract, so the row reached the classifier as a bare title).
+# raw_text_url returned HTTP 200 on all 14, so the body is fetched from there
+# rather than left to the abstract.
+#
+# NOT trafilatura, unlike every other body-fetch call site in this file: the
+# response is already plain text inside a single <pre> block, so there is no
+# article to extract from a page of navigation and boilerplate. That also
+# keeps this path off _EXTRACT_LOCK - see that constant's comment for the
+# segfaults concurrent extract() caused on this very domain's 02:00 run.
+_FEDERAL_REGISTER_BODY_MAX_CHARS = 20000
+
+# The GPO text wraps the document in a minimal HTML shell and prefixes it with
+# a citation block (volume/issue/page/FR Doc No) that repeats what metadata
+# already carries. Stripped because downstream truncates to 2,000 chars -
+# boilerplate eats that budget before the measure itself is reached.
+_FR_TEXT_LEAD_RE = re.compile(
+    r"^.*?\[FR Doc No:\s*[^\]]+\]\s*", re.DOTALL,
+)
+
+# Presidential Documents carry a SECOND lead after the citation block - the
+# issue masthead the proclamation is printed under ("[[Page 58569]] Vol. 91
+# Tuesday, No. 177 September 15, 2026 Part II The President"), which the
+# citation regex above leaves behind because it sits after the [FR Doc No:]
+# marker rather than before it. Confirmed live on 13 of 45 real documents;
+# every one of those is a Presidential Document, and they are precisely the
+# documents with NO abstract, so the body is the only text they have.
+#
+# Anchored on the page marker and cut at "The President" rather than matched
+# as a whole: the volume/issue/date wording between the two varies per issue,
+# and a looser pattern risks eating the proclamation's own opening line.
+_FR_TEXT_MASTHEAD_RE = re.compile(
+    r"^\s*\[\[Page\s+\w+\]\]\s*Vol\.\s*\d+.{0,120}?\bThe President\b\s*",
+    re.DOTALL,
+)
+
+
+def _fetch_federal_register_body(raw_text_url: str) -> str | None:
+    """Return the document's full text, or None when it cannot be read.
+
+    None, never "" - a null reads as "not fetched", an empty string would read
+    as "this document says nothing", and the two must not be conflated (same
+    rule the China and Japan sources follow for unreadable PDFs).
+    """
+    # Paced through the same per-host throttle the RSS body fetches use.
+    # This loop had none: it fired one request per document back to back,
+    # and federalregister.gov answered with a 302 to its access-request
+    # interstitial on every full-text URL once the burst was large
+    # enough. Production fetches --days-back 1 daily (9 documents on a
+    # real day, 23 over 7), so the unpaced version would probably have
+    # stayed under the threshold - but "probably" is not a guarantee for
+    # a loop whose failure mode is silent, and at the 1.0s default the
+    # whole cost is 9 seconds on a once-daily job.
+    _throttle_domain(raw_text_url)
+    try:
+        resp = httpx.get(raw_text_url, timeout=30.0, follow_redirects=True)
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.warning(
+            "[FEDERAL_REGISTER] body fetch failed url=%r: %s", raw_text_url, exc,
+        )
+        return None
+
+    # These URLs serve plain text. A redirect to the access-request
+    # interstitial (unblock.federalregister.gov) or any HTML response is
+    # the site rate-limiting this IP, not the document - confirmed live:
+    # every full-text URL returned 302 -> "Federal Register :: Request
+    # Access" after a burst of fetches, on every user agent, while the
+    # JSON API kept answering 200. Without this the HTML would be
+    # tag-stripped and stored as the document's body, which is worse
+    # than storing nothing: a boilerplate "request access" page is
+    # indistinguishable downstream from a real notice that says little.
+    final_host = resp.url.host or ""
+    content_type = resp.headers.get("content-type", "")
+    if "unblock" in final_host or "html" in content_type.lower():
+        logger.warning(
+            "[FEDERAL_REGISTER] body fetch blocked (redirected to %s, "
+            "content-type %r) url=%r - storing no body rather than the "
+            "block page", final_host, content_type, raw_text_url,
+        )
+        return None
+    text = _clean_summary(resp.text)
+    if not text:
+        return None
+    # Each strip falls back to its own input rather than to "" - a document
+    # whose lead does not match the expected shape keeps its full text, which
+    # is the safe direction: a little boilerplate beats a blanked body.
+    text = _FR_TEXT_LEAD_RE.sub("", text) or text
+    text = _FR_TEXT_MASTHEAD_RE.sub("", text) or text
+    return text[:_FEDERAL_REGISTER_BODY_MAX_CHARS] or None
+
 
 def _fetch_one_federal_register(source: dict, days_back: int) -> list[dict]:
     """Fetch Federal Register documents for a single source's agency/type filter.
@@ -906,6 +1481,7 @@ def _fetch_one_federal_register(source: dict, days_back: int) -> list[dict]:
         "per_page": _FEDERAL_REGISTER_PAGE_SIZE,
         "order": "newest",
         "conditions[publication_date][gte]": cutoff.strftime("%Y-%m-%d"),
+        "fields[]": _FEDERAL_REGISTER_FIELDS,
     }
     if agencies:
         params["conditions[agencies][]"] = agencies
@@ -937,19 +1513,28 @@ def _fetch_one_federal_register(source: dict, days_back: int) -> list[dict]:
             if pub_date and pub_date < cutoff:
                 continue
             agency_names = [a.get("name", "") for a in doc.get("agencies", [])]
+            # Both fields are stored, and they are not the same thing: the
+            # abstract is the filing desk's own lead (often absent), the body
+            # is the document. Never a slice of the other - this service keeps
+            # summary a real lead or NULL everywhere else too.
+            raw_text_url = doc.get("raw_text_url")
             results.append({
                 "title": doc.get("title", ""),
                 "url": doc.get("html_url", ""),
                 "published": doc.get("publication_date", ""),
                 "source": ", ".join(filter(None, agency_names)) or "Federal Register",
                 "summary": _clean_summary(doc.get("abstract") or ""),
-                "body": None,
+                "body": (
+                    _fetch_federal_register_body(raw_text_url)
+                    if raw_text_url else None
+                ),
                 "_pub_date": pub_date,
                 "metadata": {
                     "type": doc.get("type"),
                     "document_number": doc.get("document_number"),
                     "agencies": agency_names,
                     "executive_order_number": doc.get("executive_order_number"),
+                    "raw_text_url": raw_text_url,
                 },
             })
 
@@ -2200,7 +2785,28 @@ def _fetch_gdelt(sources: list[dict], days_back: int, domain_slug: str = "") -> 
         )
 
     with ThreadPoolExecutor(max_workers=10) as executor:
-        bodies = list(executor.map(_fetch_body, [a["url"] for a in articles]))
+        # Only articles whose source domain can ever become a signal get
+        # a body fetch - see _BODY_FETCH_DOMAINS. The row is still
+        # stored either way; this skips the expensive part, not the
+        # article.
+        body_urls = [
+            a["url"] if _should_fetch_body(a["url"], domain_slug) else None
+            for a in articles
+        ]
+        skipped = sum(1 for u in body_urls if u is None)
+        bodies = list(executor.map(
+            partial(
+                _fetch_body_or_none,
+                impersonate_fallback=_impersonate_for(domain_slug),
+            ),
+            body_urls,
+        ))
+    if skipped:
+        logger.info(
+            "[GDELT] body fetch skipped for %d/%d article(s) whose domain is"
+            " not body-fetch allowlisted for %s",
+            skipped, len(articles), domain_slug or "(unset)",
+        )
     for article, body in zip(articles, bodies):
         article["body"] = body
 
@@ -8172,7 +8778,9 @@ def _fetch_articles(
 
     if serpapi_sources:
         if serpapi_key:
-            articles.extend(_fetch_serpapi(serpapi_sources, days_back, serpapi_key))
+            articles.extend(
+                _fetch_serpapi(serpapi_sources, days_back, serpapi_key, domain_slug)
+            )
         else:
             logger.warning(
                 "SERPAPI_KEY not set - skipping %d serpapi source(s)",

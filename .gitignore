@@ -35,6 +35,14 @@ reports/
 signal-detection-agent/TECHNICAL.md
 signal-detection-agent/DECK.md
 signal-detection-agent/DOMAIN_OUTPUT_SCHEMAS.md
+signal-detection-agent/CHINA_SIGNALS.md
+signal-detection-agent/GEOPOLITICAL_SIGNALS.md
+signal-detection-agent/GEOPOLITICAL_SIGNALS_API.md
+signal-detection-agent/TAIWAN_API.md
+signal-detection-agent/TAIWAN_SIGNALS.md
+signal-detection-agent/TAIWAN_SIGNALS_API.md
+signal-detection-agent/CHINA_SIGNALS_API.md
+
 news-retrieval/SUBSTACK_SOURCES.md
 SENTIMENT_PROVIDERS.md
 SENTIMENT_PROVIDERS_SUMMARY.md

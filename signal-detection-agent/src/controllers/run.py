@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -20,10 +21,7 @@ from adapters.news_client import (
     trigger_run,
     fetch_china_revenue_history,
 )
-from models.geopolitical_signal_companies import (
-    get_companies_for_name_matching,
-    get_tickers_for_categories,
-)
+from models.geopolitical_signal_companies import get_companies_for_name_matching
 from models.jobs import (
     count_geopolitical_signal_stage_b_calls_today,
     count_geopolitical_signal_stage_c_calls_today,
@@ -1532,6 +1530,23 @@ def generate_korea_signal_summary_for_date(date: str) -> str:
     return generate_korea_signal_summary(ordered_rows)
 
 
+def _json_list(value: Any) -> list[Any]:
+    """Return a list from a column that may hold JSON text, a parsed
+    list, or nothing. entities_json is a TEXT column holding JSON, so a
+    driver may hand back either the string or an already-parsed value
+    depending on the query; both shapes are read the same way here.
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
 async def run_geopolitical_signal_stage_a(job_id: int, from_date: str, to_date: str) -> None:
     """Stage A only: pool all of news-retrieval's completed geopolitical_news
     runs in [from_date, to_date], apply the free rule-based filters, persist.
@@ -1579,7 +1594,12 @@ async def run_geopolitical_signal_stage_a(job_id: int, from_date: str, to_date: 
 
     update_job_status(job_id, "running", article_count=len(to_classify))
 
-    outcome_counts: dict[str, int] = {"DROPPED": 0, "WEAK": 0, "WAITING": 0}
+    # "signal" included: Stage A's Federal Register rule promotes an
+    # action notice straight past Stage B, and leaving it out of this
+    # dict kept those rows out of the log line entirely.
+    outcome_counts: dict[str, int] = {
+        "noise": 0, "weak_signal": 0, "waiting": 0, "signal": 0,
+    }
     inserted = 0
     for article in to_classify:
         result = classify_geopolitical_signal_stage_a(article)
@@ -1596,10 +1616,12 @@ async def run_geopolitical_signal_stage_a(job_id: int, from_date: str, to_date: 
 
     logger.info(
         "[GEOPOLITICAL_SIGNAL_STAGE_A] job=%d runs=%d pooled_articles=%d"
-        " already_done=%d classified=%d inserted=%d dropped=%d weak=%d waiting=%d",
+        " already_done=%d classified=%d inserted=%d noise=%d weak_signal=%d"
+        " waiting=%d signal=%d",
         job_id, len(run_ids), len(all_articles), len(already_done),
-        len(to_classify), inserted, outcome_counts["DROPPED"],
-        outcome_counts["WEAK"], outcome_counts["WAITING"],
+        len(to_classify), inserted, outcome_counts["noise"],
+        outcome_counts["weak_signal"], outcome_counts["waiting"],
+        outcome_counts["signal"],
     )
     update_job_status(job_id, "completed", article_count=inserted, set_completed_at=True)
 
@@ -1610,9 +1632,28 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
     classified concurrently (bounded by CLASSIFY_CONCURRENCY, the same
     thread pool the news domain and Stage C share), not one at a time.
 
-    No fetch from news-retrieval here - Stage B's entire input is already
-    sitting in agent_classifications from Stage A (get_waiting_geopolitical_
-    signal_articles), so this never re-reads news-retrieval at all.
+    No fetch from news-retrieval here - Stage B's entire input is
+    already sitting in agent_classifications from Stage A
+    (get_waiting_geopolitical_signal_articles), including the source
+    summary and, where there was none, an excerpt of the body
+    news-retrieval had already sent with the article. One response
+    Stage A was given, rather than one HTTP round trip per waiting row.
+
+    Context was added after measuring what this stage actually sees:
+    of 13 rows in one real run, 11 had NO context beyond the headline -
+    including "China Moves to Stave Off Wider EU Trade War With Hybrid
+    ...", truncated mid-phrase, which was judged WEAK without the model
+    ever learning what the measure was or whether it had been enacted.
+    This is the stage whose verdict is IRREVERSIBLE: WEAK means Stage C
+    never runs, so no body is ever read for that row and nothing
+    downstream can recover the signal. Giving the cheapest call the
+    least evidence, while the stage that only adds tags reads 24,000
+    characters, had the context budget backwards.
+
+    Still one word out (max_tokens stays 5) - only the INPUT grows.
+    Summary generation deliberately stays in Stage C: 13 rows reach here
+    and 3 reach there, so generating summaries at this stage would
+    produce ~11 that are discarded with the WEAK rows that carried them.
 
     Daily cap (config.GEOPOLITICAL_SIGNAL_STAGE_B_DAILY_CAP, default 1000)
     is a safety tripwire against a bug flooding the worklist, not a cost
@@ -1650,10 +1691,38 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
     async def classify_one(row: dict[str, Any]) -> str | None:
         """Classify + persist one row; returns its outcome, or None on failure."""
         async with semaphore:
-            outcome = await loop.run_in_executor(
+            # Both come from the row Stage A already wrote - no fetch
+            # here. news-retrieval sends the body with the article
+            # (get_run_articles passes include_body=true), so Stage A
+            # stores an excerpt alongside the summary and this stage
+            # reads both from its own table. The source's own summary
+            # is preferred where it exists; the excerpt covers the rest.
+            summary = row.get("summary")
+            # BOTH, where both exist - not the summary instead of the
+            # body. A filed abstract states what a measure is called;
+            # the document states what it covers. Rows 42115/42117 are
+            # the case: a 216-character agency abstract over a
+            # 3,673-character determination naming the automotive and
+            # rail sectors, and Stage B saw only the abstract while
+            # Stage C read the whole thing. Stage B makes the
+            # irreversible call, so it gets at least as much evidence as
+            # the stage that merely tags.
+            body = row.get("body_excerpt")
+            # Recorded so a WEAK verdict reached without any text is
+            # distinguishable from one reached by reading the article.
+            # Stage B is irreversible - a WEAK row never reaches Stage C
+            # - so a headline-only rejection is the one failure nothing
+            # downstream can revisit. The EU-China trade item was
+            # rejected this way: bloomberg.com serves no body to any
+            # fetch strategy, so the model saw a truncated title and
+            # nothing else.
+            headline_only = not summary and not body
+            outcome, reason = await loop.run_in_executor(
                 _executor,
                 lambda: classify_geopolitical_signal_headline(
                     row["title"] or "",
+                    summary=summary,
+                    body=body,
                     system_prompt=system_prompt,
                     model=model,
                     api_key=api_key,
@@ -1662,7 +1731,10 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
                 ),
             )
             try:
-                update_geopolitical_signal_classification(row["id"], outcome=outcome)
+                update_geopolitical_signal_classification(
+                    row["id"], outcome=outcome, reason=reason,
+                    headline_only=headline_only,
+                )
                 return outcome
             except Exception:
                 logger.exception(
@@ -1673,7 +1745,7 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
                 return None
 
     outcomes = await asyncio.gather(*[classify_one(row) for row in to_classify])
-    outcome_counts: dict[str, int] = {"HIGH": 0, "WEAK": 0}
+    outcome_counts: dict[str, int] = {"signal": 0, "weak_signal": 0, "noise": 0}
     updated = 0
     for outcome in outcomes:
         if outcome is not None:
@@ -1682,21 +1754,24 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
 
     logger.info(
         "[GEOPOLITICAL_SIGNAL_STAGE_B] job=%d waiting=%d already_today=%d"
-        " capped=%d classified=%d updated=%d high=%d weak=%d",
+        " capped=%d classified=%d updated=%d signal=%d weak_signal=%d noise=%d",
         job_id, len(waiting), already_today, capped, len(to_classify),
-        updated, outcome_counts["HIGH"], outcome_counts["WEAK"],
+        updated, outcome_counts["signal"], outcome_counts["weak_signal"],
+        outcome_counts["noise"],
     )
     update_job_status(job_id, "completed", article_count=updated, set_completed_at=True)
 
 
 async def run_geopolitical_signal_stage_c(job_id: int) -> None:
-    """Stage C: tag every untagged HIGH article - channel, actors, assets,
-    impacted_categories, one_line, impacted_companies_direct.
+    """Stage C: tag every untagged HIGH article - channel, assets,
+    impacted_categories, entities, event_date, summary.
 
     Flow per article, matching the locked Stage C plan:
       GET /articles/{id} (body, best-effort) -> Layer 1 (free) -> Layer 2
-      (1 model call) -> deterministic overrides (free) -> Layer 3 (free,
-      cache read) -> update in place.
+      (1 model call) -> deterministic overrides (free) -> update in place.
+    Layer 3 (category -> every ticker in that sector) was removed: the
+    tickers a reader can be shown are the ones the article names, which
+    Layer 2 returns in `entities`.
     Rows are classified concurrently (bounded by CLASSIFY_CONCURRENCY,
     same pool as Stage B and the news domain), not one at a time - each
     row's flow above runs as a single unit in the shared thread pool.
@@ -1740,17 +1815,26 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
     base_url = config.OPENAI_BASE_URL
     timeout = config.OPENAI_TIMEOUT
 
-    # Runs each row's whole Layer1->Layer2->overrides->Layer3->DB-write body
-    # as one executor job, not split across separate awaits - Layer 3's
-    # get_tickers_for_categories is a blocking DB call, so splitting it out
-    # into its own run_in_executor would still block the event loop for
-    # nothing (no other awaitable work happens between it and the model
-    # call). Reuses the same _executor/CLASSIFY_CONCURRENCY pool Stage B
-    # and the news domain already share.
-    def _tag_one_sync(row: dict[str, Any], body: str | None) -> dict[str, Any] | None:
+    # Runs each row's whole Layer1->Layer2->overrides->DB-write body as
+    # one executor job, not split across separate awaits - Layer 1's
+    # name matching and the DB write are blocking calls, so splitting
+    # them into their own run_in_executor would still block the event
+    # loop for nothing (no other awaitable work happens between them and
+    # the model call). Reuses the same _executor/CLASSIFY_CONCURRENCY
+    # pool Stage B and the news domain already share.
+    def _tag_one_sync(
+        row: dict[str, Any], body: str | None, summary: str | None = None,
+    ) -> dict[str, Any] | None:
         title = row["title"] or ""
 
-        # Layer 1 - free, always kept regardless of what Layer 2 returns.
+        # Layer 1 - free exact match of tracked company names against the
+        # headline. Kept as a cheap cross-check and as Stage D's
+        # "specific" input, but it is no longer stored as a field of its
+        # own: metadata.impacted_companies_direct was null on every
+        # geopolitical row ever written, because these headlines name
+        # countries and institutions ("UK", "Iran", "EU", "OFAC") and
+        # the companies appear in the body. What the article names now
+        # comes from Layer 2's entities, which reads both.
         direct_matches = find_direct_company_matches(title, companies)
 
         # Layer 2 - one model call; fail-open on any parse/shape failure.
@@ -1761,6 +1845,10 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
         layer2_result = classify_geopolitical_signal_tags(
             title,
             body=body,
+            # So the summary can distinguish when a measure was taken
+            # from when it surfaced - a Federal Register notice often
+            # publishes a determination issued months earlier.
+            published=str(row.get("published") or "")[:10] or None,
             system_prompt=system_prompt,
             model=model,
             api_key=api_key,
@@ -1771,36 +1859,129 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
         # Deterministic overrides - only ever add categories.
         final_categories = apply_overrides(
             channel=layer2_result["channel"],
-            actors=layer2_result["actors"],
+            entities=layer2_result["entities"],
             assets=layer2_result["assets"],
             impacted_categories=layer2_result["impacted_categories"],
         )
 
-        # Layer 3 - free cache lookup, only for the categories actually
-        # chosen. Already [{ticker, company_name, matched_categories}] -
-        # one entry per ticker, not per ticker-category pair (see
-        # get_tickers_for_categories' docstring). Capped per article;
-        # total_matched is the uncapped count so a reader sees "25 of 58"
-        # rather than a truncated list presented as the whole answer.
-        category_matches, total_matched = get_tickers_for_categories(final_categories)
+        # Layer 3 (category -> every ticker in that category) was
+        # REMOVED. It expanded each matched category into the whole
+        # research-universe membership of that sector, which is a
+        # directory, not evidence: a UK airbase story naming no company
+        # at all carried 11 tickers, an EU sanctions row carried 25 of
+        # 123, and not one of them could be explained in terms of what
+        # the article said. The rule this field could never satisfy -
+        # show a few tickers, each with the reason it is there, and show
+        # none you cannot explain - is satisfied by entities_json, which
+        # carries only companies the article itself names, each with its
+        # ticker where one exists and the text's own claim about it.
+        #
+        # models/geopolitical_signal_companies.py and the category map
+        # it caches are NOT removed: Layer 1 above still matches tracked
+        # company names against the headline to feed `has_path` and
+        # Stage D's `specific` grade.
 
         tags = {
+            # The date the measure was taken, where the text states one.
+            # Distinct from the row's `published`, which for a Federal
+            # Register notice is the date it appeared in the Register,
+            # not the date the determination was issued.
+            "event_date": layer2_result["event_date"],
             "channel": layer2_result["channel"],
-            "actors": layer2_result["actors"],
             "assets": layer2_result["assets"],
             "impacted_categories": final_categories or None,
-            "impacted_companies_direct": direct_matches or None,
-            "impacted_companies_by_category": category_matches or None,
-            # Stored only when the list was actually cut - a row whose
-            # full expansion already fit carries no key, so "truncated"
-            # never has to be read as "0 hidden".
-            "impacted_companies_by_category_total": (
-                total_matched if total_matched > len(category_matches) else None
+            # The source's own filed summary wins over a generated one.
+            #
+            # Federal Register documents carry an `abstract` the issuing
+            # agency wrote and filed with the document itself - the
+            # authoritative statement of what the measure does. Anything
+            # the model writes from the same text is at best a faithful
+            # paraphrase and at worst drifts on a number, which on a legal
+            # record is the whole signal ("imposes 25%" vs "30%").
+            #
+            # Measured over 154 real documents: 113 carry an abstract, 41
+            # do not - and every one of those 41 is a Presidential
+            # Document, which is exactly the category Stage A's own
+            # Federal Register rule exists to catch. Those are the rows
+            # that need a generated summary, and they now have a real body
+            # to generate it FROM (news-retrieval fetches raw_text_url),
+            # rather than a bare bureaucratic title.
+            #
+            # `summary_source` records which path produced it, so a reader
+            # can tell a filed abstract from a model's reading of the
+            # document rather than having to trust them equally.
+            # A summary written from the document beats the one filed
+            # with it. The filed abstract is written for a filing desk,
+            # not a reader: Venezuela GL 60's own abstract says OFAC "is
+            # publishing a general license... previously made available
+            # on OFAC's website" and never mentions that the licence
+            # authorises earthquake-relief transactions or that it
+            # expires 23 October 2026 - both of which are in the body.
+            # So the generated summary wins wherever a body existed to
+            # write it from, and the filed text is the fallback for rows
+            # that had none.
+            "summary": layer2_result["generated_summary"] or summary,
+            "summary_source": (
+                "generated" if layer2_result["generated_summary"]
+                else ("source" if summary else None)
             ),
-            "one_line": layer2_result["one_line"],
         }
+        # Layer 2 returning all-null (network error, unparseable JSON)
+        # means the question was never asked. "We could not check" must
+        # not be recorded as "we checked and found nothing" - the same
+        # distinction Stage A's drop_reason keeps - so such a row gets
+        # no coverage value at all, rather than one asserting a finding.
+        tagging_failed = (
+            layer2_result["channel"] is None
+            and layer2_result["impacted_categories"] is None
+            and layer2_result["generated_summary"] is None
+        )
+        # Reaching no AI-economy category is RECORDED, never acted on.
+        # Stage B already answered the question that decides a signal -
+        # did a real action occur - and it answers it without any notion
+        # of this universe. Letting Stage C overturn that on coverage
+        # grounds confuses two different things: whether an event is
+        # real, and whether we currently map it to companies.
+        #
+        # The OFAC determination applying sanctions to Iran's automotive
+        # and rail sectors is the case that showed it. A genuine
+        # expansion of a sanctions programme, correctly identified, and
+        # it vanished from the feed because no company in a 19-category
+        # AI taxonomy sits in Iranian rail. The event did not stop being
+        # a sanctions action; our coverage of it is what is missing, and
+        # that is a fact about us, not about the news.
+        #
+        # So the row stays `signal` and carries `coverage` instead.
+        # Ticker mapping is unaffected - an unmapped row simply has no
+        # tickers, which is already how it reads.
+        # Layer 1's direct name match is its own evidence of a path: the
+        # headline names a company in the tracked universe, whatever the
+        # model concluded about sectors.
+        has_path = bool(final_categories) or bool(direct_matches)
+        if not has_path and not tagging_failed:
+            # Two different reasons to have no category, kept apart
+            # because they call for opposite handling. "unreadable"
+            # means the publisher gave us nothing to read - reuters.com
+            # answers 401 to every fetch strategy tried, including the
+            # Internet Archive's own crawler, and ft.com serves a page
+            # whose HTML does not contain the article's words - so the
+            # row is worth re-reading if that ever changes.
+            # "outside_coverage" means we read the document and the
+            # sectors it names are genuinely not in this universe; there
+            # is nothing to re-read.
+            #
+            # The mapped case writes nothing: impacted_categories
+            # already says so, and a "coverage": "mapped" on every
+            # signal would be a second field repeating the first.
+            tags["coverage"] = (
+                "unreadable" if (not body and not summary)
+                else "outside_coverage"
+            )
+
         try:
-            update_geopolitical_signal_stage_c_tags(row["id"], tags=tags)
+            update_geopolitical_signal_stage_c_tags(
+                row["id"], tags=tags, entities=layer2_result["entities"],
+            )
             return tags
         except Exception:
             logger.exception(
@@ -1823,7 +2004,17 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
             # headline-only rather than failing the row.
             article = await get_article(row["article_id"])
             body = (article.get("body") or None) if article else None
-            return await loop.run_in_executor(_executor, _tag_one_sync, row, body)
+            # The source's OWN summary, where the fetcher stored one.
+            # Federal Register rows carry the document's filed abstract
+            # here (news-retrieval maps the API's `abstract` field to
+            # `summary`); a generated summary can only ever paraphrase
+            # that, so it is preferred verbatim - see _tag_one_sync's
+            # summary/summary_source resolution. Free to read: the
+            # get_article call above is already made for `body`.
+            summary = (article.get("summary") or None) if article else None
+            return await loop.run_in_executor(
+                _executor, _tag_one_sync, row, body, summary,
+            )
 
     results = await asyncio.gather(*[tag_one(row) for row in to_classify])
     updated = sum(1 for r in results if r is not None)
@@ -1842,12 +2033,11 @@ async def run_geopolitical_signal_stage_d(job_id: int) -> None:
     stage_d.py's module docstring for the exact rules).
 
     No model call, no daily cap (unlike Stage B/C - there's no external
-    API cost here to tripwire against). One news-retrieval call per
-    article (GET /articles/{id}) to read metadata.also_reported_by, which
-    only ever lives on the source article, never copied into this
-    service's own rows. Fetches run concurrently (bounded by
-    CLASSIFY_CONCURRENCY) via asyncio.gather - no thread pool needed since
-    get_article is already async and grading itself does no I/O.
+    API cost here to tripwire against), and no news-retrieval call: every
+    input comes from the row Stage A wrote, including
+    metadata.also_reported_by, which arrives with the article and is
+    stored alongside it. This stage used to fetch each article again just
+    to read that one list; nothing else in the response was used.
     """
     update_job_status(job_id, "running")
 
@@ -1866,16 +2056,25 @@ async def run_geopolitical_signal_stage_d(job_id: int) -> None:
 
     async def grade_one(row: dict[str, Any]) -> bool:
         async with semaphore:
-            article = await get_article(row["article_id"])
-            also_reported_by = (
-                (article.get("metadata") or {}).get("also_reported_by") if article else None
-            )
+            # From the row Stage A wrote - no fetch. also_reported_by
+            # arrives with the article (news-retrieval's own dedup
+            # records it in metadata), so re-reading the whole article
+            # per row to extract this one list was a round trip for
+            # data the service already held.
+            also_reported_by = row.get("also_reported_by")
 
             grade_fields = grade_geopolitical_signal_article(
                 url=row["url"],
                 title=row["title"],
                 also_reported_by=also_reported_by,
-                impacted_companies_direct=row.get("impacted_companies_direct"),
+                # "specific" asks whether the item is about something
+                # concrete. A named company is the clearest evidence of
+                # that, and the entities Stage C extracted from the
+                # headline AND body are a far better source for it than
+                # the headline-only match this read before - which was
+                # null on every geopolitical row, making the check
+                # effectively digit-only.
+                named_entities=_json_list(row.get("entities_json")),
             )
 
             try:

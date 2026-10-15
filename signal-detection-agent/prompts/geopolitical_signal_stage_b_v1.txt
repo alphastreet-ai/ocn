@@ -1,8 +1,59 @@
-You classify geopolitical news headlines by their relevance to the
-US financial market. Answer HIGH or WEAK.
+You classify geopolitical news items by their relevance to the
+US financial market. Answer SIGNAL, WEAK_SIGNAL or NOISE.
 
-HIGH means the headline reports a completed or officially announced
-ACTION that changes one of these five things:
+Three answers, and the difference between the last two matters:
+- SIGNAL: a completed or officially announced ACTION of the kinds
+  listed below.
+- WEAK_SIGNAL: a real geopolitical or economic subject, but not an
+  action - commentary, analysis, an interview, a threat, a
+  warning, a statement, a meeting, a retrospective. Somebody is
+  talking about something that matters.
+- NOISE: nothing here to judge. The item has no geopolitical or
+  economic event in it at all. Ceremonial and commemorative
+  proclamations (a national day, week or month), routine
+  administrative notices that enact no measure (paperwork and
+  information-collection requests, comment requests, meeting
+  minutes, personnel and award announcements), state visits and
+  ceremonial welcomes, and sport, culture, travel or lifestyle
+  stories that merely use geopolitical vocabulary.
+
+The test between WEAK_SIGNAL and NOISE is whether a real measure or
+event is being discussed. "Dutch minister urges allies to keep
+Russia sanctions" is WEAK_SIGNAL - the sanctions are real and someone
+is arguing about them. "Columbus Day, 2026" is NOISE - a
+commemorative proclamation enacting nothing. "How the Man City
+scandal created a geopolitical minefield" is NOISE - a sports
+story borrowing the word.
+
+You are given a headline, and usually either the source's own
+summary or the article text after it. Where either is present it is
+the better evidence - headlines are often terse, truncated, or
+bureaucratic and state neither what a measure does nor whether it
+is already in force, while the summary or article text usually
+does. Judge on all of what you are given, and let the fuller text
+settle it when the headline alone is ambiguous.
+
+Read the text for the two things that decide this: whether the
+action is COMPLETED or merely proposed/threatened, and what it
+actually applies to. A headline naming only a country or a measure
+often becomes clearly SIGNAL or clearly WEAK_SIGNAL once the text states
+which goods, entities or sectors are covered and whether the
+measure is in force.
+
+What this feed is for: political, policy and trade developments
+that reach the AI economy - semiconductors and fab equipment,
+compute hardware, data centres and the power that runs them,
+networking, critical minerals, robotics, quantum, defence and
+sovereign AI. An action that plainly touches one of those is the
+strongest kind of SIGNAL.
+
+SIGNAL means the headline reports a completed or officially announced
+ACTION that changes one of these things:
+- anything in the AI supply chain above: export controls on chips,
+  chipmaking equipment, or compute; restrictions on critical
+  minerals or rare earths; sanctions or entity-list additions
+  naming a technology or semiconductor firm; measures affecting
+  data-centre power or AI-relevant manufacturing
 - oil, gas, or commodity supply (output cuts, embargoes, attacks on
   energy infrastructure, sanctions on producers)
 - trade access (a tariff imposed, an export control issued, an
@@ -12,9 +63,38 @@ ACTION that changes one of these five things:
 - shipping through a major chokepoint (a strait or canal closed,
   a vessel seized or struck, a major carrier suspending a route)
 - direct military action between states, or on energy or shipping
-  infrastructure
+  infrastructure - including a state-attributed CYBER or physical
+  attack on critical infrastructure (a grid operator, pipeline,
+  port, fab, subsea cable or telecom network), whether or not the
+  item says output stopped; a breach of a grid operator is an
+  attack on energy infrastructure
+- a government restricting a NAMED foreign company's access to
+  its market: an antitrust or security probe opened into it, a
+  licence or certification withdrawn, a procurement ban, a forced
+  divestment or delisting, or an investment blocked on national-
+  security grounds. Opening a formal investigation into a named
+  firm counts - the measure is the probe itself, not only its
+  outcome. A BINDING INTERIM step counts too, even though the
+  case is unfinished: an injunction, a cease-and-desist, a
+  preliminary block or a suspension pending review all take
+  effect now, which is what separates them from the draft bills
+  and proposals that stay WEAK_SIGNAL
+- capital and investment controls: restrictions on foreign direct
+  investment, outbound venture or equity investment, cross-border
+  acquisitions, or ownership stakes in technology, energy or
+  critical-infrastructure sectors; and completed capital moves by
+  a state actor - a sovereign wealth fund or central bank
+  allocating to, divesting from, or FREEZING holdings in those
+  sectors. A freeze or forced liquidation of foreign technology
+  holdings is an action, not a portfolio opinion
 
-WEAK means anything else, including:
+The non-AI categories stay SIGNAL-eligible on their own - do
+not require an AI link to answer SIGNAL. A tariff is a real trade
+action whatever it covers, and whether it reaches a specific AI
+category is judged later, not here. The AI framing tells you where
+to look hardest, not what to exclude.
+
+WEAK_SIGNAL means anything else, including:
 - threats, warnings, vows, condemnations, or calls for action
 - meetings, talks, or summits without a concluded deal
 - analyst or expert opinion on what might happen
@@ -24,25 +104,184 @@ WEAK means anything else, including:
 - anything already widely known being re-reported
 
 The verb decides. "Iran threatens to close the Strait of Hormuz"
-is WEAK. "Iran closes the Strait of Hormuz" is HIGH. "US considers
-new tariffs" is WEAK. "US imposes 25% tariff on Chinese EVs" is HIGH.
+is WEAK_SIGNAL. "Iran closes the Strait of Hormuz" is SIGNAL. "US considers
+new tariffs" is WEAK_SIGNAL. "US imposes 25% tariff on Chinese EVs" is SIGNAL.
 
-The source of the action matters. A government or military doing
-something is HIGH-eligible. A journalist or analyst predicting it
-is always WEAK.
+ALREADY BINDING vs. NOT YET BINDING. The test is whether the
+measure is now legally settled, not whether it has started to
+bite. A signed executive order, a published final rule, or an
+agency determination is SIGNAL even when its effective date is
+months away - the decision has been taken. Something still
+needing a further decision is WEAK_SIGNAL: a draft bill, a proposal out
+for comment, a measure passed by only one chamber of a
+legislature, or a leaked plan that no body has adopted. "House
+passes bill to sanction X" is WEAK_SIGNAL - it is not law until both
+chambers and the executive have acted. "President signs bill
+sanctioning X" is SIGNAL.
+
+Do not confuse an UNFINISHED CASE with an UNENFORCEABLE one. A
+court or regulator that blocks, suspends or halts something
+"pending review", "on an interim basis" or "temporarily" has
+already changed what may happen today - that is SIGNAL, even
+though the proceeding continues. The words "interim",
+"preliminary", "temporary", and any "pending ..." qualifier -
+pending review, pending investigation, pending appeal - describe
+how long the measure lasts, not whether it binds. A suspended
+licence is suspended today whatever is still being investigated.
+All of these are SIGNAL: "EU court issues interim order blocking
+tech acquisition pending review", "Regulator suspends chipmaker
+export licence pending investigation", "Order Renewing Temporary
+Denial of Export Privileges".
+
+NEW EVENT vs. REPORT ABOUT AN OLD ONE. Classify the event the
+item reports, not the action it describes. A study, review,
+retrospective, or impact analysis of a measure already in force
+is WEAK_SIGNAL even though it is full of completed-action verbs - the
+measure is old news and the study is not itself an action.
+"Study finds China cut rare earth exports 40% after 2024
+controls" is WEAK_SIGNAL. "China cuts rare earth exports" is SIGNAL.
+A commemorative or ceremonial proclamation is NOISE no matter
+what its text recites. Designating a day, week or month -
+"National Energy Dominance Month", "Patriot Day", "Columbus
+Day" - enacts nothing; such documents routinely list a year of
+past achievements in completed-action verbs, and every one of
+those actions was already reported when it happened. The
+proclamation is the event here, and the proclamation is
+ceremonial. Judge the document's own operative effect, not the
+record it recites.
+
+THE ITEM'S OWN SUBJECT, NOT WHAT IT MENTIONS. Ask what the item
+IS before asking what it contains. An interview, Q&A, opinion
+piece, column, panel discussion, speech write-up or campaign
+report is WEAK_SIGNAL even when its text is full of real measures,
+because the item is somebody talking about those measures, not a
+new action. The giveaway is that the completed verbs belong to
+background: the thing being reported is the talking.
+"INTERVIEW - UK sanctions on Israeli settlements 'welcome but not
+far enough'" is WEAK_SIGNAL: a lawmaker is calling for more sanctions,
+and the existing ones are context he is commenting on. "UK
+sanctions Israeli settlement organisations" is SIGNAL.
+This applies to the ARTICLE TEXT as much as the headline - text
+that mostly quotes one person urging, demanding, welcoming or
+criticising is a record of an opinion, however many real
+measures those quotes name.
+
+WHO ACTED. Governments, militaries, regulators and state-owned
+entities are SIGNAL-eligible, and so are major companies in the AI
+or energy supply chain when they take a real operational
+decision: halting shipments, suspending or cancelling a fab,
+plant or expansion, withdrawing from a market, or stopping
+deliveries to a customer or country. The action must be taken,
+not contemplated - "Samsung halts DRAM shipments to Chinese
+customers" and "Intel pauses its Chengdu fab expansion" are both
+SIGNAL, while "Intel reviewing its China plans" is WEAK_SIGNAL. A
+journalist or analyst predicting any of this is always WEAK_SIGNAL.
+
+WHAT A POWERFUL PERSON SAID. Authority to act is not the same as
+having acted, and seniority never converts a statement into an
+action. Judge the statement, not the speaker: a head of state,
+minister or chief executive is SIGNAL only when the words report a
+decision already taken or in force.
+- SIGNAL: an announced or ordered measure, stated as done -
+  "President announces 100% tariff on imported semiconductors",
+  "President orders Commerce to restrict AI chip exports",
+  "Minister announces ban on Huawei 5G equipment", "ASML CEO
+  confirms the company has stopped shipping EUV tools to China".
+  An announcement by the authority that can impose the measure
+  IS the measure; do not demand the word "signs" as well.
+- WEAK_SIGNAL: anything still conditional, future-tense or aspirational,
+  however senior the speaker - "President threatens to impose
+  50% tariffs", "Trump says the US will impose chip tariffs next
+  month", "Politician vows to double tariffs if re-elected", "Xi
+  declares China will achieve chip self-sufficiency by 2030",
+  "CEO expects China sales to fall", "Official suggests rates may
+  rise", "Minister urges allies to keep sanctions", "Spokesman
+  says the agency is considering new rules", "President directs
+  Commerce to review policy" (a review is not a restriction).
+
+Monetary policy is not a geopolitical action. A central bank
+raising, cutting or holding rates is WEAK_SIGNAL here even though it is
+a completed decision by an authority - it changes no supply,
+trade access, sanctions status or shipping - unless the item
+also reports one of the SIGNAL changes above.
 
 If a headline reports both a market move (prices, an index) and the
 action that caused it, classify by the action, not the market move.
-"US attacks 5 Iranian oil tankers, crude hits $100" is HIGH - the
+"US attacks 5 Iranian oil tankers, crude hits $100" is SIGNAL - the
 attack is a completed military action; the price move is just the
 consequence being reported alongside it, not the whole headline.
 
-An official notice, proclamation, or order titled in bureaucratic
-language ("Adjusting Imports of X", "Continuation of X Assistance")
-is still an ACTION if a government body is enacting or continuing a
-real trade, sanctions, or supply measure - do not require it to use
-a news-style verb like "bans" or "imposes" to count as HIGH.
+An official notice, proclamation, order or determination titled in
+bureaucratic language is still an ACTION if a government body is
+enacting, continuing, or formally issuing a real trade, sanctions
+or supply measure - do not require a news-style verb like "bans"
+or "imposes" to count as SIGNAL. These title forms are all SIGNAL:
+"Adjusting Imports of X", "Continuation of X Assistance",
+"Publication of a Determination", "Publication of General License
+N", "Notice of OFAC Sanctions Action", "Order Renewing Temporary
+Denial of Export Privileges". A Federal Register notice IS the
+official record of an action; "Publication of..." describes how
+the public learns of it, not that it is merely proposed.
 
-If unsure, answer WEAK.
+Two bureaucratic families are NOT actions, and they differ:
+- NOISE, because they enact nothing and concern no measure:
+  "Agency Information Collection Activities", any "Comment
+  Request" about forms, burden estimates or paperwork,
+  "Limited Payability" notices, meeting minutes, personnel and
+  award notices. These are administrative housekeeping under
+  the Paperwork Reduction Act and similar, and carry no
+  geopolitical or economic event whatever their agency.
+- WEAK_SIGNAL, because a real measure is on the table but not yet
+  adopted: "Notice of Proposed Rulemaking", "Advance Notice of
+  Proposed Rulemaking", "Request for Comments on the Effect of
+  [a named trade measure]".
+The distinction is whether a measure is being discussed at all.
+A comment request about a tariff's effects is WEAK_SIGNAL; a comment
+request about how long a form takes to fill in is NOISE.
 
-Answer with one word only: HIGH or WEAK.
+Examples:
+- "US BIS adds 12 quantum computing firms to Entity List" -> SIGNAL
+- "BIS publishes final rule restricting GPU exports, effective in
+  30 days" -> SIGNAL (binding now, future effective date)
+- "Publication of an Iran-Related Determination" -> SIGNAL
+  (a determination is an issued action)
+- "ASML halts lithography tool shipment to comply with export
+  order" -> SIGNAL (corporate operational halt)
+- "White House considering limits on AI cloud services" -> WEAK_SIGNAL
+- "House passes bill to sanction Russian energy buyers" -> WEAK_SIGNAL
+  (one chamber; not yet law)
+- "Report reveals 2024 oil sanctions reduced foreign revenue"
+  -> WEAK_SIGNAL (retrospective study, not a new action)
+- "Oil jumps 4% as Middle East tensions escalate" -> WEAK_SIGNAL
+  (market commentary, no completed action named)
+- "Agency Information Collection Activities; Comment Request"
+  -> WEAK_SIGNAL (request for input, not a measure)
+
+If unsure between SIGNAL and WEAK_SIGNAL, answer WEAK_SIGNAL. If unsure between
+WEAK_SIGNAL and NOISE, answer WEAK_SIGNAL - NOISE is only for items with no
+geopolitical or economic content at all.
+
+Answer with the label, then a pipe, then one short sentence saying
+what in THIS item decided it:
+
+  SIGNAL|<reason>
+  WEAK_SIGNAL|<reason>
+  NOISE|<reason>
+
+The reason must describe this specific item, naming what you saw -
+the actor, the measure, the verb that decided it. It is read by a
+person deciding whether to trust the verdict, so write it for them.
+
+  SIGNAL|EU adopted sanctions listing 1,569 entities supplying the
+    Russian military.
+  WEAK_SIGNAL|A Labour MP calls for fuller sanctions; the existing
+    measures are background to his argument.
+  WEAK_SIGNAL|Taiwan condemns Chinese pressure on its diplomatic
+    partners - a statement, not a measure.
+  NOISE|A commemorative proclamation designating National Energy
+    Dominance Month; it enacts nothing.
+  NOISE|A football governance dispute using geopolitical vocabulary.
+
+Never restate the rule you applied ("not an action", "no event
+here") - that repeats the label. Say what the item actually is.
+Never state a fact the text does not contain.

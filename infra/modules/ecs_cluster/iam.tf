@@ -108,7 +108,7 @@ resource "aws_iam_role" "github_actions" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:convergery-labs/ocn:ref:refs/heads/main"
+            "token.actions.githubusercontent.com:sub" = "repo:alphastreet-ai/ocn:ref:refs/heads/main"
           }
         }
       }

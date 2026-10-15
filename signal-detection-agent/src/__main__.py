@@ -689,7 +689,7 @@ def refresh_geopolitical_category_map() -> None:
 @cli.command("classify-geopolitical-signals-stage-c")
 def classify_geopolitical_signals_stage_c() -> None:
     """One-shot: tag every untagged HIGH geopolitical_signal row - channel,
-    actors, assets, impacted_categories, impacted companies, one_line.
+    actors, assets, impacted_categories, impacted companies, summary.
     No news-retrieval fetch - reads only from this service's own DB and
     its cached company data. Runs to completion and exits (not a server).
     """
