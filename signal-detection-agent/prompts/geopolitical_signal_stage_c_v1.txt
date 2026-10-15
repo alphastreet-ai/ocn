@@ -6,11 +6,30 @@ alone may omit - use it to identify the specific goods, sectors, or
 industries named. Return ONLY a JSON object with exactly these keys:
 
 "channel": one of "energy" | "trade" | "sanctions" | "shipping" | "conflict"
-"actors": array of country or institution names involved
-"assets": array of 1 to 3 exposures from this list only:
-  "crude_oil", "natural_gas", "gold", "usd", "treasuries",
-  "semis", "defense", "shipping_freight", "autos",
-  "agriculture", "broad_equities"
+"assets": which traded exposures the event moves. 1 to 3, from this
+  list ONLY - copy the name exactly as written, including the
+  underscore. These are the market exposures the event moves. The
+  specific goods the document names go in "entities" as type
+  "product"; this field is the sector read. A measure applied to
+  "the automotive and rail sectors" names no single good, but it
+  plainly moves "automotive" - answer here, not there.
+    "crude_oil"        oil prices, OPEC, refineries, pipelines
+    "natural_gas"      gas, LNG, gas pipelines
+    "gold"             gold and precious metals
+    "usd"              the dollar, FX, currency controls
+    "treasuries"       sovereign debt, rates, reserve holdings
+    "semiconductors"   chips, fabs, chipmaking tools, export
+                       controls on compute
+    "defense"          weapons, military procurement, defence budgets
+    "shipping_freight" shipping, ports, canals, tankers, freight rates
+    "automotive"       cars, EVs, auto parts, auto tariffs
+    "agriculture"      crops, fertiliser, food export restrictions
+    "broad_equities"   a market-wide move with no single sector
+  Return the ones the event actually moves. If it moves none of
+  them - a ceremonial proclamation, an administrative notice -
+  return an empty array. Do not invent a name outside this list:
+  anything else is discarded and the row then shows no exposure at
+  all.
 "impacted_categories": array of 0 to 3 category names, chosen ONLY
   from the category list below (use the exact name shown, including
   punctuation). Include a category only if the event plausibly
@@ -19,92 +38,405 @@ industries named. Return ONLY a JSON object with exactly these keys:
   it transmits. If the event is macro-only (moves oil or rates but
   no specific AI category more than the market), return an empty
   array.
+    READ THE WHOLE ARTICLE TEXT BEFORE DECIDING. The headline is
+    the least informative part of the item and is often
+    deliberately terse or bureaucratic ("Notice of OFAC Sanctions
+    Action", "Order Renewing Temporary Denial of Export
+    Privileges"). The goods, entities and sectors a measure
+    actually covers are usually named in the body, not the title.
+    Judging from the headline alone is the single most common way
+    this field goes wrong. Where article text is provided, it -
+    not the headline - is the authority.
     Decide in two steps, and keep them separate:
-    (1) Does the headline or article text NAME a specific good,
-        sector, or industry? A named sector is an explicit noun for
-        an industry or line of business - "banks", "airlines",
-        "nickel", "dairy", "shipping containers", "crypto
-        exchange", "semiconductors". Naming only a country, a
-        person, a company, or a measure ("sanctions", "tariffs",
-        "import bans", "export controls") is NOT naming a sector.
+    (1) Does the article text (or, failing that, the headline)
+        NAME a specific good, sector, industry, or a named entity
+        whose own line of business is stated? A named sector is an
+        explicit noun for an industry or line of business -
+        "banks", "airlines", "nickel", "dairy", "shipping
+        containers", "crypto exchange", "semiconductors". Naming
+        only a country, a person, or a measure ("sanctions",
+        "tariffs", "import bans", "export controls") with nothing
+        else is NOT naming a sector. But a measure applied to a
+        NAMED entity whose business the text states IS naming one -
+        "denial of export privileges to an airline operating
+        aircraft subject to the EAR" names aviation and export-
+        controlled goods, even though the title says neither.
     (2) If a sector IS named, map it to the closest category in the
         list below whenever that category plausibly transmits -
         even when the link to AI is indirect, and even when the
         story is not about technology. Do not withhold a category
         merely because the event feels unrelated to AI; step 1 has
-        already established the sector is stated. If no category in
-        the list covers the named sector (e.g. aviation, dairy),
-        return an empty array rather than forcing a poor fit.
-    If NO sector is named, return an empty array - do not guess
-    which categories a vague action might plausibly touch, and do
-    not infer a sector from the intent or likely effect of a
-    measure. A vaguer news item must never produce MORE categories
-    than one that actually names what's affected.
-"one_line": one plain-English sentence, max 20 words, stating what
-  happened and the transmission path. State only what the source
-  text says. Do not predict prices. Do not advise. Never state a
-  consequence, cost, or transmission path the source text itself
-  does not mention - if it doesn't say tariffs raise input costs,
-  don't write that they do.
+        already established the sector is stated.
+        READ EACH CATEGORY'S FULL SCOPE LINE before deciding
+        nothing fits. The list under each category name is its
+        definition, not a set of illustrations: because Raw
+        Materials & Critical Minerals reads "Copper, rare earths,
+        lithium, aluminum, uranium feedstock...", copper mining
+        and lithium mining ARE that category. If the sector the
+        text names appears in a category's scope line, that
+        category applies - do not then reason about whether it
+        feels AI-related.
+        The same holds for a recognised part of something listed.
+        A scope line cannot enumerate everything: "submarine and
+        subsea cables" sits under Telecom & Connectivity, lidar
+        and autonomy systems under Robotics & Physical AI,
+        pharmaceutical APIs under Life Sciences & Healthcare AI,
+        HVAC and electrical plant for data centres under Data
+        Centers & Physical Infrastructure. Ask whether the named
+        sector is a kind of something in the scope line, not
+        whether the exact word appears.
+        Automotive deserves care, because the taxonomy covers part
+        of it and not the rest. Robotics & Physical AI names "EV
+        manufacturers, autonomous vehicles, ADAS", so a measure
+        reaching electric vehicles, self-driving systems, lidar or
+        vehicle autonomy IS that category. A measure reaching the
+        conventional vehicle industry - internal-combustion
+        assembly, dealerships, parts for ordinary cars - is not,
+        and neither is rail. Decide on which part of the industry
+        the text actually names, not on the word "automotive".
+        Only when the named sector sits outside every scope line -
+        aviation, rail, dairy, tourism, hospitality, conventional
+        vehicle manufacturing - return an empty array rather than
+        forcing a poor fit.
+    If NO sector is named ANYWHERE in the text you were given,
+    return an empty array - do not guess which categories a vague
+    action might plausibly touch, and do not infer a sector from
+    the intent or likely effect of a measure. A vaguer news item
+    must never produce MORE categories than one that actually
+    names what's affected.
+"event_date": the date the ACTION took effect or was taken, as
+  "YYYY-MM-DD", or null. This is not the date the document was
+  published: a Federal Register notice published on 13 October
+  can be publishing a determination issued on 1 October, or a
+  general licence issued on 25 June. Read the text for the
+  operative date - "issued on", "determined on", "effective",
+  "signed" - and use that. Where the text gives only a
+  publication date, or none, use null rather than guessing.
+"entities": array of the countries, companies, government bodies,
+  organisations, people and goods THE ARTICLE ITSELF NAMES - from
+  the headline and the article text together, not from any list you
+  know of. This is the one place the story's participants are
+  recorded: the states whose relations the event concerns belong
+  here as "country", alongside the agency that acted and the goods
+  it covers.
+  EVERY ENTRY MUST BE A NAMED, IDENTIFIABLE THING - one you could
+  look up. A CLASS or CATEGORY of actors is not an entity: "U.S.
+  financial institutions", "registered money transmitters",
+  "European states", "sanctioned Russian firms", "several British
+  nationals" name no one and must be left out, however prominently
+  the text features them. If the text names the members, list the
+  members; if it does not, list nothing.
+  HARD LIMIT: at most 10 entries. Fewer is normal and an empty
+  array is fine. Anything past the tenth is discarded unread, so
+  spend the ten on what matters: the parties that acted and were
+  acted upon first, then the goods. Do not list near-duplicates
+  separately - "radar", "antennas" and "transceivers" from one
+  list of covered components are one entry ("radar, antennas and
+  transceivers"), not three.
+  Each entry:
+    "name"      - the entity's own proper name, in full, as an
+                  official record would write it. Expand what the
+                  text abbreviates and drop any wrapper the text
+                  puts around the name: "Royal Air Force (RAF)
+                  base Fairford" is the name RAF Fairford inside a
+                  description, so the name is "RAF Fairford";
+                  "Council of the EU" is "Council of the European
+                  Union"; "Treasury's OFAC" is "Office of Foreign
+                  Assets Control". Keep a parenthesised acronym
+                  only where it is part of how the body is
+                  formally known ("Islamic Revolutionary Guard
+                  Corps (IRGC)"). For a company use its registered
+                  name, not a colloquial short form. Never invent
+                  a fuller name you are not sure of - if you
+                  cannot give the proper name with confidence,
+                  write it exactly as the text does.
+    "type"      - "country"      a SOVEREIGN STATE, or a bloc of
+                                 states (European Union, NATO, G7,
+                                 OPEC). Include BOTH sides: the
+                                 state that acted and the state
+                                 acted upon. Say which is which in
+                                 the "reason".
+                                 A region, province, city or
+                                 occupied territory is NOT a
+                                 country - Crimea, Donetsk,
+                                 Luhansk, Kherson, Zaporizhzhia,
+                                 Hong Kong, Taiwan's counties,
+                                 Catalonia. Leave a place out
+                                 unless it is a sovereign state;
+                                 the territory a measure concerns
+                                 is already in the reason text.
+                                 An institution OF a bloc is
+                                 "government", not "country": the
+                                 European Union is a country-type
+                                 entity, the Council of the
+                                 European Union and the European
+                                 Commission are "government".
+                  "government"   a ministry, agency, official body,
+                                 or an institution of a bloc
+                  "company"      a named firm, listed or not
+                  "organisation" anything else institutional
+                  "person"       a named individual
+                  "product"      a specific GOOD or technology the
+                                 measure covers - "semiconductors",
+                                 "microcircuits", "radar and
+                                 navigation systems", "aviation
+                                 equipment". Name what the text
+                                 names, not a category you infer.
+                                 A product is a THING. An industry
+                                 or sector ("the automotive and
+                                 rail sectors", "the energy
+                                 sector") is NOT a product - the
+                                 sector read belongs in "assets"
+                                 and "impacted_categories", which
+                                 exist for exactly that. A place,
+                                 building or installation is not a
+                                 product either: an airbase, a
+                                 port or a pipeline is an
+                                 "organisation" when the text
+                                 treats it as a body, and
+                                 otherwise simply left out. An
+                                 activity ("earthquake relief
+                                 efforts") is not a product.
+                                 Only goods the MEASURE covers or
+                                 the event turns on - not every
+                                 substance the story happens to
+                                 mention. Petrol found in a van
+                                 during an investigation is not a
+                                 product of that event.
+                                 A legal instrument is NOT a
+                                 product: "General License 60",
+                                 "Executive Order 13902",
+                                 "Regulation (EU) 2026/1234" are
+                                 the measure itself, not goods it
+                                 covers. Leave them out - the
+                                 instrument is already named in
+                                 the reason text.
+                                 If the measure names no specific
+                                 good, include no product entry at
+                                 all. MOST ITEMS HAVE NO PRODUCT
+                                 ENTRY. Only reach for one when
+                                 the document lists actual goods,
+                                 the way an export-control annex
+                                 or a sanctions component list
+                                 does.
+    "reason"    - what the text says about it, in a few words:
+                  "sanctioned by the EU", "supplies semiconductors to
+                  the Russian military", "issued the determination".
+                  Quote the text's own claim; do not characterise.
+    "ticker"    - its listed ticker if you are confident of it,
+                  otherwise null. Most entities here are unlisted -
+                  sanctioned foreign firms, ministries, agencies - and
+                  null is the correct answer for them. Never guess a
+                  ticker to fill the field.
+  If you cannot say in the "reason" what the text states about an
+  entity, leave that entity out entirely. An unexplained name is
+  worse than a shorter list.
+  The name must APPEAR IN THE TEXT. Do not add an organisation the
+  text implies but never names - a parent ministry of a named
+  agency, the government behind a named official, a company behind
+  a named product. If the text says "the Office of Foreign Assets
+  Control issued", the entity is OFAC; the Department of the
+  Treasury is NOT an entity unless the text writes it too. Do not
+  add a company that is merely exposed to the event through its
+  sector: this array is what the document names, not who it
+  affects - impacted_categories already carries exposure.
+"generated_summary": the article, compressed. Write it so a reader
+  who will NOT open the source still knows everything that matters
+  in it. Aim for 3 to 5 sentences; go to 6 only if the document
+  genuinely carries that many distinct facts.
+    Write for a reader who has to decide whether this changes
+    anything they hold. That reader needs WHAT CHANGED, HOW BIG,
+    WHO IS CAUGHT BY IT, and FROM WHEN - in that order, in the
+    first two sentences wherever the text supports it. The order
+    below is the summary's order; it is NOT the document's order,
+    and you must reorder the document's facts to fit it.
+      1. The operative change, in plain commercial terms - who did
+         what, to whom, and whether it is in force, effective on a
+         stated date, or renewed. Lead with the effect, not the
+         legal mechanism: "Iran's automotive and rail sectors are
+         now sanctioned - anyone operating in them is blocked from
+         US jurisdiction", not "section 1(a)(i) of E.O. 13902 has
+         been determined to apply to...". Name the instrument
+         later in the sentence or not at all.
+      2. Scope and magnitude - the named goods, sectors, companies,
+         countries, codes or programmes covered, the counts and
+         amounts (77 individuals, 823 firms, 25%, $500m), and any
+         carve-out or exemption. If the text names components,
+         minerals, chip types, vessels or ports, name them here;
+         this is usually the most decision-relevant line in the
+         summary, so it must not be buried below procedure.
+      3. The dates that govern it - when it was issued or takes
+         effect, and any expiry, review or deadline. State these
+         only where the TEXT gives them. Never write the
+         publication date: the row carries it already, and the
+         reader can see it beside the summary.
+      4. Stated cause or justification, and any stated consequence -
+         but only as the text gives it, never your own inference.
+         One clause is usually enough. Drop it entirely when it is
+         standard recital language that would appear in any action
+         under the same authority ("intended to address threats to
+         national security, foreign policy and the economy").
+    Name things rather than gesturing at them. "sanctions 77
+    individuals involved in elections in occupied Donetsk, Luhansk
+    and Crimea" is the summary; "sanctions certain individuals" is
+    not. If the text names a company, a ticker, a mineral, a chip
+    type, a vessel or a port, the summary names it too.
+    EVERY WORD MUST COME FROM THE PROVIDED TEXT. This is the one
+    rule with no exceptions:
+      - Never state a number, date, percentage, amount or duration
+        that does not appear in the text. Not an estimate, not a
+        rounding, not a figure you know from similar measures.
+      - Never name a company, country, sector or person the text
+        does not name.
+      - Never assert an effect, cost, market consequence or
+        transmission path unless the text itself asserts it. If it
+        does not say a measure raises input costs, the summary does
+        not say so either.
+      - Never fill a gap from general knowledge. An unstated fact
+        is simply absent from the summary.
+      A fabricated specific reads as authoritative and nothing
+      downstream can catch it, so when in doubt leave it out.
+    Omit: restatements of the headline, that a document was
+    published or posted to a website, docket and CFR numbers,
+    "for further information contact", legal authority recitals,
+    and any sentence that would be equally true of a different
+    measure. If deleting a sentence loses no fact, delete it.
+    Apply that test strictly - these all failed it on real rows:
+      - "The action is intended to address threats to U.S.
+        national security, foreign policy, and economy as
+        described in E.O. 13902" - recited in every action under
+        that authority, so it distinguishes nothing.
+      - "U.S. financial institutions may rely on the originator
+        of a funds transfer for compliance" - standard
+        due-diligence wording, not a fact about this measure.
+      - "The license does not unblock any property or authorize
+        activities prohibited by other regulations" - the default
+        for every general licence.
+      - "The EU condemned the elections and stated it would never
+        recognise them" - a stated position, not a change.
+    A sentence of rhetoric or standard recital crowds out a
+    sentence of scope. When the text supports both, the scope
+    sentence wins.
+    Write plainly, in full sentences, no bullet points, no preamble
+    such as "This article reports that". Start with the action.
+    If the text supports fewer than 3 sentences of real content,
+    write fewer. If it supports none, use null - never pad.
 
 If the available text lacks information for a field, use "unclear" or
 an empty array. Never invent details.
 
-Category list (use the exact name shown):
+Category list (use the exact name shown). The line under each
+name is its full scope - everything listed there belongs to that
+category, so check these words against the sector the text names
+before concluding nothing fits. The "Exposed to" line says how
+geopolitics usually reaches it, not what the category contains.
 
-Raw Materials & Critical Minerals — copper, lithium, rare earths, gold miners.
-  Exposed to: export bans on minerals, sanctions on producers, mining-country instability
+Raw Materials & Critical Minerals
+  Copper, rare earths, lithium, aluminum, uranium feedstock, specialty
+  metals, mining royalties, PCB substrates, upstream materials.
+  Exposed to: export bans on minerals, sanctions on producers,
+  mining-country instability
 
-Energy & Grid Infrastructure — utilities and grid powering data centers.
-  Exposed to: oil/gas supply shocks, power equipment tariffs, energy sanctions
+Energy & Grid Infrastructure
+  Power generation, utilities, gas, renewables, backup power, grid
+  transmission, energy storage, power infrastructure for data centres.
+  Exposed to: oil/gas supply shocks, power equipment tariffs, energy
+  sanctions, grid emergency orders
 
-Nuclear & Advanced Energy — nuclear power for AI compute.
-  Exposed to: uranium supply, sanctions on nuclear fuel (Russia), reactor-technology export controls
+Nuclear & Advanced Energy
+  Nuclear power plants, SMRs, advanced reactors, long-duration energy
+  storage, next-generation energy sources powering AI compute.
+  Exposed to: uranium supply, sanctions on nuclear fuel, reactor-
+  technology export controls
 
-Semiconductor Manufacturing — chip makers, fabs, equipment, packaging.
+Semiconductor Manufacturing
+  Chip design, AI accelerators, GPUs, foundries, HBM/memory, EDA/IP,
+  semiconductor equipment, advanced packaging, OSAT, wafers, chip
+  materials.
   Exposed to: export controls, Taiwan/China conflict, chip tariffs
 
-Compute Hardware & Edge Systems — servers, components, distribution.
+Compute Hardware & Edge Systems
+  AI servers, storage, OEM/ODM hardware, embedded compute, edge
+  hardware, appliances, sensors, electronics manufacturing.
   Exposed to: shipping disruptions, China production exposure, tariffs
 
-Networking, Optical & Interconnect — switches, optical interconnect, fiber.
+Networking, Optical & Interconnect
+  High-speed switches, optical transceivers, silicon photonics,
+  InfiniBand, fibre interconnects, optical modules, cluster networking.
   Exposed to: China trade actions, component export controls
 
-Data Centers & Physical Infrastructure — data center builders, REITs, cooling, electrical.
-  Exposed to: construction material tariffs, energy price shocks
+Data Centers & Physical Infrastructure
+  Colocation, data centre REITs, construction, EPC, electrical systems,
+  HVAC, liquid cooling, thermal management, towers, facility
+  infrastructure.
+  Exposed to: construction material tariffs, energy price shocks,
+  connection moratoria
 
-Telecom & Connectivity — carriers and telecom software.
-  Exposed to: rarely; spectrum and equipment bans, submarine-cable disruption
+Telecom & Connectivity
+  Mobile network operators, 5G equipment, satellite connectivity, tower
+  infrastructure, fixed wireless, backhaul, submarine and subsea
+  cables, telecom networks.
+  Exposed to: spectrum and equipment bans, submarine-cable disruption
 
-Cloud & Compute Platforms — hyperscalers and cloud platforms.
+Cloud & Compute Platforms
+  Hyperscalers, neoclouds, GPU cloud providers, edge cloud, AI compute
+  hosting, sovereign compute, managed cloud AI services.
   Exposed to: chip export controls (supply side), China market access
 
-AI Software Infrastructure — SaaS, enterprise AI applications.
-  Exposed to: rarely; only broad sanctions or China market-access events
+AI Software Infrastructure
+  SaaS, cybersecurity, databases, developer tools, observability,
+  identity, automation, middleware, inference engines, MLOps.
+  Exposed to: rarely; broad sanctions or China market-access events
 
-AI Data Infrastructure — data and analytics infrastructure.
-  Exposed to: rarely; cross-border data-transfer restrictions
+AI Data Infrastructure
+  Data annotation and labeling, data marketplaces, synthetic data, data
+  pipelines, data observability, enterprise data layers, training data.
+  Exposed to: cross-border data-transfer restrictions, data
+  localisation orders
 
-AI Models & Intelligence Layer — foundation model developers and model-hosting providers.
-  Exposed to: export controls on compute used for training, sanctions restricting model access to certain countries
+AI Models & Intelligence Layer
+  Frontier model labs, foundation model companies, LLM providers,
+  multimodal models, sovereign AI models, model APIs.
+  Exposed to: export controls on training compute, sanctions
+  restricting model access
 
-Robotics & Physical AI — robotics, drones, autonomy.
+Robotics & Physical AI
+  Industrial robotics, humanoid robots, autonomous vehicles, drones,
+  ADAS, EV manufacturers, factory automation, lidar and autonomy
+  systems.
   Exposed to: China component dependence, export controls on drones
+  and autonomy
 
-Quantum Computing & Sensing — quantum computing and sensing hardware/software.
-  Exposed to: export controls on quantum-relevant technology (a known and growing sanctions category), talent/researcher visa restrictions
+Quantum Computing & Sensing
+  Quantum computers, quantum networking, QKD, post-quantum
+  cryptography, quantum sensing, quantum hardware and software.
+  Exposed to: export controls on quantum-relevant technology,
+  researcher visa restrictions
 
-Life Sciences & Healthcare AI — pharma and healthcare AI.
+Life Sciences & Healthcare AI
+  AI drug discovery, medical imaging AI, genomics, clinical AI,
+  diagnostic AI, protein design, pharmaceuticals and APIs.
   Exposed to: pharma tariffs, API supply from China/India
 
-Defense, Aerospace & Sovereign AI — defense, space, sovereign AI.
-  Exposed to: conflict escalation, defense trade actions, arms-export sanctions
+Defense, Aerospace & Sovereign AI
+  Defence primes, aerospace AI, geospatial intelligence, government AI
+  contracts, sovereign AI programmes, space launch, national security
+  AI systems.
+  Exposed to: conflict escalation, defence trade actions, arms-export
+  sanctions
 
-Financial Infrastructure & AI Capital — AI lending, fintech, capital.
-  Exposed to: sanctions on financial systems, broad risk-off, SWIFT-type restrictions
+Financial Infrastructure & AI Capital
+  Fintech AI, AI lending, payments AI, project finance for AI capex,
+  AI-focused investment vehicles, financial infrastructure for AI.
+  Exposed to: sanctions on financial systems, SWIFT-type restrictions,
+  investment and capital controls
 
-Water & Resource Infrastructure — water for data centers.
+Water & Resource Infrastructure
+  Water treatment, water recycling, waste heat recovery, resource
+  infrastructure for data centre operations.
   Exposed to: rarely; regional resource-conflict spillover
 
-Applications & Digital Economy — AI end applications and beneficiaries.
+Applications & Digital Economy
+  Consumer AI, vertical AI applications, retail AI, marketing
+  technology, digital media, gaming, agtech, smart buildings.
   Exposed to: rarely; mostly broad risk events

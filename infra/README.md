@@ -68,7 +68,7 @@ See the [root README](../README.md) for the full target list.
 
 ## CI/CD
 
-GitHub Actions assumes the `ocn-github-actions` IAM role via OIDC (no long-lived credentials). The role has permission to push to ECR and update ECS services. It is scoped to pushes on `refs/heads/main` in `convergery-labs/ocn`.
+GitHub Actions assumes the `ocn-github-actions` IAM role via OIDC (no long-lived credentials). The role has permission to push to ECR and update ECS services. It is scoped to pushes on `refs/heads/main` in `alphastreet-ai/ocn`.
 
 ## Structure
 

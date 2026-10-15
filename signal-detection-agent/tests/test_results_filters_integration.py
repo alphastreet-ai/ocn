@@ -67,6 +67,7 @@ def _insert_row(
     url: str,
     published: datetime,
     metadata: dict,
+    entities: list[dict] | None = None,
 ):
     job_id = create_job(domain="geopolitical_news")
     full_metadata = {**metadata, "_test_marker": _TEST_MARKER}
@@ -74,10 +75,16 @@ def _insert_row(
         conn.execute(
             """
             INSERT INTO agent_classifications
-                (job_id, article_id, url, title, signal_detection, published, source_type, metadata)
-            VALUES (%s, %s, %s, %s, 'signal', %s, 'geopolitical_signal', %s::jsonb)
+                (job_id, article_id, url, title, signal_detection, published,
+                 source_type, metadata, entities_json)
+            VALUES (%s, %s, %s, %s, 'signal', %s, 'geopolitical_signal', %s::jsonb, %s)
             """,
-            (job_id, article_id, url, title, published, json.dumps(full_metadata)),
+            # entities_json is NOT NULL DEFAULT '[]' - a row with no
+            # entities stores the empty array, never SQL NULL.
+            (
+                job_id, article_id, url, title, published,
+                json.dumps(full_metadata), json.dumps(entities or []),
+            ),
         )
 
 
@@ -117,58 +124,85 @@ def test_impacted_category_filter_matches_array_containment():
     assert "Energy row" not in titles
 
 
-def test_impacted_ticker_filter_matches_direct_or_by_category_case_insensitive():
+def test_impacted_ticker_filter_matches_entities_json_case_insensitive():
+    """impacted_ticker reads entities_json - the companies the article
+    itself names, each carrying the reason the text gives.
+
+    It used to read metadata.impacted_companies_direct (null on every
+    geopolitical row ever stored) and metadata.impacted_companies_by_
+    category (every ticker in a matched SECTOR, so a UK airbase story
+    naming no company carried 11 defence tickers). Both fields are gone:
+    a ticker is only attached to an entity the article names.
+    """
     _insert_row(
-        article_id=900005, title="Direct match row", url="https://reuters.com/e",
-        published=datetime.now(timezone.utc),
-        metadata={
-            "impacted_companies_direct": [{"ticker": "NVDA", "company_name": "NVIDIA Corporation"}],
-            "impacted_companies_by_category": None,
-        },
+        article_id=900005, title="Named company row", url="https://reuters.com/e",
+        published=datetime.now(timezone.utc), metadata={},
+        entities=[
+            {"name": "Nvidia", "type": "company", "ticker": "NVDA",
+             "reason": "barred from selling H20 accelerators to China"},
+        ],
     )
     _insert_row(
-        article_id=900006, title="Category match row", url="https://reuters.com/f",
-        published=datetime.now(timezone.utc),
-        metadata={
-            "impacted_companies_direct": None,
-            "impacted_companies_by_category": [
-                {"ticker": "AMD", "company_name": "Advanced Micro Devices, INC", "matched_categories": ["Semiconductor Manufacturing"]},
-                {"ticker": "TSM", "company_name": "Taiwan Semiconductor Manufacturing Company", "matched_categories": ["Semiconductor Manufacturing"]},
-            ],
-        },
+        article_id=900006, title="Other company row", url="https://reuters.com/f",
+        published=datetime.now(timezone.utc), metadata={},
+        entities=[
+            {"name": "Advanced Micro Devices", "type": "company", "ticker": "AMD",
+             "reason": "subject to the same licence requirement"},
+            {"name": "Office of Foreign Assets Control", "type": "government",
+             "ticker": None, "reason": "issued the determination"},
+        ],
     )
     _insert_row(
         article_id=900007, title="No match row", url="https://reuters.com/g",
-        published=datetime.now(timezone.utc),
-        metadata={"impacted_companies_direct": None, "impacted_companies_by_category": None},
+        published=datetime.now(timezone.utc), metadata={},
     )
     result = list_all_results(source_type="geopolitical_signal", impacted_ticker="nvda", limit=100)
     titles = {r["title"] for r in result["results"]}
-    assert "Direct match row" in titles
-    assert "Category match row" not in titles
+    assert "Named company row" in titles
+    assert "Other company row" not in titles
     assert "No match row" not in titles
 
     result2 = list_all_results(source_type="geopolitical_signal", impacted_ticker="AMD", limit=100)
     titles2 = {r["title"] for r in result2["results"]}
-    assert "Category match row" in titles2
-    assert "Direct match row" not in titles2
+    assert "Other company row" in titles2
+    assert "Named company row" not in titles2
+
+    # An entity with a null ticker (a ministry, a country) must never
+    # match - only a company carries one.
+    result3 = list_all_results(source_type="geopolitical_signal", impacted_ticker="OFAC", limit=100)
+    assert {r["title"] for r in result3["results"]} == set()
 
 
-def test_impacted_ticker_filter_does_not_crash_on_null_arrays():
-    # regression test: jsonb_array_elements_text raised
+def test_impacted_ticker_filter_does_not_crash_on_null_entities():
+    # regression test: jsonb_array_elements raised
     # psycopg2.errors.InvalidParameterValue: cannot extract elements from a
-    # scalar when metadata->'impacted_companies_direct' is JSON null (not a
-    # missing key) - COALESCE alone does not catch this, only
-    # jsonb_typeof(...) = 'array' does. Confirmed live against real Stage C
-    # output, which stores exactly this shape on a fail-open row.
+    # scalar when the column holds JSON null (not SQL NULL, not a missing
+    # key) - COALESCE alone does not catch this, only jsonb_typeof(...) =
+    # 'array' does. Confirmed live against real Stage C output, which
+    # stores exactly this shape on a fail-open row where tagging failed.
     _insert_row(
-        article_id=900008, title="Null arrays row", url="https://reuters.com/h",
-        published=datetime.now(timezone.utc),
-        metadata={"impacted_companies_direct": None, "impacted_companies_by_category": None},
+        article_id=900008, title="Empty entities row", url="https://reuters.com/h",
+        published=datetime.now(timezone.utc), metadata={}, entities=[],
+    )
+    # The shape that actually crashed: the literal JSON scalar null,
+    # which jsonb_typeof reports as 'null' rather than 'array'.
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE agent_classifications SET entities_json = 'null'
+            WHERE article_id = 900008
+            """,
+        )
+    _insert_row(
+        article_id=900009, title="Entity without ticker row", url="https://reuters.com/i",
+        published=datetime.now(timezone.utc), metadata={},
+        entities=[{"name": "Iran", "type": "country", "ticker": None,
+                   "reason": "targeted by the determination"}],
     )
     result = list_all_results(source_type="geopolitical_signal", impacted_ticker="NVDA", limit=100)
     titles = {r["title"] for r in result["results"]}
-    assert "Null arrays row" not in titles
+    assert "Empty entities row" not in titles
+    assert "Entity without ticker row" not in titles
 
 
 def test_channel_filter():

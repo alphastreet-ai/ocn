@@ -899,11 +899,33 @@ def update_taiwan_revenue_rank(
 # Stage B), HIGH->signal (Stage B's action classification). See db.py's
 # agent_classifications_signal_detection_check for the corresponding
 # schema change.
-_GEOPOLITICAL_SIGNAL_MAP = {
-    "DROPPED": "noise",
-    "WEAK": "weak_signal",
-    "WAITING": "waiting",
-    "HIGH": "signal",
+# How much of news-retrieval's body Stage A keeps for Stage B's use.
+# Matches the limit Stage B sends to the model, so nothing is stored
+# that the model would never see.
+_STAGE_B_BODY_EXCERPT_CHARS = 2500
+
+
+
+# Stage A's rules are deterministic, so their reasons are written here
+# rather than by a model: each one states exactly which rule fired.
+# Stage B's reasons come from the model itself (see _parse_answer) and
+# describe the specific item, because a rule name is all Stage A can
+# honestly say about a row it rejected without reading.
+_GEOPOLITICAL_STAGE_A_REASON = {
+    "non_english": "Dropped - the article is not in English.",
+    "domain_not_allowed": (
+        "Dropped - the source domain is not on the allowlist of wire "
+        "services, papers of record and government sites."
+    ),
+    "signal": (
+        "Federal Register notice whose title names a trade, sanctions or "
+        "supply measure - treated as an action without a model call."
+    ),
+    "weak_signal": (
+        "Headline uses a talk verb (warns, urges, vows, calls for) - "
+        "rhetoric rather than an action."
+    ),
+    "waiting": None,  # Stage B writes the reason once it has judged
 }
 
 
@@ -916,9 +938,11 @@ def insert_geopolitical_signal_classification(
 
     ``result['outcome']`` is one of DROPPED/WEAK/WAITING (Stage A's own
     vocabulary - see the spec's Stage A section), mapped onto the existing
-    signal_detection column via _GEOPOLITICAL_SIGNAL_MAP.
-    ``result['drop_reason']`` (only set for DROPPED) and any other
-    Stage A/B/C/D field go in metadata - same JSONB-bag rationale as
+    signal_detection column directly - Stage A and Stage B both answer
+    with the stored label rather than a synonym needing translation.
+    ``result['drop_reason']`` (only set for DROPPED) selects the prose
+    written to the signal_reason column; every other Stage A/B/C/D
+    field goes in metadata - same JSONB-bag rationale as
     taiwan_market_signal.
 
     No ON CONFLICT clause: the idx_agent_classifications_geopolitical_signal_
@@ -929,23 +953,87 @@ def insert_geopolitical_signal_classification(
     UPDATE the same row in place rather than have an insert silently no-op.
     """
     metadata = {}
-    if result.get("drop_reason"):
-        metadata["drop_reason"] = result["drop_reason"]
+    # Every row's reason goes in the signal_reason COLUMN, the field
+    # china_market_signal, news and macro_signal all populate on every
+    # row ("Routine filing - 'meeting' is a disclosure type no China
+    # signal rule reads"). geopolitical_signal was the only domain
+    # leaving it null, so a reader of a dropped or weak row had nothing
+    # explaining the verdict.
+    #
+    # This replaces metadata.drop_reason rather than sitting beside it:
+    # two fields answering "why is this not a signal", one a code and
+    # one a sentence, is a redundancy that drifts the moment a rule
+    # changes in one place and not the other.
+    signal_reason = _GEOPOLITICAL_STAGE_A_REASON.get(
+        result.get("drop_reason") or result.get("outcome")
+    )
+    # The fetcher's own summary, carried from Stage A so Stage B can read
+    # it without a second fetch from news-retrieval. Stage B is otherwise
+    # headline-only, and a headline is often the least informative part
+    # of the item: three BIS export-denial orders filed the same day by
+    # the same agency, with titles differing only in the airline's name,
+    # split 2 HIGH / 1 WEAK purely because "Order Renewing Temporary
+    # Denial of Export Privileges" states nothing about what was denied.
+    #
+    # Only the SOURCE summary, never a generated one - at Stage A time no
+    # model has read anything yet. Stage C's generated summary fills the
+    # same field later for rows that reach it (see summary_source).
+    if article.get("summary"):
+        metadata["summary"] = article["summary"]
+        metadata["summary_source"] = "source"
+    # The body news-retrieval already sent. get_run_articles requests
+    # include_body=true, so Stage A is handed the full text with the
+    # article and was throwing it away - Stage B then re-fetched the
+    # same text one row at a time over HTTP. One already-paid response
+    # replaces N round trips, and news-retrieval stays the only place
+    # that fetches anything.
+    #
+    # Only a WAITING row keeps it: a DROPPED row is terminal (Stage A
+    # rejected its domain) and a WEAK row is too, so storing their text
+    # would bloat the table for rows nothing will ever read. Truncated
+    # for the same reason - this copy exists to judge HIGH vs WEAK, not
+    # to mirror news-retrieval's storage; Stage C still fetches the full
+    # 24,000 characters for the rows that reach it.
+    # Stored whenever there is a body, NOT only when a summary is
+    # absent. The earlier condition skipped the body on any row that had
+    # a summary, on the reasoning that Stage B prefers the summary and
+    # the body would go unread. That holds for a news article, whose
+    # summary is an editorial lead over the same text. It fails for a
+    # filed document: Federal Register rows 42115 and 42117 carry a
+    # 216-character agency abstract over a 3,673-character
+    # determination, a 17x compression, and Stage B - which makes the
+    # IRREVERSIBLE call - judged the precis while Stage C, which only
+    # tags, fetched the whole document. The less consequential stage had
+    # the better evidence.
+    if result.get("outcome") == "waiting":
+        body = article.get("body")
+        if body:
+            metadata["body_excerpt"] = body[:_STAGE_B_BODY_EXCERPT_CHARS]
+    # Which other outlets carried the same story, as news-retrieval's
+    # own title-similarity dedup recorded it. Carried for the same
+    # reason as the body: it arrives with the article, and Stage D was
+    # re-fetching the whole article per row just to read this one list.
+    # Only a survivor needs it - a dropped row never reaches Stage D.
+    if result.get("outcome") in ("waiting", "signal"):
+        also = (article.get("metadata") or {}).get("also_reported_by")
+        if also:
+            metadata["also_reported_by"] = also
     with get_db() as conn:
         conn.execute(
             """
             INSERT INTO agent_classifications (
                 job_id, source_type, article_id, url, title,
-                signal_detection, signal_score, published, metadata
-            ) VALUES (%s, 'geopolitical_signal', %s, %s, %s, %s, %s, %s, %s)
+                signal_detection, signal_score, signal_reason, published, metadata
+            ) VALUES (%s, 'geopolitical_signal', %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 job_id,
                 article.get("id"),
                 article.get("url"),
                 article.get("title"),
-                _GEOPOLITICAL_SIGNAL_MAP[result["outcome"]],
+                result["outcome"],
                 None,
+                signal_reason,
                 article.get("published"),
                 json.dumps(metadata, ensure_ascii=False),
             ),
@@ -981,12 +1069,19 @@ def get_waiting_geopolitical_signal_articles() -> list[dict[str, Any]]:
     source_type='geopolitical_signal' AND signal_detection='waiting' -
     Stage B's entire input (spec's "waiting" survivor state from Stage A).
 
-    Returns id, article_id, title (all Stage B needs) - not the full row.
+    Returns id, article_id, title and the source summary Stage A carried
+    over (metadata.summary, NULL where the fetcher had none) - not the
+    full row. The summary is included because a bureaucratic headline
+    alone is often not enough to tell an action from a proposal; see
+    insert_geopolitical_signal_classification for the measured case.
     """
     with get_db() as conn:
         rows = conn.execute(
             """
-            SELECT id, article_id, title FROM agent_classifications
+            SELECT id, article_id, title,
+                   metadata->>'summary' AS summary,
+                   metadata->>'body_excerpt' AS body_excerpt
+            FROM agent_classifications
             WHERE source_type = 'geopolitical_signal' AND signal_detection = 'waiting'
             """,
         ).fetchall()
@@ -1011,18 +1106,19 @@ def count_geopolitical_signal_stage_b_calls_today() -> int:
     return int(row["n"])
 
 
+
 def update_geopolitical_signal_classification(
-    row_id: int, *, outcome: str,
+    row_id: int, *, outcome: str, reason: str | None = None,
+    headline_only: bool = False,
 ) -> None:
     """Update one geopolitical_signal row in place after Stage B's HIGH/WEAK
     call - the exact same update-in-place pattern as
     update_taiwan_revenue_rank, keyed on this table's own id (Stage A/B
     share one row per article_id, never insert a second one).
 
-    outcome is Stage B's raw "HIGH"/"WEAK" answer, mapped via
-    _GEOPOLITICAL_SIGNAL_MAP (HIGH->signal, WEAK->weak_signal) so
-    this row is queryable the same way as every other source_type from
-    here on. metadata.stage_b_classified_at is stamped for the daily-cap
+    outcome is already the stored label - Stage B answers with
+    "signal", "weak_signal" or "noise" rather than a synonym this
+    function then translates. metadata.stage_b_classified_at is stamped for the daily-cap
     counter above - there is no other reliable per-row "when was Stage B
     actually run" signal, since stored_at is set once at Stage A insert
     time and never reflects Stage B's later update.
@@ -1032,10 +1128,21 @@ def update_geopolitical_signal_classification(
             """
             UPDATE agent_classifications
             SET signal_detection = %s,
-                metadata = metadata || jsonb_build_object('stage_b_classified_at', NOW())
+                metadata = metadata
+                    || jsonb_build_object('stage_b_classified_at', NOW())
+                    || CASE WHEN %s
+                            THEN jsonb_build_object('judged_on', 'headline_only')
+                            ELSE '{}'::jsonb END
+                ,
+                signal_reason = COALESCE(%s::text, signal_reason)
             WHERE id = %s
             """,
-            (_GEOPOLITICAL_SIGNAL_MAP[outcome], row_id),
+            (
+                outcome,
+                headline_only,
+                reason,
+                row_id,
+            ),
         )
 
 
@@ -1076,29 +1183,58 @@ def count_geopolitical_signal_stage_c_calls_today() -> int:
 
 
 def update_geopolitical_signal_stage_c_tags(
-    row_id: int, *, tags: dict[str, Any],
+    row_id: int, *, tags: dict[str, Any], entities: list[dict[str, Any]] | None = None,
 ) -> None:
     """Merge Stage C's tags into an existing HIGH row's metadata - update
     in place, same pattern as update_geopolitical_signal_classification.
-    signal_detection is never touched here (stays 'signal' regardless of
-    whether tagging succeeded or fail-opened to null tags).
 
-    ``tags`` is expected to already contain channel, actors, assets,
-    impacted_categories, one_line (Layer 2 + overrides' combined output,
+    ``tags`` is expected to already contain channel, assets,
+    impacted_categories, summary (Layer 2 + overrides' combined output,
     all possibly None on fail-open) - merged alongside
     stage_c_classified_at, which both marks this row done (see
     get_untagged_geopolitical_signal_high_articles) and feeds the Stage C
     daily-cap counter above.
+
+    signal_detection is never touched here. Stage C tags a row, it does
+    not re-judge one: Stage B already answered whether a real action
+    occurred, and it answers that without any notion of this universe.
+    An earlier version let Stage C demote a signal to weak_signal when
+    no AI-economy category was found, which conflated two separate
+    questions and hid real events - an OFAC determination expanding
+    sanctions to Iran's automotive and rail sectors disappeared from the
+    feed because no company in a 19-category AI taxonomy sits in Iranian
+    rail. That absence is a fact about our coverage, not about the news,
+    and it is now recorded in metadata.coverage instead.
+
+    ``entities`` are the companies and organisations the article itself
+    names, written to the real entities_json column rather than into
+    metadata - the same place the news and china_market_signal domains
+    already put theirs, and the column entity_names_normalized indexes
+    for filtering. This replaces metadata.impacted_companies_direct,
+    which matched the HEADLINE only and was therefore null on every
+    geopolitical row ever stored: these headlines name countries and
+    institutions ("UK", "Iran", "EU", "OFAC"), not companies, while the
+    companies are named in the body.
     """
+    entity_names_normalized = [
+        e["name"].lower() for e in (entities or []) if e.get("name")
+    ]
     with get_db() as conn:
         conn.execute(
             """
             UPDATE agent_classifications
             SET metadata = metadata || (%s::jsonb) ||
-                jsonb_build_object('stage_c_classified_at', NOW())
+                jsonb_build_object('stage_c_classified_at', NOW()),
+                entities_json = %s,
+                entity_names_normalized = %s
             WHERE id = %s
             """,
-            (json.dumps(tags, ensure_ascii=False), row_id),
+            (
+                json.dumps(tags, ensure_ascii=False),
+                json.dumps(entities or [], ensure_ascii=False),
+                entity_names_normalized,
+                row_id,
+            ),
         )
 
 
@@ -1110,16 +1246,26 @@ def get_ungraded_geopolitical_signal_tagged_articles() -> list[dict[str, Any]]:
     a row is only skipped once it actually has the stamp, not based on
     whether its tags came back null.
 
-    Returns id, article_id, title, url, and the metadata keys Stage D reads
-    (impacted_companies_direct) - not the full row.
+    Returns id, article_id, title, url, the entities Stage C extracted
+    and the also_reported_by Stage A carried - not the full row.
+
+    Scoped to 'signal' because only Stage B promotes a row to it and
+    nothing demotes one afterwards - the filter is belt-and-braces
+    against a weak_signal row somehow carrying a Stage C stamp, not a
+    live distinction. A row whose coverage is 'outside_coverage' is
+    still a signal and is still graded: the grade answers how far to
+    trust the REPORT (corroborated, from a primary source, specific),
+    which is a separate question from whether we map it to companies.
     """
     with get_db() as conn:
         rows = conn.execute(
             """
             SELECT id, article_id, title, url,
-                   metadata->'impacted_companies_direct' AS impacted_companies_direct
+                   entities_json AS entities_json,
+                   metadata->'also_reported_by' AS also_reported_by
             FROM agent_classifications
             WHERE source_type = 'geopolitical_signal'
+              AND signal_detection = 'signal'
               AND jsonb_exists(metadata, 'stage_c_classified_at')
               AND NOT jsonb_exists(metadata, 'stage_d_graded_at')
             """,
@@ -1449,12 +1595,15 @@ def list_all_results(
     (not an array-overlap filter) - matches how a category picker/tab UI
     would naturally query, one category at a time.
 
-    impacted_ticker matches a ticker against EITHER
-    metadata->'impacted_companies_direct' OR metadata->'impacted_companies_
-    by_category' (both JSONB arrays of {ticker, company_name, ...} objects -
-    see models/geopolitical_signal_companies.py and pipeline/geopolitical_
-    signal_layer1.py - only geopolitical_signal Stage C rows populate
-    either). Deliberately a separate param from `ticker` above, not a
+    impacted_ticker matches a ticker against entities_json - the
+    companies the article itself names, each stored with its ticker (where
+    one exists) and the reason the text gives for it. It previously read
+    metadata.impacted_companies_direct and
+    metadata.impacted_companies_by_category; both are gone. The first was
+    null on every geopolitical row ever stored, and the second held every
+    ticker in a matched SECTOR, so this filter returned rows that named no
+    company at all while missing rows that named one.
+    Deliberately a separate param from `ticker` above, not a
     reuse of it - `ticker` is an exact string match against a flat
     metadata->>'ticker' field (sec_filing only) and has different match
     semantics (case-insensitive equality vs. array-of-objects membership);
@@ -1557,23 +1706,20 @@ def list_all_results(
         conditions.append("jsonb_exists(metadata->'impacted_categories', %s)")
         params.append(impacted_category)
     if impacted_ticker:
+        # Matches entities_json - the companies the article itself
+        # names. It previously read metadata.impacted_companies_direct
+        # (null on every geopolitical row ever stored) and
+        # metadata.impacted_companies_by_category (every ticker in a
+        # matched sector), so it found tickers no reader could explain
+        # and MISSED the ones carrying a reason. Both fields are gone.
         conditions.append(
-            """(
-                EXISTS (
-                    SELECT 1 FROM jsonb_array_elements(
-                        CASE WHEN jsonb_typeof(metadata->'impacted_companies_direct') = 'array'
-                             THEN metadata->'impacted_companies_direct' ELSE '[]'::jsonb END
-                    ) t WHERE UPPER(t->>'ticker') = UPPER(%s)
-                )
-                OR EXISTS (
-                    SELECT 1 FROM jsonb_array_elements(
-                        CASE WHEN jsonb_typeof(metadata->'impacted_companies_by_category') = 'array'
-                             THEN metadata->'impacted_companies_by_category' ELSE '[]'::jsonb END
-                    ) t WHERE UPPER(t->>'ticker') = UPPER(%s)
-                )
+            """EXISTS (
+                SELECT 1 FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(entities_json::jsonb) = 'array'
+                         THEN entities_json::jsonb ELSE '[]'::jsonb END
+                ) t WHERE UPPER(t->>'ticker') = UPPER(%s)
             )"""
         )
-        params.append(impacted_ticker)
         params.append(impacted_ticker)
     if channel:
         conditions.append("metadata->>'channel' = %s")
@@ -1843,21 +1989,16 @@ def list_results(
         extra_conditions += " AND jsonb_exists(metadata->'impacted_categories', %s)"
         params.append(impacted_category)
     if impacted_ticker:
-        extra_conditions += """ AND (
-            EXISTS (
-                SELECT 1 FROM jsonb_array_elements_text(
-                    CASE WHEN jsonb_typeof(metadata->'impacted_companies_direct') = 'array'
-                         THEN metadata->'impacted_companies_direct' ELSE '[]'::jsonb END
-                ) t WHERE UPPER(t) = UPPER(%s)
-            )
-            OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements_text(
-                    CASE WHEN jsonb_typeof(metadata->'impacted_companies_by_category') = 'array'
-                         THEN metadata->'impacted_companies_by_category' ELSE '[]'::jsonb END
-                ) t WHERE UPPER(t) = UPPER(%s)
-            )
+        # Same entities_json match as the sibling query above. This site
+        # additionally used jsonb_array_elements_TEXT on arrays of
+        # objects, so UPPER(t) compared a ticker against a whole JSON
+        # object and could never match anything.
+        extra_conditions += """ AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(
+                CASE WHEN jsonb_typeof(entities_json::jsonb) = 'array'
+                     THEN entities_json::jsonb ELSE '[]'::jsonb END
+            ) t WHERE UPPER(t->>'ticker') = UPPER(%s)
         )"""
-        params.append(impacted_ticker)
         params.append(impacted_ticker)
     if channel:
         extra_conditions += " AND metadata->>'channel' = %s"

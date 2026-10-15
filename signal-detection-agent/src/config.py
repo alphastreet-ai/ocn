@@ -38,17 +38,25 @@ JAPAN_SIGNAL_DOMAIN: str = os.environ.get("JAPAN_SIGNAL_DOMAIN", "japan_market_s
 CHINA_SIGNAL_DOMAIN: str = os.environ.get("CHINA_SIGNAL_DOMAIN", "china_market_signal")
 NEWS_DOMAIN: str = os.environ.get("NEWS_DOMAIN", "ai_news")
 GEOPOLITICAL_SIGNAL_DOMAIN: str = os.environ.get("GEOPOLITICAL_SIGNAL_DOMAIN", "geopolitical_news")
-# Stage B is a forced one-word HIGH/WEAK call, same shape/cost tier as
-# Taiwan's GDELT relevance check (_classify_gdelt_relevance) - defaults to
-# SIGNAL_DETECTION_MODEL_V2 directly (not OPENAI_MODEL_V2, which would
-# chain further to OPENAI_MODEL/SIGNAL_DETECTION_MODEL - the Sonnet base
-# model - if SIGNAL_DETECTION_MODEL_V2 were ever unset), so this always
-# matches the same second-pass model configured in AWS, never silently
-# upgrades to the base model. Independently tunable via its own env var.
+# Stage B is a forced one-word HIGH/WEAK call, but it is also the stage
+# whose verdict is IRREVERSIBLE - a WEAK row never reaches Stage C, so
+# nothing downstream can recover a signal this call gets wrong.
+#
+# Defaults to SEC_FILING_MODEL rather than to
+# SIGNAL_DETECTION_MODEL_V2, which this deployment sets to gpt-4o-mini.
+# That chain made the geopolitical domain's accuracy a side effect of a
+# variable owned by the AI-universe second pass: retuning that for cost
+# would silently downgrade this stage, with no test to catch it.
+#
+# SEC_FILING_MODEL is the right tier to share - it is the variable this
+# service already uses for reading primary documents (SEC filings), and
+# Federal Register notices are the same kind of text. Both stages here
+# follow it so the model stays configurable per environment rather than
+# hardcoded, and the two never drift apart.
+_GEOPOLITICAL_DEFAULT_MODEL = SEC_FILING_MODEL
+
 GEOPOLITICAL_SIGNAL_MODEL: str = (
-    os.environ.get("GEOPOLITICAL_SIGNAL_MODEL")
-    or os.environ.get("SIGNAL_DETECTION_MODEL_V2")
-    or OPENAI_MODEL_V2
+    os.environ.get("GEOPOLITICAL_SIGNAL_MODEL") or _GEOPOLITICAL_DEFAULT_MODEL
 )
 GEOPOLITICAL_SIGNAL_STAGE_B_DAILY_CAP: int = int(
     os.environ.get("GEOPOLITICAL_SIGNAL_STAGE_B_DAILY_CAP", "1000")
@@ -84,12 +92,36 @@ RESEARCH_UNIVERSE_URL: str = os.environ.get("RESEARCH_UNIVERSE_URL", "http://res
 RESEARCH_UNIVERSE_API_KEY: str | None = os.environ.get("RESEARCH_UNIVERSE_API_KEY") or None
 
 GEOPOLITICAL_SIGNAL_STAGE_C_PROMPT: Path = PROMPTS_DIR / "geopolitical_signal_stage_c_v1.txt"
-# Structured JSON output (5 fields) is a step up from Stage B's forced
-# one-word call - defaults to the same model as Stage B rather than a
-# separate env var's worth of config, but independently overridable if
-# Stage C's real output quality needs a stronger tier.
+# Stage C needs a stronger tier than Stage B, and this was measured
+# rather than assumed. Stage B asks one binary and returns one word;
+# Stage C returns six structured fields and must cross-check the sector
+# a document names against the scope lines of 19 categories in a
+# ~14,000-character prompt.
+#
+# On gpt-4o-mini (Stage B's default) that cross-check was being skipped:
+# 4 of 11 real cases passed. "Chile restricts lithium mining exports"
+# returned no category and `sector_not_named` even though the model's
+# OWN summary called lithium "this critical mineral" and Raw Materials &
+# Critical Minerals lists lithium by name - so step 1 found the sector
+# and step 2 never checked it. Asset tagging degraded with it (that same
+# row came back `natural_gas`).
+#
+# The same prompt on gpt-4.1 passes 10 of 11, including every
+# sub-category case the taxonomy implies: lithium and aluminum to Raw
+# Materials, submarine cables and satellite equipment to Telecom,
+# uranium to Nuclear, pharmaceutical APIs to Life Sciences. The
+# taxonomy was never the problem.
+#
+# Affordable because of where it sits: Stage A's allowlist and Stage B's
+# verdict mean only a handful of rows a day reach this call.
+#
+# Pinned to the same explicit model as Stage B rather than chained to
+# OPENAI_MODEL - the chain resolved to whatever base model the
+# deployment happened to set, so "which model tags our signals" was not
+# answerable from this file alone.
 GEOPOLITICAL_SIGNAL_STAGE_C_MODEL: str = (
-    os.environ.get("GEOPOLITICAL_SIGNAL_STAGE_C_MODEL") or GEOPOLITICAL_SIGNAL_MODEL
+    os.environ.get("GEOPOLITICAL_SIGNAL_STAGE_C_MODEL")
+    or _GEOPOLITICAL_DEFAULT_MODEL
 )
 
 # Macro Signal Backbone: INTERPRET is one short structured call per

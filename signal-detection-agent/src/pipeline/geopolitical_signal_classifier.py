@@ -9,10 +9,11 @@ upstream in news-retrieval's _dedup_by_title_similarity_for_domain (see
 pipeline.py's _TITLE_DEDUP_DOMAINS), so a duplicate never reaches this
 module as a separate article to begin with.
 
-Each article gets exactly one outcome: DROPPED (with a reason), WEAK, or
-WAITING (a survivor held for Stage B) - written by
-insert_geopolitical_signal_classification via
-_GEOPOLITICAL_SIGNAL_STAGE_A_MAP in models/jobs.py. An article whose
+Each article gets exactly one outcome, named with the signal_detection
+label it will be stored under: "noise" (with a drop_reason), "signal"
+(a Federal Register action notice, which skips Stage B), "weak_signal",
+or "waiting" (a survivor held for Stage B). Written by
+insert_geopolitical_signal_classification in models/jobs.py. An article whose
 article_id already has a row is skipped entirely by the caller before this
 module ever runs (see get_existing_geopolitical_signal_article_ids).
 """
@@ -157,6 +158,70 @@ ALLOWED_DOMAINS: frozenset[str] = frozenset({
     "cbc.ca",
     "abcnews.com",
     "rferl.org",
+    # Sixth review pass, and the first selected on a different question
+    # than the five above. Those asked "is this outlet a wire service or a
+    # paper of record" - a general-press test, which is why the list reads
+    # as general geopolitics. This domain's actual job is narrower: policy
+    # and trade developments that transmit into the AI economy, and the
+    # list had almost no coverage of the channels that actually carry
+    # that. Mapping the 45 existing entries against Stage C's own 19
+    # impacted categories left three channels effectively uncovered -
+    # semiconductor/export-control trade press, critical-minerals and
+    # energy press, and non-US tech-policy jurisdictions.
+    #
+    # Each was confirmed to extract a real body before being added (the
+    # same discipline the passes above used for headlines), since an
+    # outlet that passes Stage A and then reaches Stage C with no body
+    # is tagged on its headline alone - which is the failure this
+    # domain's Federal Register work exists to fix, and there is no point
+    # reintroducing it through the allowlist.
+    #
+    # Semiconductors / compute hardware / export controls - the single
+    # biggest gap. No trade publication covering chips or fab equipment
+    # was on the list at all, despite Semiconductor Manufacturing and
+    # Compute Hardware & Edge Systems being two of the four categories
+    # Stage C's own Taiwan override force-adds.
+    "tomshardware.com",          # 20,023 chars extracted
+    "semiconductor-digest.com",  # 7,943
+    "globalsources.com",         # electronics sourcing / China supply chain
+    # Raw materials, critical minerals and energy - Raw Materials &
+    # Critical Minerals and Energy & Grid Infrastructure were served only
+    # by spglobal.com and oilprice.com.
+    "miningweekly.com",          # 8,033
+    "argusmedia.com",            # 2,101
+    # Shipping chokepoints - joins gcaptain.com/tradewindsnews.com as the
+    # third source on a channel Stage B rates HIGH on its own.
+    "lloydslist.com",            # 2,498
+    # Non-US jurisdictions that WRITE the export-control and semiconductor
+    # rules. taipeitimes.com is the most consequential single entry here:
+    # Taiwan is the jurisdiction Stage C's deterministic override exists
+    # for, and no Taiwan-domiciled outlet was on the list.
+    "taipeitimes.com",           # 6,712
+    "koreaherald.com",           # 851
+    "politico.eu",               # 4,022 - EU tech/trade policy
+    # Russia sanctions and energy, from a non-state-aligned outlet.
+    "themoscowtimes.com",        # 4,456
+    # US and Canadian papers of record confirmed dropping real
+    # trade/tariff stories in the stored sample ("Latest U.S. tariffs on
+    # Canadian goods take effect", "U.S. tariffs are throwing Canadian art
+    # sales into trade-war chaos").
+    "cnn.com",                   # 6,236
+    "nbcnews.com",               # 9,659
+    "globalnews.ca",             # 11,482
+    "theglobeandmail.com",       # 6,131
+    # Excluded on this pass despite appearing in the dropped set, each for
+    # the reason the passes above would have excluded it:
+    #   washingtonpost.com, axios.com - extracted 0 chars from their real
+    #     stored URLs (paywalled), so they would pass Stage A and reach
+    #     Stage C headline-only
+    #   iranintl.com - extracts cleanly but is state-adjacent advocacy,
+    #     not a paper of record
+    #   marineinsight.com - trade blog, below the gcaptain/Lloyd's List
+    #     tier already listed
+    #   devdiscourse.com - highest drop volume of any domain (6) and still
+    #     excluded: aggregator copy, headlines like "Europe's Stance:
+    #     Unyielding in Geopolitical Choices" are the vague commentary
+    #     this allowlist exists to stop
 })
 
 # Talk verbs: the headline is reporting rhetoric, not a completed/announced
@@ -253,7 +318,8 @@ def _extract_domain(article: dict) -> str:
 
 def classify_geopolitical_signal_stage_a(article: dict) -> dict:
     """Apply Stage A's free rules, in order, to one article. Returns a dict
-    with at least an "outcome" key (DROPPED/WEAK/WAITING) and, for DROPPED,
+    with at least an "outcome" key (noise/weak_signal/waiting - the
+    stored signal_detection labels themselves, not synonyms) and, for DROPPED,
     a "drop_reason" key - the shape insert_geopolitical_signal_classification
     expects as its ``result`` argument.
 
@@ -263,11 +329,11 @@ def classify_geopolitical_signal_stage_a(article: dict) -> dict:
     """
     language = (article.get("metadata") or {}).get("language")
     if language and language.lower() != "english":
-        return {"outcome": "DROPPED", "drop_reason": "non_english"}
+        return {"outcome": "noise", "drop_reason": "non_english"}
 
     domain = _extract_domain(article)
     if domain not in ALLOWED_DOMAINS:
-        return {"outcome": "DROPPED", "drop_reason": "domain_not_allowed"}
+        return {"outcome": "noise", "drop_reason": "domain_not_allowed"}
 
     title = article.get("title") or ""
 
@@ -282,11 +348,11 @@ def classify_geopolitical_signal_stage_a(article: dict) -> dict:
     # and more reliable than asking a model to judge intent from an
     # information-poor title.
     if _is_federal_register_action_notice(title, domain):
-        return {"outcome": "HIGH"}
+        return {"outcome": "signal"}
 
     if _matches_any(title, _TALK_VERBS):
-        return {"outcome": "WEAK"}
+        return {"outcome": "weak_signal"}
 
     # Action-verb match or genuinely ambiguous (no match either way) both
     # continue to Stage B - the spec treats these identically.
-    return {"outcome": "WAITING"}
+    return {"outcome": "waiting"}
