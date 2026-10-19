@@ -1,7 +1,8 @@
 -- Roles and schemas on the shared platform database (alphaStreet-api docs/PLATFORM_ARCHITECTURE.md
 -- §4.2). Idempotent: rerun after every edit. Run as master against database `platform`:
---   psql "host=... dbname=platform user=master sslmode=require" \
---     -v ON_ERROR_STOP=1 -v svc_app_password="$SVC_APP_PASSWORD" -f roles.sql
+--   SVC_APP_PASSWORD=... psql "host=... dbname=platform user=master sslmode=verify-full" \
+--     -v ON_ERROR_STOP=1 -f roles.sql
+-- (bootstrap-app.sh does this; the password comes from the environment, never argv.)
 -- Today: schema app only. Each OCN service adds its schema + svc_<name> here when it moves in.
 
 -- Nobody connects or creates in public by default; each role is granted what it needs.
@@ -17,6 +18,7 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 -- svc_app owns its schema and runs its own migrations (the deploy's one-off alembic task uses the
 -- same DATABASE_URL). ponytail: no separate migrator_app until a second writer needs one.
 
+\getenv svc_app_password SVC_APP_PASSWORD
 SELECT 'CREATE ROLE svc_app LOGIN'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'svc_app') \gexec
 
