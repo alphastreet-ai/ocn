@@ -25,6 +25,12 @@ from urllib.parse import urlparse
 # Geopolitics is the worst news category for junk/propaganda outlets - this
 # allowlist is the main defence (spec's own framing). Kept intentionally
 # narrow; extend only with sources of the same tier, not general news sites.
+# What counts as English in a language field. Event Registry writes the
+# ISO 639-2 code "eng"; a source writing the plain word, or the 2-letter
+# "en", is accepted too so the check does not depend on which vocabulary
+# a fetcher happens to use. Anything else is treated as non-English.
+_ENGLISH_LANGUAGE_VALUES: frozenset[str] = frozenset({"eng", "en", "english"})
+
 ALLOWED_DOMAINS: frozenset[str] = frozenset({
     # spec-named wire services / papers of record
     "reuters.com",
@@ -327,13 +333,44 @@ def classify_geopolitical_signal_stage_a(article: dict) -> dict:
     that's a database check (get_existing_geopolitical_signal_article_ids),
     not something this function can determine from one article in isolation.
     """
-    language = (article.get("metadata") or {}).get("language")
-    if language and language.lower() != "english":
+    # Both spellings of the key, and both spellings of the VALUE.
+    #
+    # This read metadata["language"] and compared against the literal
+    # "english", and was dead on both counts: Event Registry writes
+    # `lang`, not `language` (measured: 325 of 325 rows carry
+    # lang="eng" and none carries `language` at all), so the lookup
+    # returned None and the guard short-circuited. Even with the right
+    # key, "eng" != "english" would have dropped every English article
+    # as non-English - the opposite failure, and a far louder one.
+    #
+    # Federal Register carries no language field at all; its documents
+    # are English by definition. An absent value is not a rejection -
+    # the same fail-open rule the rest of this pipeline uses, since
+    # "we don't know the language" must never read as "it is foreign".
+    meta = article.get("metadata") or {}
+    language = (meta.get("lang") or meta.get("language") or "").strip().lower()
+    if language and language not in _ENGLISH_LANGUAGE_VALUES:
         return {"outcome": "noise", "drop_reason": "non_english"}
 
+    # No domain filter. There was one here - every article from an
+    # outlet outside ALLOWED_DOMAINS was dropped as
+    # "domain_not_allowed" - and removing it was the point: measured
+    # over the full stored history (5,487 rows), ALL 5,280 Stage A
+    # drops were that one rule, so only 3.8% of articles ever reached
+    # Stage B. Real sanctions and export-control stories were lost
+    # because a publisher was unlisted, and five review passes adding
+    # domains by hand never caught up with a tail of 2,142 distinct
+    # ones.
+    #
+    # ALLOWED_DOMAINS itself is NOT dead - Stage D still reads it for
+    # `corroborated` (which outlets count as independent confirmation)
+    # and `primary_source`. It means "an outlet we trust", which is a
+    # different question from "an outlet worth reading at all", and
+    # only the second was ever this rule's job.
+    #
+    # `domain` is still derived: it is stored on the row and read
+    # downstream for display and corroboration.
     domain = _extract_domain(article)
-    if domain not in ALLOWED_DOMAINS:
-        return {"outcome": "noise", "drop_reason": "domain_not_allowed"}
 
     title = article.get("title") or ""
 

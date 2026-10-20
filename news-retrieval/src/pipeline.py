@@ -9,7 +9,7 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
-from functools import partial
+from functools import lru_cache, partial
 from typing import Any
 from urllib.parse import urlparse
 import feedparser
@@ -37,6 +37,7 @@ from models.articles import (
     iter_recent_articles_for_domain,
 )
 from models.sources import load_sources
+from sec_edgar import _USER_AGENT as _SEC_USER_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -212,40 +213,6 @@ def _impersonate_for(domain_slug: str) -> bool:
 # every later pass forever, and a dropped article would stop being
 # distinguishable from one that was never retrieved.
 #
-# MUST STAY IN SYNC with ALLOWED_DOMAINS in signal-detection-agent's
-# pipeline/geopolitical_signal_classifier.py, which remains the
-# authority on what becomes a signal. This copy only decides where a
-# body is worth fetching; a domain present there but missing here still
-# classifies, just headline-only, which is the safe direction for a
-# drift. Kept as a copy rather than a shared import because the two
-# services deploy independently and a cross-service import would couple
-# their release cycles for a list that changes a few times a year.
-_BODY_FETCH_DOMAINS: dict[str, frozenset[str]] = {
-    "geopolitical_news": frozenset({
-        # wire services / papers of record
-        "reuters.com", "apnews.com", "bloomberg.com", "ft.com", "wsj.com",
-        "aljazeera.com", "asia.nikkei.com", "afp.com", "upi.com",
-        "nhk.or.jp", "dw.com", "theguardian.com", "economist.com",
-        # US government
-        "federalregister.gov", "whitehouse.gov", "state.gov",
-        "treasury.gov", "commerce.gov", "defense.gov",
-        # regional / defense
-        "militarnyi.com", "kyivpost.com", "interfax.com.ua",
-        "en.interfax.com.ua", "armenpress.am", "newsukraine.rbc.ua",
-        "aa.com.tr", "france24.com", "haaretz.com",
-        "nytimes.com", "politico.com", "spglobal.com", "agenceurope.eu",
-        "cnbc.com", "gcaptain.com", "tradewindsnews.com", "oilprice.com",
-        "scmp.com", "channelnewsasia.com", "jpost.com", "defensenews.com",
-        "breakingdefense.com", "latimes.com", "cbc.ca", "abcnews.com",
-        "rferl.org",
-        # AI-economy channels
-        "tomshardware.com", "semiconductor-digest.com", "globalsources.com",
-        "miningweekly.com", "argusmedia.com", "lloydslist.com",
-        "taipeitimes.com", "koreaherald.com", "politico.eu",
-        "themoscowtimes.com", "cnn.com", "nbcnews.com", "globalnews.ca",
-        "theglobeandmail.com",
-    }),
-}
 
 
 def _fetch_body_or_none(
@@ -263,25 +230,24 @@ def _fetch_body_or_none(
 
 
 def _should_fetch_body(url: str, domain_slug: str) -> bool:
-    """Whether this article's body is worth fetching for this news domain.
+    """Whether this article's body is worth fetching. Always True.
 
-    True for every domain with no entry in _BODY_FETCH_DOMAINS - the
-    filter is opt-in, so no existing domain's behaviour changes.
+    There was a per-domain allowlist here (_BODY_FETCH_DOMAINS), and it
+    existed only as the mirror of Stage A's own domain filter in
+    signal-detection-agent: skipping the body for a publisher Stage A
+    was going to discard anyway. That filter is gone, so this one had no
+    remaining purpose - and keeping it would be actively harmful, since
+    an article that now reaches Stage B with no body is judged on its
+    headline alone, and a headline-only verdict is irreversible.
 
-    The host is derived from the URL rather than from the article's own
-    ``source`` field, and "www." is stripped while any other subdomain is
-    kept whole - the same two rules signal-detection-agent's Stage A
-    uses, and for the same confirmed reason: ``source`` is not reliably a
-    domain (it can be a display name like "Reuters" or a native-script
-    name), so trusting it silently skips real articles.
+    geopolitical_news was the only domain that ever had an entry, so
+    removing it changes nothing for any other caller. The function
+    stays, rather than its two call sites being edited away, because
+    "should this url be fetched" is a real question a future source may
+    answer differently - a paywalled domain, a known-dead host - and
+    this is where that would go.
     """
-    allowed = _BODY_FETCH_DOMAINS.get(domain_slug)
-    if allowed is None:
-        return True
-    host = (urlparse(url or "").hostname or "").lower()
-    if host.startswith("www."):
-        host = host[len("www."):]
-    return host in allowed
+    return True
 
 
 def _fetch_body_impersonated(url: str) -> str | None:
@@ -416,6 +382,33 @@ _archive_last_request_at = 0.0
 _ARCHIVE_MIN_USABLE_CHARS = 600
 
 
+# Jina AI's reader endpoint: prepend it to a URL and it returns the page
+# as markdown. The LAST tier, after Trafilatura, curl_cffi and
+# archive.ph have all failed, because it sends the article URL to a
+# third party - which is a real cost (that party learns which articles
+# this pipeline cares about), justified only for the handful per run
+# that nothing else can read.
+#
+# Measured across the 19 bodyless articles of one real run: 13 recovered,
+# including all three bloomberg.com items at 13.7k-19.1k characters.
+# ft.com still returns a 500-byte paywall stub, so this is a partial
+# answer, not a general one.
+_READER_PROXY_URL = "https://r.jina.ai/"
+# Published by the endpoint itself: "x-ratelimit-limit: 20, 20;w=60" on
+# an anonymous request. A token bucket rather than a fixed interval,
+# because the real constraint is 20 per rolling minute, not a minimum
+# gap - this lets a run of 3-4 blocked articles go straight through
+# while still refusing to exceed the published ceiling.
+_READER_RATE_LIMIT = 20
+_READER_RATE_WINDOW_SECS = 60.0
+_READER_LOCK = threading.Lock()
+_reader_request_times: list[float] = []
+# A paywall stub comes back small. ft.com measured 500 bytes, ejiltalk 0,
+# consilium.europa.eu 479; the smallest real article recovered was
+# 6,223. The gap is wide enough that a single threshold separates them.
+_READER_MIN_USABLE_CHARS = 1500
+
+
 def _fetch_body_from_archive(url: str) -> str | None:
     """Last attempt: read a public archive snapshot of the article.
 
@@ -535,6 +528,81 @@ def _throttle_domain(url: str) -> None:
         _domain_last_fetch_at[host] = time.monotonic()
 
 
+def _reader_slot_available() -> bool:
+    """Claim one slot against the reader endpoint's 20-per-60s budget.
+
+    Skip rather than wait, same discipline as the archive tier: a body is
+    optional, so declining THIS article beats blocking the workers
+    fetching others. Returns False when the window is already full.
+    """
+    now = time.monotonic()
+    with _READER_LOCK:
+        cutoff = now - _READER_RATE_WINDOW_SECS
+        _reader_request_times[:] = [t for t in _reader_request_times if t > cutoff]
+        if len(_reader_request_times) >= _READER_RATE_LIMIT:
+            return False
+        _reader_request_times.append(now)
+        return True
+
+
+def _fetch_body_from_reader(url: str) -> str | None:
+    """Final tier: read the article through Jina AI's reader endpoint.
+
+    Returns None - never a partial - when the rate budget is spent, the
+    endpoint errors, or what comes back is a paywall stub rather than an
+    article.
+
+    The markdown is run back through Trafilatura, not stored raw: the
+    reader returns the page's navigation, footer and cookie banner
+    alongside the article, and the same extraction the other tiers use
+    strips those. The paywall-teaser and bot-check markers apply here
+    too - a reader proxy can fetch a teaser page as faithfully as any
+    other client.
+    """
+    if not _reader_slot_available():
+        logger.debug("[BODY_FETCH] reader rate budget spent, skipping %r", url)
+        return None
+    try:
+        resp = httpx.get(
+            f"{_READER_PROXY_URL}{url}",
+            timeout=40.0,
+            follow_redirects=True,
+            headers={"x-return-format": "markdown"},
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.debug("[BODY_FETCH] reader failed for %r: %s", url, exc)
+        return None
+
+    raw = resp.text or ""
+    if len(raw) < _READER_MIN_USABLE_CHARS:
+        logger.debug(
+            "[BODY_FETCH] reader returned %d chars for %r - paywall stub, not an"
+            " article", len(raw), url,
+        )
+        return None
+
+    # Markdown in, article text out. Same serialized Trafilatura call
+    # the direct path uses - see _EXTRACT_LOCK for the segfaults that
+    # forced it - so a page that is mostly chrome reduces to nothing
+    # here rather than being stored as a body. Trafilatura reads
+    # markdown's own structure poorly, so a failed extraction falls back
+    # to the cleaned raw text rather than discarding a real article.
+    try:
+        with _EXTRACT_LOCK:
+            text = trafilatura.extract(raw)
+    except Exception:
+        text = None
+    text = _clean_summary(text or raw)
+    if not text or len(text) < _READER_MIN_USABLE_CHARS:
+        return None
+    if _looks_like_paywall_teaser(text):
+        logger.debug("[BODY_FETCH] reader body for %r is a teaser/bot page", url)
+        return None
+    logger.info("[BODY_FETCH] reader recovered %d chars for %r", len(text), url)
+    return text
+
+
 def _fetch_body(url: str, *, impersonate_fallback: bool = False) -> str | None:
     """Fetch url and return its extracted body text, or None when the fetch
     or extraction yields nothing (paywall/bot-detection block, or a dead
@@ -590,7 +658,17 @@ def _fetch_body(url: str, *, impersonate_fallback: bool = False) -> str | None:
         return text
     if not impersonate_fallback:
         return None
-    return _fetch_body_impersonated(url) or _fetch_body_from_archive(url)
+    # Three fallbacks, cheapest and most self-contained first:
+    #   impersonated  our own request with a browser TLS fingerprint
+    #   archive       a public snapshot, 5 publishers only
+    #   reader        a third party fetches it for us - last, because it
+    #                 is the only tier that tells someone else which
+    #                 articles this pipeline reads
+    return (
+        _fetch_body_impersonated(url)
+        or _fetch_body_from_archive(url)
+        or _fetch_body_from_reader(url)
+    )
 
 
 def _extract_body(entry: Any, url: str, no_fetch: bool) -> str | None:
@@ -1362,6 +1440,10 @@ _FEDERAL_REGISTER_FIELDS = [
     "agencies",
     "executive_order_number",
     "raw_text_url",
+    # When a rule takes effect - the M1 alert rule in the Middle East
+    # spec needs a stated start date, and it can differ from publication
+    # (the UAE A:5 rule was published 14 Jul 2026, effective 10 Jul).
+    "effective_on",
 ]
 
 # Measured over the 14 real stored documents: the abstract carries 1.5-20% of
@@ -1404,22 +1486,43 @@ _FR_TEXT_MASTHEAD_RE = re.compile(
 )
 
 
-def _fetch_federal_register_body(raw_text_url: str) -> str | None:
+def _fetch_federal_register_body(
+    raw_text_url: str,
+    document_number: str | None = None,
+    publication_date: str | None = None,
+    max_chars: int | None = _FEDERAL_REGISTER_BODY_MAX_CHARS,
+) -> str | None:
     """Return the document's full text, or None when it cannot be read.
 
     None, never "" - a null reads as "not fetched", an empty string would read
     as "this document says nothing", and the two must not be conflated (same
     rule the China and Japan sources follow for unreadable PDFs).
+
+    govinfo.gov is tried FIRST, with federalregister.gov as the fallback.
+    Both serve the same document - govinfo is the Government Publishing
+    Office's own system and the Register's API links to it - but they
+    behave very differently under load:
+
+      federalregister.gov  rate-limits per IP and answers 302 ->
+                           unblock.federalregister.gov on EVERY full-text
+                           format (txt, xml, html) and every user agent,
+                           while its JSON API keeps answering 200.
+      govinfo.gov          12 parallel requests with no delay returned
+                           12/12 200s in 1.7 seconds (measured).
+
+    So the throttle below applies only to the fallback leg; the primary
+    needs none, which is what lets a backfill of hundreds of documents
+    run in seconds rather than minutes.
     """
-    # Paced through the same per-host throttle the RSS body fetches use.
-    # This loop had none: it fired one request per document back to back,
-    # and federalregister.gov answered with a 302 to its access-request
-    # interstitial on every full-text URL once the burst was large
-    # enough. Production fetches --days-back 1 daily (9 documents on a
-    # real day, 23 over 7), so the unpaced version would probably have
-    # stayed under the threshold - but "probably" is not a guarantee for
-    # a loop whose failure mode is silent, and at the 1.0s default the
-    # whole cost is 9 seconds on a once-daily job.
+    body = _fetch_federal_register_body_from_govinfo(
+        document_number, publication_date, max_chars,
+    )
+    if body:
+        return body
+
+    # Fallback: the Register's own full-text URL. Reached when govinfo
+    # has no copy (very recent documents can lag) or the document number
+    # is missing. Throttled, because this is the host that rate-limits.
     _throttle_domain(raw_text_url)
     try:
         resp = httpx.get(raw_text_url, timeout=30.0, follow_redirects=True)
@@ -1444,8 +1547,9 @@ def _fetch_federal_register_body(raw_text_url: str) -> str | None:
     if "unblock" in final_host or "html" in content_type.lower():
         logger.warning(
             "[FEDERAL_REGISTER] body fetch blocked (redirected to %s, "
-            "content-type %r) url=%r - storing no body rather than the "
-            "block page", final_host, content_type, raw_text_url,
+            "content-type %r) url=%r - govinfo had no copy either, "
+            "storing no body rather than the block page",
+            final_host, content_type, raw_text_url,
         )
         return None
     text = _clean_summary(resp.text)
@@ -1456,7 +1560,68 @@ def _fetch_federal_register_body(raw_text_url: str) -> str | None:
     # is the safe direction: a little boilerplate beats a blanked body.
     text = _FR_TEXT_LEAD_RE.sub("", text) or text
     text = _FR_TEXT_MASTHEAD_RE.sub("", text) or text
-    return text[:_FEDERAL_REGISTER_BODY_MAX_CHARS] or None
+    return text[:max_chars] or None
+
+
+def _fetch_federal_register_body_from_govinfo(
+    document_number: str | None, publication_date: str | None,
+    max_chars: int | None = _FEDERAL_REGISTER_BODY_MAX_CHARS,
+) -> str | None:
+    """Fetch the same document from govinfo.gov, the GPO's own site.
+
+    Not a proxy or a workaround: govinfo.gov IS the Government
+    Publishing Office's official publication system, and the Federal
+    Register's own API links to it. federalregister.gov rate-limits its
+    full-text URLs per IP (302 -> unblock.federalregister.gov, on every
+    format - txt, xml and html alike - and on every user agent, while
+    its JSON API keeps answering 200). govinfo serves the identical
+    document from different infrastructure with no such limit -
+    confirmed live on 4 documents returning 2.2k-22k characters each
+    while federalregister.gov was returning the block page.
+
+    The URL is deterministic from two fields the API already gives us,
+    so this costs no extra lookup:
+        https://www.govinfo.gov/content/pkg/FR-<pub-date>/html/<doc-no>.htm
+    """
+    if not document_number or not publication_date:
+        return None
+    url = (
+        f"https://www.govinfo.gov/content/pkg/FR-{publication_date}"
+        f"/html/{document_number}.htm"
+    )
+    # No throttle, deliberately. Measured: 12 parallel requests with no
+    # delay returned 12/12 200s in 1.7s. This is a government CDN, not a
+    # publisher defending its paywall, and pacing it would cost a daily
+    # run real time for no benefit. If it ever starts 429ing, add
+    # "govinfo.gov" to _DOMAIN_FETCH_INTERVALS and call _throttle_domain
+    # here - the machinery is already there.
+    try:
+        resp = httpx.get(url, timeout=30.0, follow_redirects=True)
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.warning("[FEDERAL_REGISTER] govinfo fallback failed url=%r: %s", url, exc)
+        return None
+
+    # govinfo wraps the document in a <pre> block inside a minimal page,
+    # so tag-stripping yields the text rather than a layout. The same
+    # masthead/lead strips as the primary path then apply, since it is
+    # the same document with the same preamble.
+    # NUL bytes are stripped before anything else: Postgres rejects them
+    # outright ("A string literal cannot contain NUL (0x00) characters"),
+    # and at least one real govinfo document carries them, so without
+    # this the whole insert fails rather than that one body.
+    text = _clean_summary(re.sub(r"<[^>]+>", " ", resp.text).replace("\x00", ""))
+    if not text:
+        return None
+    text = _FR_TEXT_LEAD_RE.sub("", text) or text
+    text = _FR_TEXT_MASTHEAD_RE.sub("", text) or text
+    text = text[:max_chars] or None
+    if text:
+        logger.info(
+            "[FEDERAL_REGISTER] govinfo fallback recovered %d chars for %s",
+            len(text), document_number,
+        )
+    return text
 
 
 def _fetch_one_federal_register(source: dict, days_back: int) -> list[dict]:
@@ -1475,6 +1640,17 @@ def _fetch_one_federal_register(source: dict, days_back: int) -> list[dict]:
     config = dict(source.get("config") or {})
     agencies: list[str] = config.get("agencies", [])
     doc_types: list[str] = config.get("type", [])
+    # Optional full-text filter (the API's own `|` OR syntax) and url
+    # scheme. A second domain fetching documents geopolitical_news already
+    # stored would lose every one of them to the global url index, so a
+    # source with `url_scheme` stores {scheme}://{document_number} and
+    # keeps the real link in metadata.html_url.
+    terms: str | None = config.get("terms")
+    url_scheme: str | None = config.get("url_scheme")
+    # The 20,000-character default exists because geopolitical_news reads
+    # only the first 2,000. A source may set body_max_chars to null to
+    # store the whole document - the UAE A:5 rule is 33,187 characters.
+    body_max_chars = config.get("body_max_chars", _FEDERAL_REGISTER_BODY_MAX_CHARS)
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
     params: dict = {
@@ -1487,6 +1663,8 @@ def _fetch_one_federal_register(source: dict, days_back: int) -> list[dict]:
         params["conditions[agencies][]"] = agencies
     if doc_types:
         params["conditions[type][]"] = doc_types
+    if terms:
+        params["conditions[term]"] = terms
 
     t0 = time.perf_counter()
     results: list[dict] = []
@@ -1518,16 +1696,18 @@ def _fetch_one_federal_register(source: dict, days_back: int) -> list[dict]:
             # is the document. Never a slice of the other - this service keeps
             # summary a real lead or NULL everywhere else too.
             raw_text_url = doc.get("raw_text_url")
+            html_url = doc.get("html_url", "")
             results.append({
                 "title": doc.get("title", ""),
-                "url": doc.get("html_url", ""),
+                "url": (f"{url_scheme}://{doc.get('document_number')}"
+                        if url_scheme else html_url),
                 "published": doc.get("publication_date", ""),
                 "source": ", ".join(filter(None, agency_names)) or "Federal Register",
                 "summary": _clean_summary(doc.get("abstract") or ""),
-                "body": (
-                    _fetch_federal_register_body(raw_text_url)
-                    if raw_text_url else None
-                ),
+                # Filled in parallel after the whole listing is walked -
+                # see the ThreadPoolExecutor below. Fetching inline here
+                # made the loop one blocking request per document.
+                "body": None,
                 "_pub_date": pub_date,
                 "metadata": {
                     "type": doc.get("type"),
@@ -1535,6 +1715,12 @@ def _fetch_one_federal_register(source: dict, days_back: int) -> list[dict]:
                     "agencies": agency_names,
                     "executive_order_number": doc.get("executive_order_number"),
                     "raw_text_url": raw_text_url,
+                    "effective_on": doc.get("effective_on"),
+                    "html_url": html_url,
+                    # Optional, from config - lets a domain exclude these
+                    # rows from its title-similarity dedup by category.
+                    **({"source_category": config["source_category"]}
+                       if config.get("source_category") else {}),
                 },
             })
 
@@ -1543,11 +1729,631 @@ def _fetch_one_federal_register(source: dict, days_back: int) -> list[dict]:
         url = data.get("next_page_url")
         request_params = None
 
+    # Bodies in parallel, after the listing is fully walked. govinfo.gov
+    # is the primary source and takes 12 concurrent requests without
+    # complaint (measured: 12/12 200s in 1.7s), so this turns a loop that
+    # was one blocking fetch per document into a single wide batch - on a
+    # real day's ~9 documents it is the difference between ~20 seconds
+    # and ~2.
+    #
+    # Width matches the other body-fetch paths in this module. The
+    # federalregister.gov fallback leg still throttles itself per host,
+    # so a wide pool cannot stampede the host that actually rate-limits.
+    to_fetch = [r for r in results if (r["metadata"] or {}).get("raw_text_url")]
+    if to_fetch:
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            bodies = list(executor.map(
+                lambda r: _fetch_federal_register_body(
+                    r["metadata"]["raw_text_url"],
+                    r["metadata"].get("document_number"),
+                    r["published"] or None,
+                    body_max_chars,
+                ),
+                to_fetch,
+            ))
+        for row, body in zip(to_fetch, bodies):
+            row["body"] = body
+        logger.info(
+            "[FEDERAL_REGISTER] fetched %d/%d bodies",
+            sum(1 for b in bodies if b), len(to_fetch),
+        )
+
     logger.info(
         "[TIMER] federal_register source=%r articles=%d elapsed=%.2fs",
         source["url"], len(results), time.perf_counter() - t0,
     )
     return results
+
+
+_EVENT_REGISTRY_ENDPOINT = "https://eventregistry.org/api/v1/article/getArticles"
+# One request returns at most this many; the free tier bills 1 token per
+# request regardless, so asking for the maximum is strictly cheaper than
+# paging.
+_EVENT_REGISTRY_PAGE = 100
+# Free-tier ceiling, enforced by the API: a query carrying more is
+# rejected outright ("Too many keywords specified"). A MULTI-WORD phrase
+# counts per word - "export controls" is 2, not 1 - so a 4-phrase query
+# plus lang and two dates sits just under it.
+_EVENT_REGISTRY_MAX_KEYWORDS = 15
+
+# The 15 commonest English function words. Real prose is built out of
+# them; text whose columns have been interleaved during extraction keeps
+# its letters and loses its words, so this rate collapses while every
+# other cheap measure (length, average token size) looks normal.
+_ER_STOPWORDS = frozenset({
+    "the", "and", "of", "to", "in", "for", "that", "with", "on", "as",
+    "is", "are", "was", "by", "from",
+})
+_ER_STOPWORD_SPLIT_RE = re.compile(r"[^a-z]+")
+# Below this share of stopwords the body is not prose and is dropped.
+#
+# Measured over 304 real stored bodies from this domain: mean 0.222,
+# 5th percentile 0.168, and the ONE corrupt row 0.004 - a 40x gap with
+# nothing between 0.10 and 0.168, so the floor has wide margin in both
+# directions. The corrupt row was ibj.com served through Event Registry
+# as 5,220 characters reading "i tgr c a taoPufitoboadarylsmdaaibuit a
+# sryww ecnavm rutRey aggSoCn" - letters from adjacent columns of a
+# multi-column page, interleaved.
+#
+# Scoped to this fetcher deliberately. Event Registry is the one source
+# here whose body text is a THIRD PARTY's crawl of an arbitrary
+# publisher's rendered page, so it is the only one that can hand us
+# someone else's extraction failure. Federal Register bodies come from
+# a government API's raw_text_url and cannot take this shape.
+#
+# ibj.com now answers our own fetch with a 403 JavaScript challenge,
+# which is the likely cause: a bot-protected page scraped anyway. That
+# is also why this is a validator and not a fix - the text arrives
+# broken from the supplier and there is no extraction step of ours to
+# correct.
+_ER_MIN_STOPWORD_RATE = 0.10
+# Short bodies are exempt: a 20-word body can legitimately contain few
+# function words, and the rate is too noisy to judge on. Every real
+# corrupt sample seen has been thousands of characters.
+_ER_STOPWORD_MIN_CHARS = 400
+
+
+def _is_readable_prose(body: str) -> bool:
+    """True when ``body`` reads as English prose rather than scrambled text.
+
+    Returns True for anything shorter than _ER_STOPWORD_MIN_CHARS - the
+    measure needs enough words to be stable, and fail-open is the right
+    direction: a body wrongly dropped is evidence lost, while a body
+    wrongly kept is what the caller already had.
+    """
+    if len(body) < _ER_STOPWORD_MIN_CHARS:
+        return True
+    tokens = body.split()
+    if not tokens:
+        return False
+    words = _ER_STOPWORD_SPLIT_RE.split(body.lower())
+    hits = sum(1 for w in words if w in _ER_STOPWORDS)
+    return (hits / len(tokens)) >= _ER_MIN_STOPWORD_RATE
+
+
+def _er_body_or_none(body: str | None, url: str | None) -> str | None:
+    """Return ``body``, or None when it is not readable prose.
+
+    Logged at WARNING rather than dropped quietly: a body silently
+    becoming NULL looks exactly like a publisher that served nothing,
+    and the two call for different responses - the first is a supplier
+    defect worth watching, the second is normal.
+    """
+    if not body:
+        return None
+    if _is_readable_prose(body):
+        return body
+    logger.warning(
+        "[EVENT_REGISTRY] dropping unreadable body (%d chars, not prose)"
+        " for %s", len(body), url or "(no url)",
+    )
+    return None
+
+
+def _fetch_one_event_registry(
+    source: dict, days_back: int, api_key: str,
+) -> list[dict]:
+    """Fetch one Event Registry (newsapi.ai) query.
+
+    Unlike every other news source here, the article BODY arrives with
+    the response - so none of the fetch tiers (Trafilatura, curl_cffi,
+    archive.ph, the reader proxy) runs for these rows. Measured over one
+    real day: 245 articles, 245 with body, average 3,501 characters.
+
+    `keywordLoc: "title"` is deliberate and was measured: the same terms
+    matched against the body returned 11,020 results for a single day,
+    including Formula 1 and local gas prices, against 565 title-matched
+    with usable precision.
+
+    Every enrichment field is opt-in and silently absent without its
+    flag - a first version stored 245 rows with concepts=[] because one
+    flag was missing - so each is requested explicitly below.
+    """
+    config = source.get("config") or {}
+    terms = config.get("keywords") or []
+    # A source may instead carry a whole Event Registry condition in
+    # `query` - concepts, outlets and keyword locations combined - which
+    # the Middle East queries need: an entity alone was measured to match
+    # astronomy ("helium") and IPO anchor books (the Gulf funds), so each
+    # pairs an entity with a topic term. Language and date are still added
+    # here, so no query can drift outside the run's window.
+    condition = config.get("query") or (
+        {"$or": [{"keyword": t, "keywordLoc": "title"} for t in terms]}
+        if terms else None)
+    if not condition:
+        return []
+    # See _fetch_one_federal_register: a second domain storing articles
+    # another domain's query also matches needs its own url scheme, or the
+    # global url index drops them. The real link moves to
+    # metadata.article_url.
+    url_scheme: str | None = config.get("url_scheme")
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=max(days_back, 1))
+    payload = {
+        "query": {"$query": {"$and": [
+            condition,
+            {"lang": "eng"},
+            {"dateStart": str(start), "dateEnd": str(end)},
+        ]},
+        # Drop near-identical reprints at the API, before they cost a
+        # row, a Stage A insert and a Stage B model call. Measured on
+        # one real day: 187 matches without it, 142 with - 45 syndicated
+        # copies of stories already in the set.
+        #
+        # The url dedup further down cannot catch these: a reprint
+        # carries a DIFFERENT url, so it reads as a new article. This is
+        # also distinct from event_uri grouping, which links separate
+        # outlets genuinely reporting one event (7 different headlines
+        # on one UN Haiti vote) rather than copies of one wire story.
+        "$filter": {"isDuplicate": "skipDuplicates"}},
+        "articlesCount": _EVENT_REGISTRY_PAGE,
+        "articleBodyLen": -1,          # full body; the default truncates
+        "articlesSortBy": "date",
+        "includeArticleConcepts": True,
+        "includeArticleCategories": True,
+        "includeArticleLocation": True,
+        "includeArticleImage": True,
+        "includeArticleSentiment": True,
+        "includeArticleEventUri": True,
+        "includeArticleAuthors": True,
+        "includeArticleOriginalArticle": True,
+        "includeArticleSocialScore": True,
+        "includeArticleExtractedDates": True,
+        "includeArticleDuplicateList": True,
+        "includeArticleStoryUri": True,
+        "includeSourceTitle": True,
+        "includeSourceDescription": True,
+        "includeSourceLocation": True,
+        "includeSourceRanking": True,
+        "apiKey": api_key,
+    }
+    try:
+        resp = httpx.post(
+            _EVENT_REGISTRY_ENDPOINT, json=payload, timeout=90.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning(
+            "[EVENT_REGISTRY] source=%r failed: %s", source.get("url"), exc,
+        )
+        return []
+    if "articles" not in data:
+        # The API reports quota and query errors as a 200 with an
+        # "error" key, so a bare status check would read a rejected
+        # query as an empty day.
+        logger.warning(
+            "[EVENT_REGISTRY] source=%r rejected: %s",
+            source.get("url"), str(data.get("error") or data)[:200],
+        )
+        return []
+
+    results = data["articles"]["results"]
+    total = data["articles"].get("totalResults") or 0
+    # Further pages only when the source asks for them (`max_pages`,
+    # default 1): each page costs a token. The Middle East shipping query
+    # matched 108 in one day against the 100-article page.
+    for page in range(2, int(config.get("max_pages") or 1) + 1):
+        if len(results) >= total:
+            break
+        try:
+            more = httpx.post(_EVENT_REGISTRY_ENDPOINT,
+                              json=dict(payload, articlesPage=page), timeout=90.0)
+            more.raise_for_status()
+            batch = (more.json().get("articles") or {}).get("results") or []
+        except Exception as exc:
+            logger.warning("[EVENT_REGISTRY] source=%r page %d failed: %s",
+                           source.get("url"), page, exc)
+            break
+        if not batch:
+            break
+        results.extend(batch)
+    logger.info(
+        "[EVENT_REGISTRY] source=%r matched=%s fetched=%d",
+        source.get("url"), total, len(results),
+    )
+
+    articles: list[dict] = []
+    for raw in results:
+        published = raw.get("dateTimePub") or raw.get("dateTime")
+        pub_date = None
+        if published:
+            try:
+                pub_date = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        articles.append({
+            # --- COLUMNS on `articles`, shared by every domain -----
+            # These are this service's own schema, not Event Registry's,
+            # so they keep their existing names and are NOT duplicated
+            # into metadata below under the supplier's spelling.
+
+            # title: the headline, verbatim. Never rewritten - it is
+            # also the dedup and also_reported_by matching key.
+            "title": raw.get("title", ""),
+            # url: the article's own address at the publisher.
+            "url": raw.get("url", ""),
+            # published: WHEN IT WAS PUBLISHED - their dateTimePub,
+            # deliberately not dateTime (which is when Event Registry
+            # crawled it, and is kept separately in metadata). A crawl
+            # time would silently shift every article forward by
+            # minutes to hours.
+            "published": published,
+            # source: the outlet's DISPLAY name ("The Hindu"). The
+            # matchable domain is metadata.source_uri - this field is
+            # for a reader, that one is for code.
+            "source": (raw.get("source") or {}).get("title"),
+            # summary: deliberately NULL. Event Registry returns the
+            # body and never an editorial lead, and this service keeps
+            # summary a real lead or NULL rather than a slice of the
+            # body - the same rule the China and Japan sources follow.
+            # Stage C generates one downstream where it needs it.
+            "summary": None,
+            # body: THE FULL ARTICLE TEXT, which is the reason this
+            # source is worth having. It arrives WITH the response, so
+            # none of the fetch tiers (Trafilatura, curl_cffi,
+            # archive.ph, the reader proxy) runs for these rows -
+            # measured 245/245 with body, average 3,501 characters,
+            # against 12/114 on the fetched-RSS path.
+            #
+            # Validated before storing, because it is THEIR crawl of
+            # someone else's page: one row in 325 arrived as 5,220
+            # characters of column-interleaved letters (see
+            # _is_readable_prose). NULL rather than the text, so the
+            # row keeps its headline and downstream judges on that -
+            # dropping the article would discard a real event over a
+            # supplier-side extraction fault, and keeping the text
+            # would present noise as evidence.
+            "body": _er_body_or_none(raw.get("body"), raw.get("url")),
+            # _pub_date: the parsed form of `published`, which
+            # create_articles uses for the days_back window. Internal
+            # to this service's fetchers; renamed to `published` before
+            # storage.
+            "_pub_date": pub_date,
+            "metadata": {
+                # source_type: OURS, not theirs - which fetcher wrote
+                # this row. Every domain in this service stamps it, and
+                # it is what makes "where did this article come from"
+                # answerable without inspecting the url.
+                "source_type": "eventregistry",
+
+                # --- Event Registry's own fields -------------------
+                # Stored under THEIR names, snake_cased (every key in
+                # this service is snake_case, and Postgres folds
+                # unquoted identifiers to lowercase, so a camelCase key
+                # is a query trap). The word is theirs; only the
+                # spelling convention is ours.
+                #
+                # url / title / published / body / source are NOT here:
+                # they are first-class columns on `articles`, shared by
+                # every domain, and storing them twice would be the
+                # same value under two names.
+
+                # uri: WHICH ARTICLE this is, in Event Registry's own
+                # numbering ("9506780276"). Stable across requests, so
+                # it is the natural dedup key if two fetches disagree
+                # about a url (tracking parameters, http vs https).
+                # Distinct from story_uri and event_uri below, which
+                # identify GROUPS rather than this one article.
+                "uri": raw.get("uri"),
+                # event_uri (their eventUri): cluster id for a
+                # real-world event. Articles sharing one report the SAME
+                # underlying action - measured: 7 outlets with different
+                # headlines on one UN Haiti sanctions vote. Absent on
+                # single-source stories (59 of 100 had one).
+                "event_uri": raw.get("eventUri"),
+                # story_uri (their storyUri): WHICH ONGOING STORY this
+                # belongs to - a coarser grouping than event_uri, meant
+                # to link related coverage over time rather than one
+                # discrete action. Measured 66/100, the same rows that
+                # carry an event_uri, and on this sample the two values
+                # were identical - so it adds nothing here yet, and is
+                # kept only because a longer-running story would be
+                # where the difference appears.
+                "story_uri": raw.get("storyUri"),
+                # is_duplicate (their isDuplicate): this article is a
+                # near-identical reprint of another. The query already
+                # asks the API to skip these ($filter skipDuplicates),
+                # so it should be false on everything fetched.
+                "is_duplicate": raw.get("isDuplicate"),
+                # duplicate_list (their duplicateList): the uris of
+                # those reprints, populated only on the CANONICAL
+                # article. Empty in practice once skipDuplicates is on.
+                "duplicate_list": [
+                    d.get("uri") for d in (raw.get("duplicateList") or [])
+                    if isinstance(d, dict) and d.get("uri")
+                ],
+                # original_article (their originalArticle): where this
+                # one was copied from, when it is itself a copy.
+                "original_article": raw.get("originalArticle"),
+
+                # concepts: WHO AND WHAT the article is about, as
+                # Event Registry extracted it - named entities with a
+                # score (5 = the article's subject, 1 = a passing
+                # mention) and a type (wiki / org / loc / person).
+                #
+                # An INDEPENDENT read of the question Stage C's own
+                # entity extraction answers, which is the point of
+                # keeping it: the two can be compared rather than one
+                # trusted blindly. Measured against Stage C on the same
+                # articles, Stage C wins on the part that matters - on a
+                # Belarus sanctions fine ER returned "Euro, Belarus"
+                # while Stage C named Dage Capital and Alfa-Bank, the
+                # actually-sanctioned firms - because concepts are
+                # topical tags with no reason text, no actor/target
+                # distinction, and no named-in-text check. Useful as a
+                # RECALL check (a company ER names that Stage C missed
+                # is a prompt bug worth finding), not as a source.
+                "concepts": [
+                    {"label": c["label"]["eng"], "score": c.get("score"),
+                     "type": c.get("type")}
+                    for c in (raw.get("concepts") or [])
+                    if c.get("label", {}).get("eng")
+                ],
+                # categories: WHAT SUBJECT AREA is this, on two
+                # published taxonomies - DMOZ (the old web directory)
+                # and IPTC (the news industry's own). Each carries a
+                # weight, 0-100, for how strongly it applies:
+                #   {"label":"iptc/economy, business and finance/
+                #             products and services/energy and resource",
+                #    "wgt":100}
+                # 100% coverage, but these are BROAD subject buckets,
+                # not the AI-economy transmission question
+                # impacted_categories answers downstream. A story can be
+                # "dmoz/Business/Energy" and touch no category in this
+                # pipeline's taxonomy at all.
+                "categories": [
+                    {"label": c.get("label"), "wgt": c.get("wgt")}
+                    for c in (raw.get("categories") or [])
+                ],
+                # extracted_dates (their extractedDates): dates found IN
+                # the text. `implicit` marks one resolved from a relative
+                # phrase ("today", "Wednesday") rather than stated.
+                # Measured: on a real sanctions day EVERY extracted date
+                # was implicit and equal to the publication date, so this
+                # cannot supply event_date - but it can CHECK one: a
+                # Stage C event_date far from publication, on an article
+                # whose only dates are implicit, is the shape of the
+                # fabrications caught live (two rows claiming 2023-10-09).
+                "extracted_dates": [
+                    {"date": d.get("date"), "implicit": d.get("imp"),
+                     "ambiguous": d.get("amb")}
+                    for d in (raw.get("extractedDates") or [])
+                    if isinstance(d, dict) and d.get("date")
+                ],
+                # authors: WHO WROTE IT. Their `authors` is a list of
+                # objects (uri, name, type, isAgency); only the name is
+                # kept, since the rest is Event Registry's own author
+                # identity graph and nothing here resolves against it.
+                # 50/100 coverage - wires and aggregators often carry no
+                # byline.
+                "authors": [
+                    a.get("name") for a in (raw.get("authors") or []) if a.get("name")
+                ],
+                # location: WHERE THE EVENT HAPPENED - their docs say
+                # "the geographic location that the event mentioned in
+                # the article is about". It is the place the story is
+                # about, NOT where the outlet sits; source_country and
+                # source_location below answer that separate question.
+                #
+                # Shape varies: either a bare country
+                #   {"type":"country","label":{"eng":"Canada"}}
+                # or a place nested under one
+                #   {"type":"place","label":{"eng":"Ontario"},
+                #    "country":{"label":{"eng":"Canada"}}}
+                # so a reader must handle both rather than assuming
+                # `location.country` exists.
+                #
+                # Measured 7/100 on a real geopolitical day, and the
+                # ones it DOES fill are the least useful here - Canada,
+                # Ontario, Maharashtra, i.e. local stories that matched
+                # a keyword ("Maharashtra Govt sanctions Rs 17 crore").
+                # Event Registry geolocates a provincial budget
+                # confidently and a Treasury determination not at all,
+                # because a policy action has no place attached the way
+                # a protest or an earthquake does. Stored raw because it
+                # costs nothing; do not build on it.
+                "location": raw.get("location"),
+                # image: the article's lead image url. Stored because
+                # it arrives free; nothing in this pipeline reads it.
+                "image": raw.get("image"),
+                # lang: WHAT LANGUAGE the article is in, ISO 639-3
+                # ("eng"). Constant for this domain - every query asks
+                # for {"lang":"eng"} - so it is an assertion that the
+                # filter held, not a variable.
+                "lang": raw.get("lang"),
+                # data_type (their dataType): WHAT KIND of content -
+                # "news", "pr" (a press release) or "blogs". Worth
+                # keeping distinct: a PR wire item is a company talking
+                # about itself, which Stage B should read as a statement
+                # rather than an action. Every row here is "news"
+                # because the query does not ask for the others.
+                "data_type": raw.get("dataType"),
+                # date_time (their dateTime): when Event Registry
+                # CRAWLED it. The `published` column carries
+                # dateTimePub, the publication time, which is the one
+                # that matters.
+                "date_time": raw.get("dateTime"),
+
+                # --- source sub-object, flattened ------------------
+                # source_uri (their source.uri): WHICH OUTLET
+                # published it, as a bare domain ("livemint.com"). This
+                # is the dedup and allowlist key everywhere else in this
+                # service, and it is more reliable than the `source`
+                # COLUMN, which carries a display title ("The Hindu")
+                # that cannot be matched against a domain list.
+                "source_uri": (raw.get("source") or {}).get("uri"),
+                # source_country / source_location (their
+                # source.location.country.label.eng and .label.eng):
+                # WHERE THE OUTLET IS BASED - "India" / "Chennai". The
+                # counterpart to `location` above, which is where the
+                # EVENT happened: a Jamaican paper reporting a UN vote
+                # in New York has source_country "Jamaica" and an event
+                # location of Haiti or the US, and the two must not be
+                # read as the same fact.
+                #
+                # Bears on corroboration: one Russian state outlet and
+                # one US wire are not two independent reports, the
+                # distinction Stage D's allowlist filter makes by hand.
+                # ~50% coverage, against 7% for the event location.
+                "source_country": (
+                    ((raw.get("source") or {}).get("location") or {})
+                    .get("country", {}).get("label", {}).get("eng")
+                ),
+                "source_location": (
+                    ((raw.get("source") or {}).get("location") or {})
+                    .get("label", {}).get("eng")
+                ),
+                # source_importance_rank (their
+                # source.ranking.importanceRank): LOWER is better -
+                # New York Post 1,581, The Telegraph 2,712. 1,000,000 is
+                # a sentinel for "unranked", NOT "worst": The Kyiv
+                # Independent and Chosun Ilbo both sit there, so
+                # filtering on this naively would discard real outlets.
+                "source_importance_rank": (
+                    ((raw.get("source") or {}).get("ranking") or {})
+                    .get("importanceRank")
+                ),
+
+                # --- scores: stored as returned, NOT acted on ------
+                # sentiment: tone of the prose, -1..+1. Measured to
+                # track the OUTLET'S WRITING, not the direction of a
+                # measure - two outlets covering one EU sanctions
+                # package scored +0.271 and -0.075. Event Registry's own
+                # docs define no bullish/bearish reading; their README
+                # example treats >= 0.4 as "positive" for celebrity
+                # coverage.
+                "sentiment": raw.get("sentiment"),
+                # relevance: HOW WELL this matched the query - but a
+                # constant 1 in practice, because it only varies when
+                # articlesSortBy="rel", and this fetcher sorts by date
+                # so the newest articles arrive rather than the ones an
+                # opaque scorer liked most. Stored so the constancy is
+                # visible rather than assumed.
+                "relevance": raw.get("relevance"),
+                # sim: HOW SIMILAR this article is to the first one in
+                # its event cluster, 0-1. The trap: 0.00 marks the
+                # cluster HEAD itself, not "unrelated" - so a naive
+                # "drop anything below 0.3" would drop exactly the
+                # canonical article of every event.
+                "sim": raw.get("sim"),
+                # wgt: Event Registry's internal sort weight, an
+                # opaque integer (~529,787,429) with no documented
+                # meaning or scale. Stored because it is returned;
+                # nothing can legitimately be inferred from it.
+                "wgt": raw.get("wgt"),
+                # shares: HOW WIDELY SHARED on social platforms -
+                # Facebook, LinkedIn and others. Returns {} on this
+                # plan, so the field exists and the data does not.
+                "shares": raw.get("shares"),
+            },
+        })
+    if url_scheme:
+        for a, raw in zip(articles, results):
+            a["metadata"]["article_url"] = a["url"]
+            a["metadata"]["er_query"] = source.get("url")
+            a["url"] = f"{url_scheme}://{raw.get('uri')}"
+    if config.get("require_body"):
+        # geopolitical_news keeps a row whose body failed the prose check
+        # (the headline still carries the event); a domain whose consumer
+        # judges only on text asks for those rows to be dropped instead -
+        # and also for the ones whose body is only PART of the article.
+        kept = [a for a in articles
+                if a["body"] and not _er_body_is_partial(a)]
+        if len(kept) < len(articles):
+            logger.info("[EVENT_REGISTRY] source=%r dropped %d without a full body",
+                        source.get("url"), len(articles) - len(kept))
+        articles = kept
+    return articles
+
+
+# Outlets whose Event Registry body is only ever the opening of the
+# article, measured over 871 stored rows: Bloomberg 3/3, Telegraph 3/3 and
+# Bloomberg Law 2/2 end in "..." (paywall teaser); Reuters is the first
+# paragraph plus reporting credits (4 of 5 under 700 characters); The
+# Africa Report is a paywall teaser (checked by hand). The repo's page
+# fetch tiers do not recover them either: Reuters returned nothing,
+# Telegraph only its navigation, Bloomberg one more paragraph inside page
+# chrome. Their stories reach this domain through the outlets that
+# syndicate or re-report them.
+_ER_PARTIAL_BODY_OUTLETS: frozenset[str] = frozenset({
+    "bloomberg.com", "telegraph.co.uk", "news.bloomberglaw.com",
+    "reuters.com", "theafricareport.com",
+})
+# "..." / "…" and the bracketed "[...]" a syndicated teaser ends on.
+_ER_TEASER_END_RE = re.compile(r"(\.\.\.|…|\[\.\.\.\]|\[…\])\s*$")
+# A video or podcast page has a description, not an article - 8 of 871.
+_ER_MEDIA_PAGE_RE = re.compile(r"/(videos?|podcasts?|watch)/", re.IGNORECASE)
+# Every one of 851 stored bodies under this length was partial - a video
+# series' standing blurb (The National's "Manus on Markets", 263), a
+# teaser (cryptonews, 269), Bloomberg/Telegraph teasers. The shortest
+# complete item was a 310-character liveblog entry, which stays.
+_ER_MIN_FULL_BODY_CHARS = 300
+
+
+def _er_body_is_partial(article: dict) -> bool:
+    """True when an Event Registry body is a teaser, a media-page blurb,
+    from an outlet whose body is only ever an opening, or shorter than any
+    complete body measured."""
+    meta = article.get("metadata") or {}
+    body = article.get("body") or ""
+    return bool(
+        meta.get("source_uri") in _ER_PARTIAL_BODY_OUTLETS
+        or len(body) < _ER_MIN_FULL_BODY_CHARS
+        or _ER_TEASER_END_RE.search(body)
+        or _ER_MEDIA_PAGE_RE.search(meta.get("article_url") or article.get("url") or ""))
+
+
+def _fetch_event_registry(
+    sources: list[dict], days_back: int, api_key: str,
+) -> list[dict]:
+    """Fetch every Event Registry query in parallel, dedup by url.
+
+    One token per query on the free tier, so the five seeded queries
+    cost five tokens a day against a 2,000-token allowance.
+    """
+    started = time.perf_counter()
+    articles: list[dict] = []
+    with ThreadPoolExecutor(max_workers=min(len(sources), 5)) as executor:
+        for batch in executor.map(
+            lambda s: _fetch_one_event_registry(s, days_back, api_key), sources,
+        ):
+            articles.extend(batch)
+
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for article in articles:
+        url = article.get("url")
+        if url and url not in seen:
+            seen.add(url)
+            unique.append(article)
+
+    logger.info(
+        "[TIMER] event_registry sources=%d articles=%d (%d after url dedup)"
+        " elapsed=%.2fs",
+        len(sources), len(articles), len(unique), time.perf_counter() - started,
+    )
+    return unique
 
 
 def _fetch_federal_register(sources: list[dict], days_back: int) -> list[dict]:
@@ -1620,6 +2426,15 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _publisher_url(article: dict) -> str:
+    """The article's address at its publisher. A source stored under its
+    own url scheme (er-me://{uri}, see _fetch_one_event_registry) keeps
+    the real link in metadata.article_url - reading `url` there would name
+    the outlet "9509743911"."""
+    return ((article.get("metadata") or {}).get("article_url")
+            or article.get("url") or "")
+
+
 def _extract_domain_for_also_reported_by(article: dict) -> str | None:
     """Return the registrable domain for an also_reported_by entry, derived
     from the article's own url - never from article["source"].
@@ -1635,12 +2450,77 @@ def _extract_domain_for_also_reported_by(article: dict) -> str | None:
     here is directly comparable against that service's ALLOWED_DOMAINS
     without further normalization.
     """
-    url = article.get("url") or ""
+    url = _publisher_url(article)
     host = urlparse(url).hostname or ""
     host = host.lower()
     if host.startswith("www."):
         host = host[len("www."):]
     return host or None
+
+
+# How much of a discarded duplicate's headline is kept. Long enough for
+# every real headline measured in this domain (longest 118 characters),
+# short enough that one pathological title cannot bloat the row.
+_ALSO_REPORTED_TITLE_CHARS = 200
+
+
+def _also_reported_entry(article: dict) -> dict | None:
+    """Return {outlet, title, url} for an article being DISCARDED as a
+    near-duplicate, or None when it carries no usable domain.
+
+    The outlet alone used to be stored, which told a reader that
+    somebody else had the story but never what they called it. The
+    headline is the part worth having: seven outlets on one Strait of
+    Hormuz attack wrote "projectile attacks", "naval mine explosion"
+    and "Iran expands attacks on shipping", and that disagreement is
+    invisible from a list of domains.
+
+    This is the only moment the discarded article exists - it is
+    dropped on the next line and never stored - so the fields are
+    copied here or lost.
+
+    Shape matches the siblings signal-detection-agent's Stage D builds
+    from Event Registry's event_uri clusters, so one consumer renders
+    both without caring which mechanism found the duplicate.
+    """
+    outlet = _extract_domain_for_also_reported_by(article)
+    if not outlet:
+        return None
+    title = " ".join((article.get("title") or "").split())
+    return {
+        "outlet": outlet,
+        "title": title[:_ALSO_REPORTED_TITLE_CHARS],
+        "url": _publisher_url(article),
+    }
+
+
+def _is_self_reference(
+    entry: dict, batch_article: dict | None, article: dict,
+) -> bool:
+    """True when the entry names the SAME article it would be attached to.
+
+    Two Federal Register notices filed the same day ("Notice of OFAC
+    Sanctions Action" and "...Actions") matched on title similarity, and
+    each recorded the other, leaving rows whose also_reported_by read
+    ["federalregister.gov"] - the Federal Register corroborating itself.
+    A publisher is not independent confirmation of its own document, and
+    a reader counting outlets would have counted that one twice.
+
+    Matched on url first, since that identifies the document; the
+    surviving row's own domain is the fallback when the kept article is
+    a stored row rather than a batch member.
+    """
+    url = (entry.get("url") or "").strip().lower()
+    if batch_article is not None:
+        kept_url = _publisher_url(batch_article).strip().lower()
+        if url and url == kept_url:
+            return True
+        kept_outlet = _extract_domain_for_also_reported_by(batch_article)
+        return bool(kept_outlet and kept_outlet == entry.get("outlet"))
+    # Cross-run match: the kept row is in the database, not in hand, so
+    # its domain cannot be compared here. append_also_reported_by does
+    # that check against the stored row instead.
+    return False
 
 
 _EMBED_TITLES_MAX_ATTEMPTS = 3
@@ -1738,6 +2618,16 @@ _SAME_EVENT_SYSTEM_PROMPT = (
     " one real-world action commonly emphasize different angles of it and"
     " use different phrasing for the same outcome - this is still the SAME"
     " event.\n\n"
+    "ASK TWO QUESTIONS, IN THIS ORDER.\n"
+    "1. WHAT STAGE is each headline at? Proposal, offer, talks, agreement"
+    " in principle, signing, implementation, withdrawal, collapse. If the"
+    " two are at DIFFERENT stages, they are DIFFERENT events - stop there,"
+    " however identical the parties, the amount and the sector. 'X"
+    " proposes a $21bn deal' and 'X and Y strike a $21bn deal' are two"
+    " events: one is a proposal and one is a conclusion.\n"
+    "2. Only if the stage matches, ask WHOSE SIDE each is told from. Two"
+    " headlines at the same stage, told from different participants'"
+    " sides, are ONE event.\n\n"
     "Watch for these specific traps:\n"
     "- 'Lifting sanctions on X', 'removing X from the sanctions list', and"
     " 'delisting X' all mean the SAME thing (X is no longer sanctioned) -"
@@ -1746,17 +2636,57 @@ _SAME_EVENT_SYSTEM_PROMPT = (
     " package AND delists specific individuals as part of that same vote"
     " is ONE event, not two - a headline emphasizing only the extension and"
     " another emphasizing only the delisting can both be reporting the"
-    " exact same Council/legislative action.\n\n"
+    " exact same Council/legislative action.\n"
+    "- ONE agreement between two or more parties is ONE event however many"
+    " sides it is told from. Each participant's press operation leads with"
+    " its own actor and its own verb, so the same signing appears as 'A"
+    " announces investment', 'B to provide financial support', 'A and B"
+    " strike deal' and 'A, B build plant'. A DIFFERENT NAMED ACTOR IS NOT"
+    " EVIDENCE OF A DIFFERENT EVENT when the deal, the amount, the sector"
+    " and the location match. The same applies to one party's contribution"
+    " to a joint action: funding, hosting, approving or signing are parts"
+    " of the one deal, not separate deals.\n"
+    "  This clause is about WHO is telling it, never about WHEN. It does"
+    " not merge different stages of the same deal: a proposal, an offer,"
+    " talks, an agreement in principle, the signing, and a later"
+    " withdrawal are separate events even when the parties, the amount"
+    " and the sector are identical. Check the stage first; only then ask"
+    " whose side it is told from.\n"
+    "  Nor does it merge an action with a reaction to it. One party"
+    " acting and another condemning, welcoming or responding are two"
+    " events, even where both name the same measure.\n"
+    "- A shared figure, project or location is strong evidence of one"
+    " event. Two headlines naming the same amount ('$21bn', '$21 Billion'),"
+    " the same named project, or the same specific site are almost always"
+    " the same action reported twice. Only ONE of the two needs to carry"
+    " the figure: 'A announces $21bn investment in New York plants' and 'B"
+    " to provide financial support for New York plant' are the same deal,"
+    " since the second is B's half of the first. Do not require both"
+    " headlines to repeat the same details before calling them one event -"
+    " that is precisely what different outlets do not do.\n\n"
     "Treat two headlines as DIFFERENT events only when they describe a"
     " genuinely different action, decision, or moment in time: e.g. a"
     " proposal, attempt, or failed vote vs. its later actual approval; an"
     " announcement vs. a separate, later reaction to it; or two distinct"
-    " developments on different days in a multi-day story."
+    " developments on different days in a multi-day story. A running story"
+    " does produce genuinely separate events - one vessel struck, a weekly"
+    " casualty count, a warning about consequences and a statement of"
+    " intent are four events even when all four name the same place. Ask"
+    " what HAPPENED in each: different happenings are different events,"
+    " but one happening told from two sides is one event."
     ' Return strict JSON only: {"same_event": true or false}'
 )
 
 
 _SAME_EVENT_LLM_CONCURRENCY = 10
+
+# How many borderline candidates one article may be compared against
+# before giving up. Without a cap, a batch of N near-identical headlines
+# costs O(N^2) model calls; with it, the worst case is N*4. Four is
+# generous against the real data - the EU Council cluster that motivated
+# this needed its SECOND-ranked candidate, never worse than that - and
+# the pair cache means a comparison already made is free.
+_SAME_EVENT_MAX_CANDIDATES = 4
 
 
 def _resolve_db_borderline_matches_parallel(
@@ -2163,6 +3093,7 @@ def _dedup_by_title_similarity(
             article["metadata"]["ticker"] = ticker
             article["metadata"]["source_type"] = "gdelt"
             article["metadata"]["source_category"] = "gdelt"
+            article["metadata"]["customers"] = _taiwan_customers(ticker)
             kept.append(article)
             continue
 
@@ -2203,21 +3134,30 @@ def _dedup_by_title_similarity(
             domain = _extract_domain_for_also_reported_by(article)
             if batch_article is not None:
                 # Same-batch match: merge in-memory, nothing written yet.
+                # Same {outlet, title, url} shape the per-domain dedup
+                # below writes, so a consumer reads one shape whichever
+                # path found the duplicate.
+                entry = _also_reported_entry(article)
                 also_reported_by = batch_article["metadata"].setdefault(
                     "also_reported_by", []
                 )
-                if domain and domain not in also_reported_by:
-                    also_reported_by.append(domain)
-            elif db_id is not None and domain:
+                if entry is not None and not any(
+                    e.get("url") == entry["url"] for e in also_reported_by
+                    if isinstance(e, dict)
+                ):
+                    also_reported_by.append(entry)
+            elif db_id is not None:
                 # Cross-run match: the existing row is already stored, so
                 # this needs a real UPDATE rather than an in-memory merge.
-                try:
-                    append_also_reported_by(db_id, domain)
-                except Exception as exc:
-                    logger.warning(
-                        "[GDELT] failed to record also_reported_by for"
-                        " article_id=%s domain=%r: %s", db_id, domain, exc,
-                    )
+                entry = _also_reported_entry(article)
+                if entry is not None:
+                    try:
+                        append_also_reported_by(db_id, entry)
+                    except Exception as exc:
+                        logger.warning(
+                            "[GDELT] failed to record also_reported_by for"
+                            " article_id=%s entry=%r: %s", db_id, entry, exc,
+                        )
             dropped += 1
             continue
 
@@ -2229,6 +3169,7 @@ def _dedup_by_title_similarity(
         article["metadata"]["ticker"] = ticker
         article["metadata"]["source_type"] = "gdelt"
         article["metadata"]["source_category"] = "gdelt"
+        article["metadata"]["customers"] = _taiwan_customers(ticker)
         article["metadata"]["title_embedding"] = embedding
         kept.append(article)
         kept_this_batch.setdefault(ticker, []).append(article)
@@ -2250,6 +3191,7 @@ def _dedup_by_title_similarity(
 # just scoped by domain instead of ticker.
 _TITLE_DEDUP_DOMAINS: frozenset[str] = frozenset({
     "ai_news", "smart_money", "geopolitical_news", "korea_market_signal",
+    "middle_east_market_signal",
 })
 
 # ai_news/smart_money: wider than Taiwan GDELT's 24h (_TITLE_DEDUP_WINDOW_HOURS)
@@ -2277,6 +3219,12 @@ _DOMAIN_TITLE_DEDUP_WINDOW_HOURS: dict[str, int] = {
     # at the spec's literal number rather than importing another domain's
     # correction pre-emptively.
     "korea_market_signal": 24,
+    # Same settings as geopolitical_news (window, threshold, same-event LLM
+    # check below): its press is the same kind - wire stories on one war
+    # and one set of deals re-reported across outlets over days. Measured
+    # on its first run: six outlets carrying "Iran urges US to accept
+    # proposal to reopen Strait of Hormuz" verbatim, and more reworded.
+    "middle_east_market_signal": 168,
 }
 
 # Per-domain override of _TITLE_DEDUP_SIMILARITY_THRESHOLD (0.90 default,
@@ -2305,6 +3253,7 @@ _DOMAIN_TITLE_DEDUP_WINDOW_HOURS: dict[str, int] = {
 # a third threshold nudge.
 _DOMAIN_TITLE_DEDUP_SIMILARITY_THRESHOLD: dict[str, float] = {
     "geopolitical_news": 0.82,
+    "middle_east_market_signal": 0.82,
 }
 
 # korea_market_signal mixes DART filings, Customs export data, and RSS/GDELT
@@ -2322,6 +3271,14 @@ _DOMAIN_TITLE_DEDUP_SIMILARITY_THRESHOLD: dict[str, float] = {
 # so absence of source_category means "news", not "unknown").
 _DOMAIN_TITLE_DEDUP_EXCLUDED_CATEGORIES: dict[str, frozenset[str]] = {
     "korea_market_signal": frozenset({"dart_filing", "kr_customs_export"}),
+    # Official and filing rows are kept out of both sides, same reasoning
+    # as Korea plus one more: whichever copy of a story is stored first
+    # survives, so a WAM release that landed after press coverage of it
+    # would otherwise be dropped as the duplicate - losing the official
+    # source and keeping the retelling. Press copies still dedup against
+    # each other.
+    "middle_east_market_signal": frozenset({
+        "me_official_wire", "me_us_policy", "me_fund_stake"}),
 }
 
 # Domains where a borderline-similarity pair (see _SAME_EVENT_SIMILARITY_FLOOR)
@@ -2331,7 +3288,8 @@ _DOMAIN_TITLE_DEDUP_EXCLUDED_CATEGORIES: dict[str, frozenset[str]] = {
 # (see that function's docstring); ai_news/smart_money haven't shown the same
 # confirmed failure, so they keep the cheaper threshold-only comparison
 # rather than paying for LLM calls speculatively.
-_SAME_EVENT_LLM_DOMAINS: frozenset[str] = frozenset({"geopolitical_news"})
+_SAME_EVENT_LLM_DOMAINS: frozenset[str] = frozenset({
+    "geopolitical_news", "middle_east_market_signal"})
 
 
 def _dedup_by_title_similarity_for_domain(
@@ -2506,7 +3464,24 @@ def _dedup_by_title_similarity_for_domain(
             # No DB-history match - only same-batch candidates kept so
             # far can still produce a match, checked sequentially exactly
             # as the original single-pass loop did.
-            best_batch_borderline: tuple[float, str, dict] | None = None
+            # EVERY borderline candidate, best-first - not just the single
+            # most similar one. The old version kept only the highest
+            # scorer and asked about that one alone, which silently
+            # assumed similarity ranking predicts the model's verdict.
+            # It does not, and that assumption is the very thing this
+            # check exists to work around.
+            #
+            # Measured on one real EU Council sitting that produced four
+            # surviving clusters: "EU: Fresh Russia sanctions over 'sham'
+            # elections" scored highest against "EU adopts nearly 1,600
+            # new sanctions listings" (0.5872), the model said NOT the
+            # same event, and the article was kept as new - while "EU
+            # Approves 22nd Package" at 0.5326 WOULD have been judged the
+            # same event, but was never asked because it ranked second.
+            # 4 of the 6 pairs among those headlines already return true;
+            # the cluster failed to form only because one comparison per
+            # article was allowed.
+            borderline: list[tuple[float, str, dict]] = []
             for batch_article in kept_this_batch:
                 candidate_title = batch_article["title"]
                 candidate_embedding = batch_article["metadata"]["title_embedding"]
@@ -2519,49 +3494,73 @@ def _dedup_by_title_similarity_for_domain(
                     )
                     match = (None, batch_article)
                     break
-                if (
-                    same_event_domain
-                    and similarity >= _SAME_EVENT_SIMILARITY_FLOOR
-                    and (best_batch_borderline is None or similarity > best_batch_borderline[0])
+                if same_event_domain and similarity >= _SAME_EVENT_SIMILARITY_FLOOR:
+                    borderline.append((similarity, candidate_title, batch_article))
+            if match is None and borderline:
+                # Best-first so the likeliest match is usually the first
+                # call, and capped so one batch of near-identical
+                # headlines cannot turn into a quadratic pile of LLM
+                # calls. The cache below means a repeated pair costs
+                # nothing.
+                borderline.sort(key=lambda b: -b[0])
+                for similarity, candidate_title, batch_article in (
+                    borderline[:_SAME_EVENT_MAX_CANDIDATES]
                 ):
-                    best_batch_borderline = (similarity, candidate_title, batch_article)
-            if match is None and best_batch_borderline is not None:
-                similarity, candidate_title, batch_article = best_batch_borderline
-                cache_key = (article["title"], candidate_title)
-                if cache_key in same_event_cache:
-                    same_event = same_event_cache[cache_key]
-                else:
-                    same_event = _titles_describe_same_event(
-                        article["title"], candidate_title, api_key,
-                    )
-                    same_event_cache[cache_key] = same_event
-                if same_event:
-                    logger.info(
-                        "[%s] near-duplicate title via same-event check"
-                        " (similarity=%.3f, below threshold=%.2f)"
-                        " new=%r existing=%r",
-                        domain_slug, similarity, threshold, article["title"], candidate_title,
-                    )
-                    match = (None, batch_article)
+                    cache_key = (article["title"], candidate_title)
+                    if cache_key in same_event_cache:
+                        same_event = same_event_cache[cache_key]
+                    else:
+                        same_event = _titles_describe_same_event(
+                            article["title"], candidate_title, api_key,
+                        )
+                        same_event_cache[cache_key] = same_event
+                    if same_event:
+                        logger.info(
+                            "[%s] near-duplicate title via same-event check"
+                            " (similarity=%.3f, below threshold=%.2f)"
+                            " new=%r existing=%r",
+                            domain_slug, similarity, threshold,
+                            article["title"], candidate_title,
+                        )
+                        match = (None, batch_article)
+                        break
 
         if match is not None:
             db_id, batch_article = match
-            outlet = _extract_domain_for_also_reported_by(article)
-            if batch_article is not None:
-                also_reported_by = batch_article["metadata"].setdefault(
-                    "also_reported_by", []
-                )
-                if outlet and outlet not in also_reported_by:
-                    also_reported_by.append(outlet)
-            elif db_id is not None and outlet:
-                try:
-                    append_also_reported_by(db_id, outlet)
-                except Exception as exc:
-                    logger.warning(
-                        "[%s] failed to record also_reported_by for"
-                        " article_id=%s outlet=%r: %s",
-                        domain_slug, db_id, outlet, exc,
+            # The DISCARDED article's own outlet, title and url - not
+            # just its domain. This is the only moment that article
+            # exists: it is dropped as a near-duplicate on the next
+            # line and never stored, so a consumer wanting to show
+            # "who else reported this" could otherwise show a bare
+            # domain and nothing to read.
+            #
+            # Same shape as the siblings signal-detection-agent's
+            # Stage D builds from Event Registry's event_uri clusters,
+            # deliberately: one consumer renders both without caring
+            # which mechanism found the duplicate. Event Registry
+            # clusters 121 of 325 rows; this dedup catches another 28
+            # it misses, and those rows previously reported no other
+            # coverage at all.
+            entry = _also_reported_entry(article)
+            if entry is not None and not _is_self_reference(entry, batch_article, article):
+                if batch_article is not None:
+                    also_reported_by = batch_article["metadata"].setdefault(
+                        "also_reported_by", []
                     )
+                    if not any(
+                        e.get("url") == entry["url"] for e in also_reported_by
+                        if isinstance(e, dict)
+                    ):
+                        also_reported_by.append(entry)
+                elif db_id is not None:
+                    try:
+                        append_also_reported_by(db_id, entry)
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] failed to record also_reported_by for"
+                            " article_id=%s entry=%r: %s",
+                            domain_slug, db_id, entry, exc,
+                        )
             dropped += 1
             continue
 
@@ -2980,6 +3979,19 @@ def _to_int(value: str) -> int | None:
         return None
 
 
+def _taiwan_customers(ticker: str | None) -> list[dict[str, str]] | None:
+    """The company's verified customers ({name, relationship}) from
+    seed.TAIWAN_TICKER_UNIVERSE - the one source of truth - read from code at
+    fetch time, not from the seeded sources.config, so editing the list takes
+    effect on the next run without a DB update. None for a ticker outside the
+    universe; [] means checked and none verified."""
+    from seed import TAIWAN_TICKER_UNIVERSE  # lazy: seed imports db
+    for t in TAIWAN_TICKER_UNIVERSE:
+        if t["ticker"] == str(ticker or ""):
+            return [{"name": c["name"], "relationship": c["relationship"]} for c in t.get("customers", [])]
+    return None
+
+
 def _fetch_one_revenue_dump(
     url: str, exchange: str, tickers: list[str], ticker_names: dict[str, str] | None = None,
 ) -> list[dict]:
@@ -3082,6 +4094,7 @@ def _fetch_one_revenue_dump(
                 "is_stale": not is_fresh,
                 "source_category": "mops_revenue",
                 "translated_company_name": ticker_names.get(ticker),
+                "customers": _taiwan_customers(ticker),
             },
         })
     logger.info(
@@ -3220,6 +4233,7 @@ def _fetch_one_material_dump(
                 "is_stale": not is_fresh,
                 "source_category": "mops_material",
                 "translated_company_name": ticker_names.get(ticker),
+                "customers": _taiwan_customers(ticker),
             },
         })
     logger.info(
@@ -8687,6 +9701,607 @@ def _fetch_press_cn_english_check(sources: list[dict], days_back: int) -> list[d
     return articles
 
 
+# ---------------------------------------------------------------------------
+# Middle East market signal
+# ---------------------------------------------------------------------------
+# Fetch-and-store only, same boundary as the four Asian market domains.
+# Every source here is an API or structured JSON - no PDF extraction - and
+# a row with no readable body is dropped rather than stored headline-only:
+# the domain's consumer judges on the text, and every source below has a
+# route to it (see news-retrieval/CLAUDE.md for the probe record).
+
+_ME_HEADERS = {"User-Agent": _RSS_USER_AGENT, "Accept-Language": "en"}
+# A ceiling on listing pagination, not an expected depth: both wires
+# publish ~30-40 English items a day at 20 per page, so a 1-day window is
+# 2-3 pages. 15 stops a malformed "hasNext" from walking forever.
+_ME_MAX_PAGES = 15
+# Below this, a BIS press-release body is a link stub ("<a href=...pdf>"),
+# not text - measured: the short bodies were all a single link line.
+_BIS_MIN_BODY_CHARS = 200
+
+
+@lru_cache(maxsize=8)
+def _me_match_regex(terms: tuple[str, ...]) -> re.Pattern[str]:
+    """One case-insensitive alternation over a source's match_terms.
+
+    Boundaries are "not a word character or &" rather than \\b, so "e&"
+    matches on its own and "AI" does not match inside "Dubai" or "said".
+    Longest terms first, so "data centres" wins over "data centre".
+    """
+    alternation = "|".join(
+        re.escape(t) for t in sorted(terms, key=len, reverse=True))
+    return re.compile(rf"(?<![\w&])(?:{alternation})(?![\w&])", re.IGNORECASE)
+
+
+def _me_matches(source: dict, text: str) -> bool:
+    terms = (source.get("config") or {}).get("match_terms") or []
+    return not terms or bool(_me_match_regex(tuple(terms)).search(text or ""))
+
+
+def _me_names(items: Any, key: str = "name") -> list[str]:
+    """Display names from a list of API objects (tags, categories)."""
+    return [i.get(key) or i.get("title") for i in (items or [])
+            if isinstance(i, dict) and (i.get(key) or i.get("title"))]
+
+
+_WAM_BASE = "https://www.wam.ae"
+
+
+def _fetch_wam_article(url_slug: str) -> dict | None:
+    """One WAM article by its urlSlug. 204 (empty) means "no such slug" -
+    the bare `slug` field returns 204 for every article; `urlSlug`
+    ("{shortCode}-{slug}") is what the endpoint actually keys on."""
+    try:
+        resp = httpx.get(f"{_WAM_BASE}/api/app/articles/GetArticleBySlug",
+                         params={"slug": url_slug}, headers=_ME_HEADERS,
+                         timeout=30.0)
+        resp.raise_for_status()
+        return resp.json() if resp.content else None
+    except Exception as exc:
+        logger.warning("[WAM] article fetch failed slug=%s: %s", url_slug, exc)
+        return None
+
+
+def _fetch_one_wam_wire(source: dict, days_back: int) -> list[dict]:
+    """WAM English via the JSON API its own Angular site calls.
+
+    The listing is the "latest-news" view; further pages are a POST of the
+    section's own paging object with pageNumber + 1 (the endpoint rejects
+    the object wrapped in any envelope). Bodies come from
+    GetArticleBySlug, after the match filter - WAM publishes weather,
+    sport and condolence cables alongside the AI and energy news.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    resp = httpx.get(f"{_WAM_BASE}/api/app/views/GetViewByUrl",
+                     params={"url": "en/list/latest-news"},
+                     headers=_ME_HEADERS, timeout=30.0)
+    resp.raise_for_status()
+    section = next((s["articlesResult"] for s in resp.json().get("sections", [])
+                    if (s.get("articlesResult") or {}).get("items")), None)
+    if not section:
+        logger.warning("[WAM] latest-news view returned no article section")
+        return []
+
+    def _date(item: dict) -> datetime | None:
+        try:
+            return datetime.fromisoformat(item["articleDate"]).astimezone(timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    items, paging, pages = list(section["items"]), section["paging"], 1
+    while (paging.get("hasNext") and pages < _ME_MAX_PAGES
+           and (_date(items[-1]) or cutoff) >= cutoff):
+        # A failed later page stops paging; the pages already read are
+        # kept rather than lost with the whole source.
+        try:
+            page = httpx.post(
+                f"{_WAM_BASE}/api/app/views/GetSectionArticlesFDto",
+                json=dict(paging, pageNumber=paging["pageNumber"] + 1),
+                headers=_ME_HEADERS, timeout=30.0)
+            page.raise_for_status()
+            data = page.json()
+        except Exception as exc:
+            logger.warning("[WAM] page %d failed, keeping %d pages: %s",
+                           pages + 1, pages, exc)
+            break
+        if not data.get("items"):
+            break
+        items.extend(data["items"])
+        paging, pages = data["paging"], pages + 1
+
+    listed = [i for i in items if (_date(i) or cutoff) >= cutoff]
+    kept = [i for i in listed
+            if _me_matches(source, f"{i.get('title', '')} {i.get('subTitle', '')}")]
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        details = list(executor.map(
+            lambda i: _fetch_wam_article(i["urlSlug"]), kept))
+
+    articles: list[dict] = []
+    for item, detail in zip(kept, details):
+        body = _clean_summary((detail or {}).get("body") or "") or None
+        if not body:
+            logger.warning("[WAM] no body, dropped: %s", item.get("urlSlug"))
+            continue
+        articles.append({
+            "title": item.get("title", ""),
+            "url": f"{_WAM_BASE}/en/article/{item['urlSlug']}",
+            "published": item.get("articleDate"),
+            "source": "WAM - Emirates News Agency",
+            # NULL: the listing's subTitle is the body's first ~200
+            # characters cut mid-sentence, not a lead.
+            "summary": None,
+            "body": body,
+            "_pub_date": _date(item),
+            "metadata": {
+                "source_type": "wam_wire",
+                "source_category": "me_official_wire",
+                "source_outlet_type": "state_press",
+            },
+        })
+    logger.info("[WAM] pages=%d listed=%d matched=%d stored=%d",
+                pages, len(listed), len(kept), len(articles))
+    return articles
+
+
+_SPA_API = "https://portalapi.spa.gov.sa/api/v1"
+
+
+def _fetch_spa_article(uuid: str) -> dict | None:
+    try:
+        resp = httpx.get(f"{_SPA_API}/news/{uuid}", headers=_ME_HEADERS,
+                         timeout=30.0)
+        resp.raise_for_status()
+        return resp.json().get("data")
+    except Exception as exc:
+        logger.warning("[SPA] article fetch failed uuid=%s: %s", uuid, exc)
+        return None
+
+
+def _fetch_one_spa_wire(source: dict, days_back: int) -> list[dict]:
+    """Saudi Press Agency English via its portal API.
+
+    The site's own homepage data carries only 7 items; the list behind it
+    is GET /news?page=N (20 per page, newest first, English when asked in
+    English). The list's `content` is always null, so bodies come from
+    /news/{uuid} after the match filter.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    items: list[dict] = []
+    for page in range(1, _ME_MAX_PAGES + 1):
+        try:
+            resp = httpx.get(f"{_SPA_API}/news", params={"page": page},
+                             headers=_ME_HEADERS, timeout=30.0)
+            resp.raise_for_status()
+            batch = resp.json().get("data") or []
+        except Exception as exc:
+            # Page 1 failing is a real outage and is raised; a later page
+            # failing keeps the pages already read.
+            if page == 1:
+                raise
+            logger.warning("[SPA] page %d failed, keeping %d pages: %s",
+                           page, page - 1, exc)
+            break
+        items.extend(batch)
+        if not batch or int(batch[-1].get("published_at") or 0) < cutoff.timestamp():
+            break
+
+    def _date(item: dict) -> datetime | None:
+        try:
+            return datetime.fromtimestamp(int(item["published_at"]), timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    listed = [i for i in items if i.get("locale") == "en"
+              and (_date(i) or cutoff) >= cutoff]
+    kept = [i for i in listed
+            if _me_matches(source, f"{i.get('title', '')} {i.get('subtitle') or ''}")]
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        details = list(executor.map(lambda i: _fetch_spa_article(i["uuid"]), kept))
+
+    articles: list[dict] = []
+    for item, detail in zip(kept, details):
+        detail = detail or {}
+        body = _clean_summary(detail.get("content") or "") or None
+        if not body:
+            logger.warning("[SPA] no body, dropped: %s", item.get("uuid"))
+            continue
+        pub = _date(item)
+        articles.append({
+            "title": item.get("title", ""),
+            "url": f"https://www.spa.gov.sa/en/{item['uuid']}",
+            "published": pub.isoformat() if pub else None,
+            "source": "SPA - Saudi Press Agency",
+            "summary": _clean_summary(detail.get("subtitle") or "") or None,
+            "body": body,
+            "_pub_date": pub,
+            "metadata": {
+                "source_type": "spa_wire",
+                "source_category": "me_official_wire",
+                "source_outlet_type": "state_press",
+            },
+        })
+    logger.info("[SPA] listed=%d matched=%d stored=%d",
+                len(listed), len(kept), len(articles))
+    return articles
+
+
+_SUBSTACK_MAX_ATTEMPTS = 4
+# Seconds between post requests. A daily run fetches ~3-5 posts, so this
+# costs seconds; a 30-day backfill (~70 posts) about half a minute.
+_SUBSTACK_REQUEST_INTERVAL = 0.5
+
+
+def _fetch_one_substack_post(source: dict, days_back: int) -> list[dict]:
+    """A Substack publication's free articles via Substack's own API.
+
+    Replaces the publication's RSS feed, whose body comes from the feed's
+    content field and - when that is short - from a page fetch that can
+    fail and leave the row without a body. Here the listing is
+    /api/v1/archive (newest first, paged by offset) and every body is
+    /api/v1/posts/{slug} -> body_html, so no row depends on scraping.
+
+    Kept: type "newsletter" with audience "everyone". Podcast posts are
+    audio episodes whose text is show notes repeating a written post
+    under another title (measured: "Only one in ten UAE firms Agentic AI
+    ready" the episode vs "Only one in 10 UAE organisations feels ready
+    for agentic AI" the article); a paid post's body_html is truncated.
+    """
+    base = (source.get("config") or {})["base_url"].rstrip("/")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+
+    def _date(post: dict) -> datetime | None:
+        try:
+            return datetime.fromisoformat(post["post_date"].replace("Z", "+00:00"))
+        except (KeyError, AttributeError, ValueError):
+            return None
+
+    posts: list[dict] = []
+    for page in range(_ME_MAX_PAGES):
+        try:
+            resp = httpx.get(f"{base}/api/v1/archive",
+                             params={"sort": "new", "limit": 25, "offset": len(posts)},
+                             headers=_ME_HEADERS, timeout=30.0)
+            resp.raise_for_status()
+            batch = resp.json() or []
+        except Exception as exc:
+            if page == 0:
+                raise
+            logger.warning("[SUBSTACK] page %d failed, keeping %d posts: %s",
+                           page + 1, len(posts), exc)
+            break
+        posts.extend(batch)
+        if not batch or (_date(batch[-1]) or cutoff) < cutoff:
+            break
+
+    kept = [p for p in posts
+            if p.get("type") == "newsletter" and p.get("audience") == "everyone"
+            and (_date(p) or cutoff) >= cutoff]
+
+    def _body(slug: str) -> str | None:
+        # Substack answers 429 to bursts - measured: 19 of 68 posts lost
+        # with 5 parallel requests. One at a time, and a 429 is retried
+        # after its Retry-After (or a doubling wait) rather than dropped.
+        for attempt in range(_SUBSTACK_MAX_ATTEMPTS):
+            try:
+                resp = httpx.get(f"{base}/api/v1/posts/{slug}", headers=_ME_HEADERS,
+                                 timeout=30.0)
+                if resp.status_code == 429 and attempt + 1 < _SUBSTACK_MAX_ATTEMPTS:
+                    wait = resp.headers.get("Retry-After", "")
+                    time.sleep(float(wait) if wait.isdigit() else 2.0 * 2 ** attempt)
+                    continue
+                resp.raise_for_status()
+                return _clean_summary(resp.json().get("body_html") or "") or None
+            except Exception as exc:
+                logger.warning("[SUBSTACK] post fetch failed slug=%s: %s", slug, exc)
+                return None
+        return None
+
+    bodies = []
+    for post in kept:
+        bodies.append(_body(post["slug"]))
+        time.sleep(_SUBSTACK_REQUEST_INTERVAL)
+
+    articles: list[dict] = []
+    for post, body in zip(kept, bodies):
+        if not body:
+            continue
+        articles.append({
+            "title": post.get("title", ""),
+            "url": post.get("canonical_url") or f"{base}/p/{post['slug']}",
+            "published": post.get("post_date"),
+            "source": source.get("name") or base,
+            # The author's own dek, written as a lead - not a body slice.
+            "summary": _clean_summary(post.get("subtitle") or "") or None,
+            "body": body,
+            "_pub_date": _date(post),
+            "metadata": {
+                "source_type": "substack_post",
+                "source_category": "me_ai_press",
+                "source_outlet_type": "commercial_press",
+            },
+        })
+    logger.info("[SUBSTACK] %s listed=%d kept=%d stored=%d",
+                base, len(posts), len(kept), len(articles))
+    return articles
+
+
+_BIS_NEWS_URL = "https://www.bis.gov/news-updates"
+_DOJ_PRESS_API = "https://www.justice.gov/api/v1/press_releases.json"
+_NEXT_DATA_RE = re.compile(
+    r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL)
+
+
+def _norm_title(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
+
+
+def _fetch_doj_body(title: str, published: datetime) -> tuple[str | None, str | None]:
+    """The DOJ press release BIS links to, as (body, url).
+
+    Matched by normalized title and a 14-day date window, never by the
+    url BIS stores: DOJ has moved pages since BIS linked them (one link
+    404s while the API serves the same release under a different slug).
+    Measured: url matching found 77 of 130 BIS-linked releases, title +
+    date found 122.
+    """
+    try:
+        resp = httpx.get(_DOJ_PRESS_API, params={
+            "pagesize": 20, "parameters[title]": " ".join(title.split()[:8]),
+        }, headers=_ME_HEADERS, timeout=30.0)
+        resp.raise_for_status()
+        results = resp.json().get("results") or []
+    except Exception as exc:
+        logger.warning("[BIS] DOJ lookup failed title=%r: %s", title[:60], exc)
+        return None, None
+    want = _norm_title(title)
+    for r in results:
+        try:
+            close = abs(int(r["date"]) - published.timestamp()) < 14 * 86400
+        except (KeyError, TypeError, ValueError):
+            close = False
+        body = _clean_summary(r.get("body") or "")
+        if _norm_title(r.get("title", "")) == want and close and body:
+            return body, r.get("url")
+    return None, None
+
+
+def _fetch_one_bis_press(source: dict, days_back: int) -> list[dict]:
+    """BIS press releases from the JSON embedded in bis.gov/news-updates.
+
+    One request carries the whole archive (435 releases when built), each
+    with its body, publication date, topic and `countryTag`. Kept when
+    tagged with a configured country or when title/body name a tracked
+    company - most BIS releases are Russia/China/Iran enforcement that has
+    nothing to do with the Gulf.
+    """
+    cfg = source.get("config") or {}
+    countries = set(cfg.get("countries") or [])
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    resp = httpx.get(_BIS_NEWS_URL, headers=_ME_HEADERS, timeout=60.0)
+    resp.raise_for_status()
+    match = _NEXT_DATA_RE.search(resp.text)
+    if not match:
+        logger.warning("[BIS] news-updates page carried no __NEXT_DATA__")
+        return []
+    teasers = (json.loads(match.group(1)).get("props", {}).get("pageProps", {})
+               .get("pressReleaseTeasers") or [])
+
+    articles: list[dict] = []
+    skipped_no_body = 0
+    for t in teasers:
+        stamp = (t.get("publishedOn") or t.get("created") or {}).get("timestamp")
+        if not stamp:
+            continue
+        published = datetime.fromtimestamp(int(stamp), timezone.utc)
+        if published < cutoff:
+            continue
+        title = t.get("title") or ""
+        tags = _me_names(t.get("countryTag"))
+        text = _clean_summary((t.get("body") or {}).get("processed") or "")
+        external = t.get("externalLink")
+        external = external.get("url") if isinstance(external, dict) else external
+        body, body_source, doj_url = (
+            (text, "bis", None) if len(text) >= _BIS_MIN_BODY_CHARS
+            else (None, None, None))
+        if body is None and external and "justice.gov" in external:
+            body, doj_url = _fetch_doj_body(title, published)
+            body_source = "doj" if body else None
+        if not (countries & set(tags) or _me_matches(source, f"{title} {body or ''}")):
+            continue
+        if not body:
+            # Releases whose only text is a scanned PDF have no API route
+            # to it - skipped, since every row in this domain needs a body.
+            skipped_no_body += 1
+            continue
+        articles.append({
+            "title": title,
+            "url": f"https://www.bis.gov{t.get('path', '')}",
+            "published": published.isoformat(),
+            "source": "Bureau of Industry and Security",
+            "summary": None,
+            "body": body,
+            "_pub_date": published,
+            "metadata": {
+                "source_type": "bis_press",
+                "source_category": "me_us_policy",
+                "source_outlet_type": "official",
+                # Why the release was kept, and which Gulf country it names.
+                "country_tags": tags,
+                # "Enforcement" vs "Regulations": an M8 case vs an M1 rule.
+                "topics": _me_names(t.get("newsUpdatesTopic")),
+                # Where the body text came from - "bis" (the release itself)
+                # or "doj" (the DOJ release it links to) - as its own field
+                # rather than inferred from whether doj_url is set.
+                "body_source": body_source,
+                # The link BIS itself published. Kept separate from doj_url:
+                # BIS's link can be stale (one 404s while DOJ serves the same
+                # release elsewhere), doj_url is the release actually read.
+                "external_link": external,
+                "doj_url": doj_url,
+            },
+        })
+    logger.info("[BIS] teasers=%d stored=%d skipped_no_body=%d",
+                len(teasers), len(articles), skipped_no_body)
+    return articles
+
+
+_SEC_ARCHIVE = "https://www.sec.gov/Archives/edgar/data"
+_SEC_STAKE_FORM_RE = re.compile(r"13D|13G")
+# The 13D and 13G XML schemas name the same facts differently
+# (percentOfClass vs classPercent, ...); each tuple lists both spellings.
+_SEC_STAKE_FIELDS = {
+    "issuer_name": ("issuerName",),
+    "issuer_cik": ("issuerCik", "issuerCIK"),
+    "issuer_cusip": ("issuerCUSIP", "issuerCusipNumber", "issuerCusip"),
+    "event_date": ("dateOfEvent", "eventDateRequiresFilingThisStatement"),
+}
+# Narrative items: 13D items 3-7 ("purpose of transaction" is item 4) and
+# the filer's own comments. Other long leaf fields (addresses, officer
+# lists) are not narrative and are left out.
+_SEC_NARRATIVE_TAG_RE = re.compile(r"^(item\d+|comments|commentContent)$")
+_SEC_LEAF_RE = re.compile(r"<(\w+)>([^<]+)</\1>")
+
+
+def _parse_sec_stake_xml(xml: str) -> dict[str, Any]:
+    leaves = [(tag, html.unescape(val).strip()) for tag, val in _SEC_LEAF_RE.findall(xml)]
+    first = lambda names: next((v for t, v in leaves if t in names and v), None)
+
+    def _numbers(names: tuple[str, ...]) -> list[float]:
+        out = []
+        for t, v in leaves:
+            if t in names:
+                try:
+                    out.append(float(v.replace(",", "")))
+                except ValueError:
+                    pass
+        return out
+
+    percents = _numbers(("percentOfClass", "classPercent"))
+    shares = _numbers(("aggregateAmountOwned",
+                       "reportingPersonBeneficiallyOwnedAggregateNumberOfShares"))
+    narrative = list(dict.fromkeys(
+        v for t, v in leaves if _SEC_NARRATIVE_TAG_RE.match(t) and len(v) >= 40))
+    return {
+        **{k: first(v) for k, v in _SEC_STAKE_FIELDS.items()},
+        "percent_of_class": max(percents) if percents else None,
+        "shares_owned": max(shares) if shares else None,
+        "reporting_persons": list(dict.fromkeys(
+            v for t, v in leaves if t == "reportingPersonName")),
+        "narrative": narrative,
+    }
+
+
+def _fetch_one_sec_fund_stake(source: dict, days_back: int) -> list[dict]:
+    """Schedule 13D/13G filings by the configured Gulf funds.
+
+    Read from each filing's primary_doc.xml - SEC's structured form of the
+    schedule since December 2024 - so issuer, percent and share count are
+    fields, not text to extract. The body is the filing's own words: the
+    cover facts in one line, then its narrative items (a 13D's item 4,
+    "purpose of transaction", ran 1,700 characters on Mubadala's Evotec
+    filing).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).date().isoformat()
+    headers = {"User-Agent": _SEC_USER_AGENT}
+    articles: list[dict] = []
+    for fund in (source.get("config") or {}).get("funds") or []:
+        cik = int(fund["cik"])
+        try:
+            resp = httpx.get(f"https://data.sec.gov/submissions/CIK{cik:010d}.json",
+                             headers=headers, timeout=30.0)
+            resp.raise_for_status()
+            recent = resp.json()["filings"]["recent"]
+        except Exception as exc:
+            logger.warning("[SEC_STAKE] submissions failed fund=%s: %s", fund["fund"], exc)
+            continue
+        for i, form in enumerate(recent["form"]):
+            filed = recent["filingDate"][i]
+            if not _SEC_STAKE_FORM_RE.search(form) or filed < cutoff:
+                continue
+            accession = recent["accessionNumber"][i]
+            folder = f"{_SEC_ARCHIVE}/{cik}/{accession.replace('-', '')}"
+            time.sleep(0.15)  # SEC's fair-access limit is 10 requests/second
+            try:
+                doc = httpx.get(f"{folder}/primary_doc.xml", headers=headers, timeout=30.0)
+                doc.raise_for_status()
+            except Exception as exc:
+                # Filings before the December 2024 XML mandate have no
+                # primary_doc.xml; none fall inside a daily window.
+                logger.warning("[SEC_STAKE] no primary_doc.xml %s: %s", accession, exc)
+                continue
+            p = _parse_sec_stake_xml(doc.text)
+            issuer = p["issuer_name"] or "unknown issuer"
+            pct = p["percent_of_class"]
+            facts = (
+                f"{fund['fund']} filed {form} on {filed} for {issuer}"
+                + (f" (CUSIP {p['issuer_cusip']})" if p["issuer_cusip"] else "")
+                + (f". Event date: {p['event_date']}" if p["event_date"] else "")
+                + (f". Reporting persons: {'; '.join(p['reporting_persons'])}"
+                   if p["reporting_persons"] else "")
+                + (f". Beneficially owned: {p['shares_owned']:,.0f} shares"
+                   if p["shares_owned"] is not None else "")
+                + (f", {pct}% of class" if pct is not None else "")
+                + "."
+            )
+            pub = datetime.fromisoformat(filed).replace(tzinfo=timezone.utc)
+            articles.append({
+                "title": (f"{fund['fund']}: {form} - {issuer}"
+                          + (f" ({pct}% of class)" if pct is not None else "")),
+                "url": f"sec-stake://{cik}/{accession}",
+                "published": pub.isoformat(),
+                "source": "SEC EDGAR",
+                "summary": None,
+                "body": "\n\n".join([facts, *p["narrative"]]),
+                "_pub_date": pub,
+                "metadata": {
+                    "source_type": "sec_fund_stake",
+                    "source_category": "me_fund_stake",
+                    "source_outlet_type": "official",
+                    # The row's url (sec-stake://{cik}/{accession}) exists
+                    # only as the dedup key. Every value it encodes is also
+                    # stored here as its own field, so a consumer reads
+                    # fields instead of parsing the url - the same goes for
+                    # filing_date, which `published` also carries.
+                    "fund": fund["fund"],
+                    "fund_cik": fund["cik"],
+                    "accession_number": accession,
+                    "filing_date": filed,
+                    # 13D = active stake (intends to influence), 13G = passive.
+                    "form": form,
+                    # The filing itself on EDGAR.
+                    "filing_url": f"{folder}/{accession}-index.htm",
+                    "issuer_name": p["issuer_name"],
+                    # Maps to a ticker via SEC company_tickers.json.
+                    "issuer_cik": p["issuer_cik"],
+                    # The security's own identifier, as filed.
+                    "issuer_cusip": p["issuer_cusip"],
+                    # When the stake changed - can be weeks before filing.
+                    "event_date": p["event_date"],
+                    # The spec's M3 rule compares these against the last filing.
+                    "percent_of_class": p["percent_of_class"],
+                    "shares_owned": p["shares_owned"],
+                    # Also named in the body; kept as a list so a consumer
+                    # can match entities without parsing prose.
+                    "reporting_persons": p["reporting_persons"],
+                },
+            })
+    logger.info("[SEC_STAKE] stored=%d", len(articles))
+    return articles
+
+
+def _fetch_middle_east(fetch_one, sources: list[dict], days_back: int) -> list[dict]:
+    """Run one Middle East fetcher per source; one failing source never
+    costs the others their rows (same isolation as _fetch_china_policy)."""
+    articles: list[dict] = []
+    for source in sources:
+        try:
+            articles.extend(fetch_one(source, days_back))
+        except Exception as exc:
+            logger.warning("[MIDDLE_EAST] source failed name=%s error=%s",
+                           source.get("name"), exc)
+    return articles
+
+
 def _fetch_articles(
     sources: list[dict],
     days_back: int,
@@ -8699,6 +10314,7 @@ def _fetch_articles(
     dart_api_key: str | None = None,
     edinet_api_key: str | None = None,
     domain_slug: str = "",
+    event_registry_key: str | None = None,
 ) -> list[dict]:
     """Fetch articles from all sources, routing by source_type.
 
@@ -8729,6 +10345,7 @@ def _fetch_articles(
     newsapi_sources = [s for s in sources if s.get("source_type") == "newsapi"]
     alpha_vantage_sources = [s for s in sources if s.get("source_type") == "alpha_vantage"]
     federal_register_sources = [s for s in sources if s.get("source_type") == "federal_register"]
+    event_registry_sources = [s for s in sources if s.get("source_type") == "eventregistry"]
     gdelt_sources = [s for s in sources if s.get("source_type") == "gdelt"]
     twse_revenue_sources = [s for s in sources if s.get("source_type") == "twse_revenue"]
     tpex_revenue_sources = [s for s in sources if s.get("source_type") == "tpex_revenue"]
@@ -8760,6 +10377,19 @@ def _fetch_articles(
     nbs_ic_output_sources = [s for s in sources if s.get("source_type") == "nbs_ic_output"]
     press_cn_sources = [s for s in sources if s.get("source_type") == "press_cn"]
     press_cn_english_check_sources = [s for s in sources if s.get("source_type") == "press_cn_english_check"]
+    # Middle East. Each source_type has its own fetcher; _fetch_middle_east
+    # isolates a failing source from the rest.
+    middle_east_fetchers = {
+        "wam_wire": _fetch_one_wam_wire,
+        "spa_wire": _fetch_one_spa_wire,
+        "bis_press": _fetch_one_bis_press,
+        "sec_fund_stake": _fetch_one_sec_fund_stake,
+        "substack_post": _fetch_one_substack_post,
+    }
+    middle_east_sources = {
+        st: [s for s in sources if s.get("source_type") == st]
+        for st in middle_east_fetchers
+    }
 
     # Resolve the Japanese universe once for the whole run, before any
     # Japan fetcher dispatches - six source_types share it, and each
@@ -8807,6 +10437,17 @@ def _fetch_articles(
 
     if federal_register_sources:
         articles.extend(_fetch_federal_register(federal_register_sources, days_back))
+
+    if event_registry_sources:
+        if event_registry_key:
+            articles.extend(_fetch_event_registry(
+                event_registry_sources, days_back, event_registry_key,
+            ))
+        else:
+            logger.warning(
+                "EVENT_REGISTRY_API_KEY not set - skipping %d eventregistry"
+                " source(s)", len(event_registry_sources),
+            )
 
     if gdelt_sources:
         articles.extend(_fetch_gdelt(gdelt_sources, days_back, domain_slug))
@@ -8910,6 +10551,11 @@ def _fetch_articles(
     if press_cn_english_check_sources:
         articles.extend(_fetch_press_cn_english_check(press_cn_english_check_sources, days_back))
 
+    for source_type, fetch_one in middle_east_fetchers.items():
+        if middle_east_sources[source_type]:
+            articles.extend(_fetch_middle_east(
+                fetch_one, middle_east_sources[source_type], days_back))
+
     articles.sort(
         key=lambda a: (
             a["_pub_date"] or datetime.min.replace(tzinfo=timezone.utc)
@@ -8934,6 +10580,10 @@ def _fetch_articles(
 
 _ARTICLE_KEYS = ("url", "title", "summary", "source", "published", "body", "metadata")
 
+# Domains whose rows must carry a body AND be published inside the run's
+# window (see run()). Their consumer judges only on current text.
+_BODY_REQUIRED_DOMAINS: frozenset[str] = frozenset({"middle_east_market_signal"})
+
 
 def run(
     domain_slug: str,
@@ -8957,6 +10607,9 @@ def run(
         else os.environ.get("SERPAPI_KEY")
     )
     newsapi_key = os.environ.get("NEWSAPI_KEY")
+    # newsapi.ai / Event Registry - a different service from
+    # newsapi.org above, with its own key format and endpoint.
+    event_registry_key = os.environ.get("EVENT_REGISTRY_API_KEY")
     alpha_vantage_key = os.environ.get("ALPHA_VANTAGE_API_KEY")
     universe_url = os.environ.get("RESEARCH_UNIVERSE_URL")
     universe_api_key = os.environ.get("RESEARCH_UNIVERSE_API_KEY")
@@ -8970,9 +10623,40 @@ def run(
     articles = _fetch_articles(
         sources, days_back, max_articles, serpapi_key, newsapi_key, alpha_vantage_key,
         universe_url, universe_api_key, dart_api_key, edinet_api_key, domain_slug,
+        event_registry_key,
     )
     if not articles:
         return {"articles": []}
+
+    # Domains whose consumer judges only on text drop body-less rows here,
+    # once, whatever the source. Every Middle East source already reads its
+    # body from an API and drops a row without one; this is the backstop
+    # for any source added later that does not.
+    if domain_slug in _BODY_REQUIRED_DOMAINS:
+        before = len(articles)
+        articles = [a for a in articles if a.get("body")]
+        if len(articles) < before:
+            logger.warning("[%s] dropped %d article(s) without a body",
+                           domain_slug, before - len(articles))
+        if not articles:
+            return {"articles": []}
+
+    # Same domains: drop rows PUBLISHED before the run's window. Event
+    # Registry's date filter selects on when it crawled an article, not
+    # when it was published, so a late crawl brings old stories in -
+    # measured: a 1-day run returned a story published 6 days earlier,
+    # a 30-day run one from July. One day of margin absorbs timezones and
+    # crawl lag. A row with no publication date is kept (fail-open).
+    if domain_slug in _BODY_REQUIRED_DOMAINS:
+        oldest = datetime.now(timezone.utc) - timedelta(days=days_back + 1)
+        before = len(articles)
+        articles = [a for a in articles
+                    if a.get("published") is None or a["published"] >= oldest]
+        if len(articles) < before:
+            logger.info("[%s] dropped %d article(s) published before the window",
+                        domain_slug, before - len(articles))
+        if not articles:
+            return {"articles": []}
 
     # Global cross-domain, cross-run dedup: drop articles already stored
     # under ANY domain's prior run. Bounded to this run's candidate URLs,

@@ -13,7 +13,7 @@
 | `tests/` | Automated test suite - see Testing section below |
 | `src/__main__.py` | CLI entry point - `click` + `uvicorn.run` |
 | `src/app.py` | FastAPI app factory and lifespan hook |
-| `src/pipeline.py` | Fetch pipeline (RSS + SerpAPI Google News + NewsAPI + Alpha Vantage + Federal Register + GDELT + TWSE/TPEx fetch, branched by `source_type`); returns list of fetched articles |
+| `src/pipeline.py` | Fetch pipeline (RSS + SerpAPI Google News + NewsAPI + Alpha Vantage + Federal Register + Event Registry + GDELT + the market-domain fetchers, branched by `source_type`); returns list of fetched articles |
 | `src/db.py` | Thin adapter: `_new_connection()` (reads `POSTGRES_*` env vars), `init_db()`, and `db_utils.configure()`; re-exports `get_db`, `transaction`, and `DuplicateError` from `shared/src/db_utils.py` so all other imports are unaffected |
 | `src/auth.py` | FastAPI dependency functions: `require_auth` (validate Bearer token), `require_admin` (role gate) |
 | `src/seed.py` | Idempotent batch seed for `run_statuses`, `frequencies`, `domains`, `sources`, and admin API key |
@@ -22,11 +22,12 @@
 | `src/models/articles.py` | Article queries: pagination, dedup helpers, `expire_articles_for_domain(domain, days)` - deletes articles for one domain published more than `days` days ago (NULL `published` rows are never deleted); `get_recent_gdelt_articles_for_ticker()` - recent same-ticker GDELT rows (by `created_at`, not `published`) for the Taiwan title-similarity dedup window |
 | `src/models/` | Pydantic request models + SQL query functions per entity |
 | `src/routes/` | FastAPI `APIRouter` definitions, one file per resource |
-| `src/routes/market.py` | Market data read endpoints: 6 `GET` routes reading from DynamoDB, served at `/market/*` |
+| `src/routes/market.py` | Market data read endpoints: 6 `GET` routes reading from DynamoDB, served at `/market/*`; plus `/market/china/revenue-history` and `/market/taiwan/revenue-history`, read from Postgres `company_financials` |
+| `src/taiwan_financials.py` | Taiwan monthly revenue history for `company_financials`: MOPS per-month CSV parse/fetch (`backfill-taiwan-revenue`) and rows from the daily OpenAPI articles - see CLAUDE.md's Taiwan section |
 
 ## Market Signal domains
 
-Four market domains - Taiwan, Korea, Japan, China - all **fetch/dedup only**. Ranking,
+Five market domains - Taiwan, Korea, Japan, China, Middle East - all **fetch/dedup only**. Ranking,
 translation, and LLM classification belong to `signal-detection-agent`, not here. Each has its
 own company universe and source configs in `src/seed.py` and its own fetchers in
 `src/pipeline.py`, partitioned by `source_type` in `_fetch_articles`. They share no code
@@ -41,6 +42,7 @@ See `CLAUDE.md` for each domain's full source table, sourcing decisions, and sch
 | `korea_market_signal` | `KOREA_TICKER_UNIVERSE` | `dart_filing`, `kr_customs_export`, `gdelt` (+ RSS sources) |
 | `japan_market_signal` | `JAPAN_TICKER_UNIVERSE` | `irbank_financials`, `irbank_buyback`, `irbank_company_reference`, `kabutan_tdnet_mirror`, `kabutan_buyback`, `edinet_filing`, `edinet_buyback_status`, `edinet_extraordinary_report`, `seaj_billings`, `monoist_capex`, `press_jp`, `press_jp_english_check` |
 | `china_market_signal` | `CHINA_TICKER_UNIVERSE` | `mofcom_policy`, `miit_policy`, `samr_action`, `cac_review`, `cn_state_press`, `hkex_filing`, `cninfo_filing`, `press_cn`, `press_cn_english_check` |
+| `middle_east_market_signal` | `MIDDLE_EAST_UNIVERSE` | `wam_wire`, `spa_wire`, `bis_press`, `sec_fund_stake`, `federal_register` (own url scheme), `eventregistry` (5 queries, own url scheme), `substack_post` (Middle East AI News) |
 
 Japan reads its universe live from research-universe (`get_tracked_company_universe`) with
 seeded `config.companies` as fallback. China is hardcoded - research-universe's `country`
@@ -138,6 +140,8 @@ pytest news-retrieval/tests/
 | `test_webhook.py` | `callback_url` POSTed with `status=completed` on success and `status=failed` on pipeline error |
 | `test_ownership.py` | `POST /sources` and `PATCH /domains/{id}` reject non-owners → 403; null-owner domains visible to all users; multi-key grants; grant revocation; admin bypass |
 | `test_pipeline.py` | Pipeline fetch behavior |
+| `test_taiwan_financials.py` | Taiwan monthly revenue: MOPS CSV parsing, daily-feed rows, UPSERT replacing a restated month, `/market/taiwan/revenue-history` |
+| `test_middle_east.py` | Middle East fetchers with faked HTTP: match filter boundaries, 13D/13G XML parsing, WAM paging + filter-before-body, Substack free-written-posts-only with API body, run()'s body and publication-window guards, BIS country filter + DOJ title match, Event Registry `query`/`url_scheme`/`require_body`/`max_pages`, Federal Register `terms`/`url_scheme`, and both shared fetchers unchanged without the new keys |
 
 ## Dependencies
 

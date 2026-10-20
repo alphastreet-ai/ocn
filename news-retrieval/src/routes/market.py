@@ -188,6 +188,24 @@ def get_tracked_tickers() -> dict:
     return {"tickers": tickers}
 
 
+@router.get("/market/taiwan/revenue-history")
+def taiwan_revenue_history() -> dict:
+    """Monthly revenue for the Taiwan universe, one row per company and
+    month, from storage (taiwan_financials.py writes it).
+
+    Same row shape as the China endpoint: code, company, period_type
+    ("M01".."M12"), year, revenue, prior_revenue (same month last year as
+    printed in that month's filing), yoy_pct (always null here - it is
+    revenue / prior_revenue), source. Values are NT$ thousands. Always the
+    full stored history: signal-detection-agent judges each filing against
+    the company's own past 36 months, whoever filed today.
+    """
+    from models.company_financials import get_financials
+    from taiwan_financials import DOMAIN
+
+    return {"rows": get_financials(DOMAIN)}
+
+
 @router.get("/market/china/revenue-history")
 def china_revenue_history(
     refresh: bool = False, codes: str | None = None,

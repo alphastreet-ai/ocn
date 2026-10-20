@@ -1,151 +1,219 @@
-"""Stage D: free quality grading for geopolitical_signal rows Stage C has
-already tagged (signal_detection='signal').
+"""Stage D: attach each signal's same-event sibling coverage.
 
-No model call anywhere in this module - every check is a deterministic
-lookup, same free-checks philosophy as Stage A. Stage D answers a
-different question than Stage C: Stage C says "who is this relevant to",
-Stage D says "how much should a reader trust this specific item" - the
-grade this produces is what would ultimately decide ordering in a digest
-(TOP items first), not whether an item is included at all.
+No model call, no network call - the siblings are already rows in this
+service's own table, written by Stage A, and are found by a single
+grouped query on metadata.event_uri.
 
-Three independent checks, each true/false:
-  - corroborated: at least one other outlet (news-retrieval's
-    metadata.also_reported_by on the source article) is itself a
-    wire/paper-of-record on Stage A's own domain allowlist - not just any
-    also_reported_by entry, since real data shows that field can be
-    entirely local TV affiliates re-syndicating the same AP wire copy
-    (confirmed live: article 16514 had 25 also_reported_by entries, all
-    ABC/NBC local affiliates carrying one AP story - none of that is
-    independent corroboration). The allowlisted subset that actually
-    made this true is stored as corroborating_domains, alongside the
-    boolean - previously read-then-discarded, so a caller could see
-    THAT a story was corroborated but never WHICH outlets did it.
-  - primary_source: the article's own domain is on Stage A's allowlist.
-    Expected to be true for nearly every row reaching Stage D, since
-    Stage A already only lets allowlisted-domain articles through in the
-    first place - this check exists for completeness/documentation, not
-    because it meaningfully differentiates rows in practice.
-  - specific: the headline itself contains a digit (a concrete number -
-    percentage, dollar amount, count, etc), OR Stage C extracted at
-    least one named entity from the headline and body. Either is
-    evidence the story is about something concrete rather than a vague,
-    unquantified claim. This read Layer 1's headline-only company match
-    until that proved null on every geopolitical row - these headlines
-    name countries, not companies - which left the check digit-only.
+WHAT THIS STAGE ANSWERS: "who else reported this same event, and what
+did they call it". Seven outlets on one Strait of Hormuz attack is a
+fact a reader uses directly - and the HEADLINE VARIANCE between them is
+the part worth reading, because "projectile attacks", "naval mine
+explosion" and "Iran expands attacks on shipping" are materially
+different claims about one incident. That disagreement is invisible
+from any single row.
 
-Grade: TOP (all 3 true), STRONG (exactly 2 true), STANDARD (0 or 1 true).
+WHAT IT NO LONGER DOES: grade. This stage used to compute
+grade (TOP/STRONG/STANDARD) from three booleans - corroborated,
+primary_source, specific. All three were measured against the real
+two-source pool (75 signal rows) and all three had collapsed:
+
+  - primary_source tested membership of Stage A's ALLOWED_DOMAINS,
+    which no longer gates anything (the domain allowlist was removed
+    from Stage A after it was found to drop 96% of articles). Fired on
+    0 of 75 rows. Its own docstring already conceded it existed "for
+    completeness, not because it differentiates".
+  - corroborated matched also_reported_by entries against that same
+    dead allowlist, so it was near-unreachable for the same reason.
+  - specific was true when the row had ANY extracted entity, which
+    Stage C now produces on 74 of 75 rows. A check that fires on 99% of
+    its input sorts nothing.
+
+So every row graded the same, and the grade carried no information.
+
+Rebuilding the grade was considered and rejected on its own merits,
+not only because the inputs were broken. A single word - TOP/STRONG/
+STANDARD - compresses away the facts a reader would actually use, and
+it compresses them in the wrong direction: corroboration measures
+CONFIRMATION, and by the time seven outlets carry a story it is the
+news everybody already has. A grade that ranks a 7-outlet event above
+a 1-outlet one buries exactly the row with an information edge. The
+raw count and the sibling headlines let a reader judge crowding
+themselves; a grade decides it for them, wrongly.
+
+The `grade` metadata key and its API filter are left alone rather than
+removed - see update_geopolitical_signal_stage_d_grade.
 """
 from __future__ import annotations
 
-import re
 from typing import Any
-from urllib.parse import urlparse
 
-from pipeline.geopolitical_signal_classifier import ALLOWED_DOMAINS
+# How many siblings are stored per row. The largest real cluster
+# measured in this domain is 7 articles (6 siblings), so this is not
+# binding today - it exists so one pathological cluster cannot write an
+# unbounded list into every member's metadata.
+#
+# `count` is always len(siblings) AFTER this cap, never the uncapped
+# total, so the two can never disagree. A consumer reading
+# `corroboration.count` and then rendering `corroboration.siblings`
+# must not find the second shorter than the first.
+_MAX_SIBLINGS = 20
 
-_DIGIT_RE = re.compile(r"\d")
 
+def _norm_url(url: str | None) -> str:
+    """Return a url normalised enough to recognise one article twice.
 
-def _extract_domain(url: str | None) -> str:
-    """Same domain-derivation rule as Stage A's _extract_domain - strip
-    "www.", keep any other subdomain as-is (e.g. en.interfax.com.ua stays
-    its own full value, matching how ALLOWED_DOMAINS itself lists it).
+    The two sources name the same article differently often enough to
+    matter: a scheme, a "www." and a trailing slash are not differences
+    a reader would accept as two outlets.
     """
-    host = urlparse(url or "").hostname or ""
-    host = host.lower()
-    if host.startswith("www."):
-        host = host[len("www."):]
-    return host
+    u = (url or "").strip().lower()
+    for prefix in ("https://", "http://"):
+        if u.startswith(prefix):
+            u = u[len(prefix):]
+            break
+    if u.startswith("www."):
+        u = u[len("www."):]
+    return u.rstrip("/")
 
 
-def _corroborating_domains(also_reported_by: list[str] | None) -> list[str]:
-    """Return the subset of also_reported_by entries that are themselves a
-    domain on Stage A's allowlist - a real second wire/paper-of-record
-    covering the same story, not just any syndicating outlet.
-
-    Deliberately filtered, not the raw also_reported_by list verbatim:
-    confirmed live that field can be entirely local TV affiliates
-    re-syndicating one AP wire copy (article 16514 had 25 also_reported_by
-    entries, all ABC/NBC local affiliates carrying one AP story - none of
-    that is independent corroboration). Storing the unfiltered list under
-    a name like "corroborating_domains" would make it look like real
-    corroboration when it's actually syndication noise - the same problem
-    this filter exists to avoid in the boolean, so the stored list mirrors
-    the boolean's own standard exactly rather than being a separate, more
-    permissive view of the same field.
-
-    news-retrieval now writes also_reported_by as a domain derived from
-    the duplicate article's own url (pipeline.py's
-    _extract_domain_for_also_reported_by), same normalization as this
-    function's "www." stripping - so a fresh entry is already comparable
-    as-is. Confirmed live this was NOT always true: this function
-    originally compared against article["source"] display names ("PBS",
-    "Bloomberg Law News", "ABC News - Breaking News, Latest News and
-    Videos") that news-retrieval had been storing directly, which never
-    matched ALLOWED_DOMAINS and made corroborated structurally
-    unreachable. The "www." stripping here stays anyway as a defensive
-    no-op against any older rows still holding a pre-fix display-name
-    value (those will simply still not match, same as before - this
-    function does not retroactively reclassify already-graded rows).
-    """
-    if not also_reported_by:
-        return []
-    matched: list[str] = []
-    seen: set[str] = set()
-    for entry in also_reported_by:
-        domain = (entry or "").strip().lower()
-        if domain.startswith("www."):
-            domain = domain[len("www."):]
-        if domain in ALLOWED_DOMAINS and domain not in seen:
-            matched.append(domain)
-            seen.add(domain)
-    return matched
-
-
-def _is_specific(title: str, named_entities: list[dict[str, Any]] | None) -> bool:
-    # Only checked for truthiness - shape-agnostic to whatever the
-    # caller passes. Reads Stage C's extracted entities (headline AND
-    # body) rather than the old headline-only company match, which was
-    # null on every geopolitical row and left this check digit-only.
-    return bool(_DIGIT_RE.search(title or "")) or bool(named_entities)
-
-
-def grade_geopolitical_signal_article(
+def build_corroboration(
     *,
-    url: str | None,
-    title: str | None,
-    also_reported_by: list[str] | None,
-    named_entities: list[dict[str, Any]] | None,
+    event_uri: str | None,
+    row_id: int,
+    cluster: list[dict[str, Any]] | None,
+    also_reported_by: list[Any] | None = None,
+    self_url: str | None = None,
 ) -> dict[str, Any]:
-    """Return {grade, corroborated, corroborating_domains, primary_source,
-    specific} for one Stage-C-tagged article. Pure/free - no model call,
-    no I/O; callers fetch also_reported_by from news-retrieval before
-    calling this.
+    """Return {count, siblings} - the OTHER articles reporting this event.
 
-    corroborating_domains is stored alongside the boolean - previously
-    also_reported_by was read only to compute corroborated, then
-    discarded; a caller wanting to show WHICH outlets corroborated a
-    story (not just a true/false badge) had nothing to read. Empty list
-    (not null) when corroborated is False, same "always the type, just
-    empty" convention Stage C's tag arrays already use.
+    ``cluster`` is every row sharing this row's event_uri, including
+    this row itself; it is filtered out here by id, so `count` means
+    "how many other outlets", not cluster size. A reader asking "who
+    else has this" wants 6, not 7.
+
+    Siblings come from TWO independent sources, merged and deduped by
+    url: the event_uri cluster, and the articles news-retrieval's own
+    title-similarity dedup discarded as near-duplicates of this one.
+    Each sibling records which found it in `via`, because they are
+    different kinds of evidence - one semantic, one lexical - and a
+    surprising entry should be traceable to the mechanism that claimed
+    it.
+
+    What `via` records is how well that sibling is EVIDENCED, which is
+    not the same as how it is related:
+
+      also_reported_by  news-retrieval put this and the article at
+                        >= 0.82 title similarity and, in the borderline
+                        band, an LLM confirmed one event. Two
+                        independent tests agreed.
+      event_uri         Event Registry clustered them. Not checked here.
+
+    Neither value means "same story" or "merely related". The lexical
+    test only fires within 168 hours, against articles ALREADY STORED,
+    and only when the headlines actually resemble each other - so a real
+    duplicate arrives tagged event_uri whenever the two headlines share
+    no words ("iPhones floating in Strait of Hormuz" vs "US says
+    container ship hit by projectile"), both articles land in one batch,
+    or the embedding failed. The stored distribution says no threshold
+    fixes this: a confirmed 9-headline EU sanctions cluster scored
+    0.5951-0.8177 pairwise, fully overlapping the 0.61-0.72 range of two
+    confirmed DIFFERENT Canada-tariff stories.
+
+    An article with neither source, or whose sources name no other
+    article, returns {"count": 0, "siblings": []} rather than nothing.
+    The explicit zero is the point: an ABSENT field cannot be told
+    apart from a stage that failed or never ran, while a zero says "we
+    looked for other coverage and there is none" - which is a real
+    finding, and for a reader often the more interesting one, since it
+    means the story is not yet crowded.
+
+    That distinction also has to survive Federal Register rows, which
+    carry no event_uri because a filed determination has no "other
+    outlets" at all. Those are a different case again - not "checked
+    and alone" - and keeping the zero explicit here is what leaves room
+    to say so.
     """
-    corroborating_domains = _corroborating_domains(also_reported_by)
-    corroborated = bool(corroborating_domains)
-    primary_source = _extract_domain(url) in ALLOWED_DOMAINS
-    specific = _is_specific(title or "", named_entities)
+    siblings: list[dict[str, Any]] = []
+    seen = {_norm_url(self_url)} - {""}
 
-    true_count = sum((corroborated, primary_source, specific))
-    if true_count == 3:
-        grade = "TOP"
-    elif true_count == 2:
-        grade = "STRONG"
-    else:
-        grade = "STANDARD"
+    # Source 1: Event Registry's event_uri cluster. Semantic - it groups
+    # articles describing one event even when the headlines share no
+    # words ("iPhones floating in Strait of Hormuz" and "US says
+    # container ship hit by projectile" are one event, zero overlapping
+    # terms). This is why it finds more than the lexical dedup below.
+    for member in cluster or []:
+        if member.get("id") == row_id:
+            continue
+        url = member.get("url") or ""
+        key = _norm_url(url)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        siblings.append({
+            # The outlet's own domain, which is what identifies the
+            # source to a reader.
+            "outlet": member.get("outlet") or member.get("source") or "",
+            # The headline VERBATIM. Never rewritten or collapsed by
+            # similarity - near-identical wording across two outlets is
+            # itself information (syndication), and so is divergence.
+            "title": member.get("title") or "",
+            "url": url,
+            "via": "event_uri",
+        })
 
-    return {
-        "grade": grade,
-        "corroborated": corroborated,
-        "corroborating_domains": corroborating_domains,
-        "primary_source": primary_source,
-        "specific": specific,
-    }
+    # Source 2: news-retrieval's own title-similarity dedup, which
+    # discarded these as near-duplicates of this article. Lexical, so it
+    # mostly catches syndication - the same wire copy under near-
+    # identical headlines - which is exactly the shape Event Registry's
+    # semantic clustering is least likely to be the only witness to.
+    #
+    # Not a subset of source 1. Measured over 87 real signals: event_uri
+    # covered 48 rows, this covered 30, and they overlapped on 20. Ten
+    # rows had only this, and Stage D reported zero corroboration for
+    # them while the duplicates sat on the row.
+    #
+    # Entries written before this field carried headlines are bare
+    # domain strings; they are read too, with empty title and url,
+    # because an outlet with no headline still counts as coverage.
+    for entry in also_reported_by or []:
+        if isinstance(entry, dict):
+            outlet, title, url = (
+                entry.get("outlet") or "", entry.get("title") or "",
+                entry.get("url") or "",
+            )
+        else:
+            outlet, title, url = (str(entry or "").strip(), "", "")
+        if not outlet and not url:
+            continue
+        # Deduped against the cluster by url, because one article can
+        # legitimately be found by both mechanisms - 20 of 87 rows carry
+        # both - and counting it twice would overstate the coverage.
+        # With no url to compare (an old string entry), the outlet name
+        # stands in.
+        key = _norm_url(url) or f"outlet:{outlet.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        siblings.append({
+            "outlet": outlet, "title": title, "url": url,
+            "via": "also_reported_by",
+        })
+
+    siblings = siblings[:_MAX_SIBLINGS]
+    # Counted AFTER the cap, from the stored list itself, so `count` can
+    # never disagree with what a reader can see: it is always exactly
+    # len(siblings).
+    #
+    # ONE count, not a breakdown by `via`. A same_story/same_event split
+    # was built here and removed: it read as a partition ("2 are
+    # duplicates, 5 are merely related") that the mechanisms do not
+    # support. also_reported_by only fires on >= 0.82 title similarity,
+    # within 168 hours, against articles ALREADY STORED - so a genuine
+    # duplicate lands in the event_uri half instead whenever the two
+    # headlines share no words, both arrive in one batch, or the
+    # embedding failed. The difference between the two is how well the
+    # sibling is EVIDENCED, not whether it is the same story, and a
+    # pair of counts cannot say that without implying the opposite.
+    # `via` on each sibling carries it honestly, per sibling.
+    return {"count": len(siblings), "siblings": siblings}

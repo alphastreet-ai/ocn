@@ -3594,7 +3594,15 @@ def classify_press(
         title = a.get("title") or ""
         company = meta.get("company") or meta.get("code") or ""
         also_reported_by = meta.get("also_reported_by") or []
-        publications_carrying_this = len({domain, *also_reported_by})
+        # Two shapes: a bare domain string on rows written before this
+        # field carried headlines, and {outlet, title, url} after. Only
+        # the outlet is counted here, and unpacking the list directly
+        # would raise on the dict form (unhashable in a set).
+        other_outlets = {
+            (e.get("outlet") if isinstance(e, dict) else e) or ""
+            for e in also_reported_by
+        }
+        publications_carrying_this = len({domain, *other_outlets} - {""})
         # a.get("source", domain) would NOT fall back here if "source" is
         # a present-but-None key (a dict default only applies when the key
         # is MISSING, not when its value is None) - confirmed live this is

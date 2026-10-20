@@ -5,7 +5,184 @@ when present, is the authoritative source for specifics the headline
 alone may omit - use it to identify the specific goods, sectors, or
 industries named. Return ONLY a JSON object with exactly these keys:
 
-"channel": one of "energy" | "trade" | "sanctions" | "shipping" | "conflict"
+"channel": one of "energy" | "trade" | "sanctions" | "shipping" |
+  "conflict" | "subsidies" | "regulation" | "diplomacy", or null. The INSTRUMENT the
+  event works through - what kind of action it is, not what it is
+  about. An oil sanction is "sanctions", not "energy": the subject is
+  oil but the instrument is a designation. One value only. Every
+  article whose subject falls in any of the eight gets that channel -
+  with or without a government acting; null is ONLY for an article
+  whose subject fits none of them (step 2).
+
+  The eight instruments:
+    "sanctions"  ECONOMIC sanctions by a government or a body of
+                 governments: a designation, listing, delisting, asset
+                 freeze, general licence, entity/denial-list action, a
+                 country-wide embargo, or secondary tariffs on buyers
+                 of a named country's goods - and waiving, easing or
+                 extending them. Not a sports, disciplinary or court
+                 "sanction".
+    "trade"      a rule about goods crossing a border, for a category
+                 of goods: tariff, quota, import or export ban, export
+                 control, customs rule or guidance; or a trade, supply
+                 or investment agreement BETWEEN GOVERNMENTS.
+    "shipping"   the movement of goods: a strait or canal closed or
+                 reopened, a blockade, a ship seized, struck, mined or
+                 attacked - by anyone, in war or not - a carrier
+                 suspending a route, a port closed.
+    "energy"     how much energy reaches a market NOW, or its price: a
+                 producer cutting or raising its own output, a quota,
+                 a grid or power order, an energy price or tariff a
+                 government sets, a strategic-reserve release, damage
+                 that stops energy flowing, a supplier changing an
+                 energy supply contract. (A state embargo on another
+                 country's energy is "sanctions".)
+    "conflict"   force and security: military force between states;
+                 an attack by a state, a state-backed group, militants
+                 or terrorists on a country's territory, forces or
+                 fixed infrastructure (a refinery, a grid, a data
+                 centre); sabotage; a military deployment, exercise or
+                 naval mission; strikes reported in a war zone. An
+                 attack on a ship is "shipping".
+    "subsidies"  public money or reward to build or produce: a grant,
+                 subsidy, tax credit or break, a state fund, state-
+                 owned investor, development bank or export-credit
+                 agency (World Bank, EXIM) lending or investing, a
+                 budget allocation for an industry, a law rewarding
+                 local processing or hiring, a government co-owning
+                 or fast-tracking a project - and removing, cutting or
+                 restricting any of these. Any TAX measure on an
+                 industry is "subsidies" too - a new tax, a tax rise or
+                 cut, a tax credit, or taxing an incentive away - even
+                 when it is still a bill: tax is a fiscal instrument,
+                 not a rule on operating.
+    "regulation" a rule a government applies INSIDE its own territory
+                 on how an industry may build or operate: a moratorium,
+                 a zoning, permit or licence decision, an AI or data
+                 law, an antitrust probe or fine (it may name one
+                 company - no list is involved). Also a FORMAL
+                 government process on a specific measure before the
+                 decision: a bill introduced, a draft rule or a
+                 public-comment period, a hearing, council meeting or
+                 review held by the government body on that measure, a
+                 scheduled vote, a permit application under review.
+    "diplomacy"  relations between states that use no other
+                 instrument: talks, summits, official visits,
+                 cooperation agreements or memoranda, a minister's
+                 meeting with another country or an international body,
+                 threats, warnings, accusations or protests between
+                 governments, a UN vote or resolution. Talks ABOUT a
+                 named instrument take that instrument (tariff talks ->
+                 "trade"; talks on sanctions relief -> "sanctions").
+
+  Decide in this order, and stop at the first step that answers:
+  1. WHICH ACTION. Take the concrete action the HEADLINE reports. If
+     the headline names an instrument (a sanction, a tariff, a
+     reserve release) next to background events, take that
+     instrument. If the headline reports no action, take the one
+     concrete measure in the text the article hinges on.
+  2. IS IT GEOPOLITICAL. An article is geopolitical when it reports or
+     analyses something a government, a court, a body of governments
+     (IEA, World Bank, UN, EU count) or a state-backed group did, said
+     or is formally considering, or a concrete supply or movement event
+     (an output change, a supply-contract change, damage stopping
+     energy, an attack on a ship, a route or port closed). Then it
+     always gets a channel:
+     - a decided or formally proposed measure -> its instrument;
+     - analysis, opinion or a government statement ABOUT a measure or
+       a state's policy -> the channel of that instrument (China's
+       mineral export curbs -> "trade"; a minister on reshoring
+       chipmakers -> "subsidies" or "trade", whichever the text names);
+     - relations between states with no other instrument ->
+       "diplomacy".
+     - NO government, court, body of governments or armed group acted
+       (a company's plan, deal, financing, listing, results or product;
+       market or stock commentary; residents, activists or a private
+       lawsuit; research; a forecast): it STILL gets the channel of the
+       area its subject falls in -
+         energy supply, demand or prices - power, grids, oil, gas, LNG,
+         coal, uranium, and data centres' power -> "energy";
+         ships, ports, sea routes, freight -> "shipping";
+         goods, chips, minerals or metals moving between countries, or
+         their supply chains -> "trade";
+         armed groups, attacks, sabotage, security -> "conflict".
+       "subsidies", "regulation", "sanctions" and "diplomacy" are
+       instruments only a government uses - never give them when no
+       government body acted.
+     null ONLY when the subject falls in none of these areas - health
+     and biotech, law and courts on non-economic matters, sports,
+     hotels and property, consumer software, advertising, history.
+  3. WHICH INSTRUMENT. Match it to the eight above. Where two fit, the
+     more specific wins, in this order:
+       sanctions > trade > shipping > energy > conflict > subsidies >
+       regulation > diplomacy
+     A broad word never beats a named instrument: an export control is
+     "trade" though it is a rule; a power order on data centres is
+     "energy" though it is a rule.
+     "regulation" is the LAST resort among measures. Before answering
+     it, check in turn: is it about tax or public money ->
+     "subsidies"; energy prices, tariffs or supply -> "energy"; goods
+     crossing a border (an import or export ban, of anything) ->
+     "trade"; security, sabotage or a security contract -> "conflict";
+     relations between states -> "diplomacy". Only a rule on how an
+     industry may build or operate at home, made or formally under
+     way by a NAMED government body, is "regulation". A story merely
+     ABOUT data centres, mines or pipelines - a company, residents,
+     researchers, a market forecast - with no government body acting
+     takes the channel of its area (step 2: data centres and pipelines
+     -> "energy", mines -> "trade"), never "regulation".
+  Boundaries:
+  - A court ruling, a lawmakers' bill or a regulator's draft takes the
+    channel of the measure concerned (a ruling on tariffs -> "trade";
+    a sanctions bill introduced -> "sanctions").
+  - A rule that REWARDS building is "subsidies" even when written as a
+    law; one that LIMITS, pauses or refuses is "regulation".
+  - Funding or fast-tracking a FUTURE energy project is "subsidies"; a
+    permit or moratorium on one is "regulation"; neither is "energy",
+    which is about today's flow.
+  - Sabotage or a security operation that stops energy flowing is
+    "energy"; one that does not is "conflict" (troops arrest pipeline
+    vandals -> "conflict").
+  - A contract between companies is not "trade": "trade" agreements
+    are between governments.
+
+  Examples:
+    "US sanctions Iranian oil exporters"        -> sanctions
+    "President waives sanctions on Russian oil" -> sanctions
+    "US imposes tariffs on solar panels"        -> trade
+    "Japan funds chip plants in the US under a bilateral deal" -> trade
+    "Iran closes the Strait of Hormuz"          -> shipping
+    "Drone strikes a tanker in the Red Sea"     -> shipping
+    "OPEC cuts output by 2m barrels"            -> energy
+    "Regulator approves a 20% rise in power prices" -> energy
+    "Missile strike hits a power plant in Ukraine"  -> conflict
+    "Province offers 30% subsidy for battery plants" -> subsidies
+    "Development bank lends $500m to a lithium mine" -> subsidies
+    "City council pauses new data centre permits"    -> regulation
+    "Senator introduces bill to cap data centre water use" -> regulation
+    "Competition authority opens probe into a chipmaker" -> regulation
+    "County holds hearing on data centre moratorium" -> regulation
+    "Public comment closes on federal data centre permit" -> regulation
+    "Leaders agree to deepen chip cooperation at summit" -> diplomacy
+    "Envoy says both countries discuss joint AI projects" -> diplomacy
+    "Navy weighs sending warships to the Strait of Hormuz" -> conflict
+    "Report warns of China weaponising critical minerals" -> trade
+    "Op-ed: permitting reform is overdue"       -> regulation
+    "Chipmaker weighs a new fab abroad"         -> trade (chips supply;
+       no government acted)
+    "Residents rally against a planned data centre" -> energy (data
+       centres' power; residents are not a government - not "regulation")
+    "Uranium miner raises $3m in a placement"   -> energy (uranium supply)
+    "Semiconductor stock jumps on earnings"     -> trade (chips supply)
+    "Biotech firm reports trial results"        -> null (fits no channel)
+    "Sports league sanctions a player"          -> null (not an economic
+       sanction - fits no channel)
+    "Senator introduces bill to tax data centres" -> subsidies (a tax)
+    "Regulator sets new electricity tariffs"    -> energy (energy price)
+    "Researchers propose ways to ease grid strain from data centres"
+                                                -> energy (power; no government acted)
+  A Federal Register sanctions notice is "sanctions" however much oil
+  its text names.
 "assets": which traded exposures the event moves. 1 to 3, from this
   list ONLY - copy the name exactly as written, including the
   underscore. These are the market exposures the event moves. The
@@ -112,6 +289,37 @@ industries named. Return ONLY a JSON object with exactly these keys:
   operative date - "issued on", "determined on", "effective",
   "signed" - and use that. Where the text gives only a
   publication date, or none, use null rather than guessing.
+"event_location": WHERE the event physically happened, as the text
+  names it, or null. One value, never a list.
+  Prefer the most SPECIFIC place the text gives: "Strait of
+  Hormuz" over "Middle East", "El Dorado County, California"
+  over "United States", a named province over its country.
+  The location is where the event OCCURRED or where the
+  facility SITS - not where a document was signed, published
+  or announced. A Federal Register notice is published in
+  Washington and that is almost never the answer.
+  A COUNTRY IS A VALID ANSWER when the event happened there
+  and the text names nothing finer. "Fighting continues in
+  Ukraine" with no city named is "Ukraine", not null - the
+  country is the most specific place the text gives, which
+  is the rule above. Only go finer when the text goes finer.
+  NULL IS THE RIGHT ANSWER FOR A LEGAL INSTRUMENT, because
+  no physical event occurred. A sanctions designation, an
+  export-control rule or a tariff is an act of law: "US
+  imposes Iran-related sanctions on Iraq Development Bank"
+  happened in no location, so answer null. Do not reach for
+  the country a measure APPLIES TO - that country is already
+  recorded in "entities" as type "country", and naming it
+  here would state a party as if it were a place.
+  The test is whether something PHYSICALLY HAPPENED
+  somewhere: a strike, an attack, a sinking, an explosion, a
+  plant or data centre being built or blocked, a pipeline,
+  port, canal or strait being closed or hit, fighting,
+  protests, a disaster. Those get a place - a country where
+  that is all the text names, something finer where it does.
+  A document being issued, published or signed is not a
+  physical event.
+  Never name a place the text does not state.
 "entities": array of the countries, companies, government bodies,
   organisations, people and goods THE ARTICLE ITSELF NAMES - from
   the headline and the article text together, not from any list you

@@ -241,6 +241,22 @@ def _fire_webhook(url: str, payload: dict) -> None:
         logger.warning("Webhook delivery failed for %s: %s", url, exc)
 
 
+def _store_taiwan_revenue(articles: list[dict[str, Any]]) -> None:
+    """Keep company_financials' Taiwan revenue history current from the
+    run's own OpenAPI rows. Best-effort: the articles are already stored,
+    and the monthly MOPS re-read (backfill-taiwan-revenue) fills any gap
+    this leaves, so a failure here must never fail the run."""
+    from models.company_financials import upsert_financials
+    from taiwan_financials import DOMAIN, revenue_rows_from_articles
+
+    try:
+        written = upsert_financials(DOMAIN, revenue_rows_from_articles(articles))
+        if written:
+            logger.info("[TW_FIN] stored %d monthly revenue row(s) from this run", written)
+    except Exception:
+        logger.exception("[TW_FIN] failed to store monthly revenue rows from this run")
+
+
 def run_pipeline(
     run_id: int,
     request: RunRequest,
@@ -270,6 +286,8 @@ def run_pipeline(
     ]
     if all_articles:
         create_articles(all_articles)
+    if request.domain == "taiwan_market_signal":
+        _store_taiwan_revenue(articles)
     complete_run(run_id, len(articles))
     if request.callback_url:
         _fire_webhook(request.callback_url, {

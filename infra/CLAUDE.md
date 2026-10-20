@@ -66,7 +66,8 @@ infra/
 | `OPENROUTER_API_KEY` | Secrets Manager | `ocn/{env}/news-retrieval:OPENROUTER_API_KEY` - used for Taiwan GDELT title-dedup embeddings |
 | `SERPAPI_KEY` | Secrets Manager | `ocn/{env}/news-retrieval:SERPAPI_KEY` - optional; SerpAPI key for `google_news` sources |
 | `SERPAPI_KEY_GEOPOLITICAL` | Secrets Manager | `ocn/{env}/news-retrieval:SERPAPI_KEY_GEOPOLITICAL` - dedicated SerpAPI key used only for the `geopolitical_news` domain's `google_news` source (separate quota from `SERPAPI_KEY`) |
-| `NEWSAPI_KEY` | Secrets Manager | `ocn/{env}/news-retrieval:NEWSAPI_KEY` - optional; NewsAPI key for `newsapi` sources |
+| `NEWSAPI_KEY` | Secrets Manager | `ocn/{env}/news-retrieval:NEWSAPI_KEY` - optional; NewsAPI key for `newsapi` sources (newsapi.**org**) |
+| `EVENT_REGISTRY_API_KEY` | Secrets Manager | `ocn/{env}/news-retrieval:EVENT_REGISTRY_API_KEY` - newsapi.**ai** / Event Registry; a different vendor and account from `NEWSAPI_KEY`. Required for the `eventregistry` source_type - one of the two sources `geopolitical_news` fetches (the other is `federal_register`), and `middle_east_market_signal`'s `er-me://` rows. Fails OPEN: without it the fetch logs a warning and skips those sources, so the domain silently runs on half its sources rather than erroring |
 | `ALPHA_VANTAGE_API_KEY` | Secrets Manager | `ocn/{env}/news-retrieval:ALPHA_VANTAGE_API_KEY` - optional; Alpha Vantage key for `company_news` domain |
 | `RESEARCH_UNIVERSE_URL` | hardcoded | `http://research-universe.{env}.ocn.internal:8007` - optional; used to fetch tickers dynamically for `company_news` domain |
 | `RESEARCH_UNIVERSE_API_KEY` | Secrets Manager | `ocn/{env}/news-retrieval:RESEARCH_UNIVERSE_API_KEY` - optional; service API key (ru_ prefix) for authenticating calls to research-universe |

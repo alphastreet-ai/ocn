@@ -91,7 +91,13 @@ def insert_classification(job_id: int, article: dict[str, Any], result: dict[str
                 float(result["signal_score"]),
                 result.get("signal_reason"),
                 result["materiality"],
-                result["category"],
+                # `category` is TEXT[] for every domain. The news
+                # classifier picks exactly one, so it is stored as a
+                # one-element array rather than given a column of its
+                # own; geopolitical_signal stores several in the same
+                # place. None stays NULL - an absent category and an
+                # empty list are different answers.
+                [result["category"]] if result.get("category") else None,
                 json.dumps(result.get("entities") or [], ensure_ascii=False),
                 result.get("base_signal_detection"),
                 result.get("base_signal_score"),
@@ -164,7 +170,7 @@ def insert_filing_classification(job_id: int, filing: dict[str, Any], result: di
         )
 
 
-# Path 1/2 signals (revenue_rank_signal, announcement_materiality_signal)
+# Path 1/2 signals (revenue score, announcement_materiality_signal)
 # use HIGH/WEAK/NOISE, distinct from this table's existing
 # signal/weak_signal/noise vocabulary used by the LLM-classified sources
 # (news, sec_filing) - mapped here so taiwan_market_signal
@@ -191,18 +197,21 @@ def insert_taiwan_signal_classification(
     Digest-composition fields (rank, translated text, percentages, etc.)
     have no equivalent typed column on this table and go in ``metadata``
     instead - same JSONB-bag rationale as news-retrieval's articles.metadata.
-    category/materiality/entities_json are left at their defaults (NULL/
-    '[]') - this source type doesn't use the LLM-classification vocabulary
-    those columns were built for.
+    category/materiality are left at their defaults - this source type
+    doesn't use the LLM-classification vocabulary those columns were built
+    for. entities_json / entity_names_normalized carry the companies a
+    material announcement names (see taiwan_announcement_classifier); empty
+    for other Taiwan rows.
     """
+    entities = result.get("entities") or []
     with get_db() as conn:
         conn.execute(
             """
             INSERT INTO agent_classifications (
                 job_id, source_type, source_id, url, title,
                 signal_detection, signal_score, signal_reason,
-                published, metadata
-            ) VALUES (%s, 'taiwan_market_signal', %s, %s, %s, %s, %s, %s, %s, %s)
+                published, metadata, entities_json, entity_names_normalized
+            ) VALUES (%s, 'taiwan_market_signal', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT DO NOTHING
             """,
             (
@@ -215,6 +224,8 @@ def insert_taiwan_signal_classification(
                 result.get("reason"),
                 article.get("published"),
                 json.dumps(result.get("metadata") or {}, ensure_ascii=False),
+                json.dumps(entities, ensure_ascii=False),
+                [e["name"].lower() for e in entities if e.get("name")],
             ),
         )
 
@@ -735,9 +746,7 @@ def mark_macro_signal_event_suppressed(source_id: str, rule: str) -> bool:
     suppressed by mechanism C (confirmation reversal) - updates
     metadata.suppressed_by AND signal_detection together. Returns True
     if a row was updated, False if source_id wasn't found. This is the
-    one place macro_signal data is allowed to change after insert, same
-    exception pattern as update_taiwan_revenue_rank for
-    taiwan_market_signal.
+    one place macro_signal data is allowed to change after insert.
 
     signal_detection is forced to 'noise' here, not left at its
     original 'signal'/'weak_signal' value - a confirmation-reversed
@@ -823,71 +832,53 @@ def list_taiwan_periods(source_category: str | None = None) -> list[str]:
     return [r["period"] for r in rows]
 
 
-def get_taiwan_revenue_rows_for_periods(periods: list[str]) -> list[dict[str, Any]]:
-    """Return existing mops_revenue rows already stored for the given
-    period_gregorian values, across ALL prior jobs.
-
-    Used to re-rank a period's full known field (already-stored rows +
-    today's newly-fetched ones) rather than ranking today's arrivals in
-    isolation - a straggler filing that arrives after the rest of the
-    period's companies would otherwise get ranked against only itself
-    ("rank 1 of 1") instead of the true field size. These rows are read-only
-    context for the rank computation; only update_taiwan_revenue_rank below
-    writes any of them back.
-    """
-    if not periods:
+def get_taiwan_recent_remarks(tickers: list[str], since_period: str) -> list[dict[str, Any]]:
+    """Stored revenue remarks for these tickers from `since_period`
+    ('YYYY-MM') onward - the history mark_repeated_remarks compares a new
+    filing's explanation against. One query for the whole batch."""
+    if not tickers:
         return []
     with get_db() as conn:
         rows = conn.execute(
             """
-            SELECT id, source_id, metadata
+            SELECT metadata->>'ticker' AS ticker,
+                   metadata->>'period_gregorian' AS period_gregorian,
+                   metadata->>'remarks' AS remarks
             FROM agent_classifications
             WHERE source_type = 'taiwan_market_signal'
               AND metadata->>'source_category' = 'mops_revenue'
-              AND metadata->>'period_gregorian' = ANY(%s)
+              AND metadata->>'ticker' = ANY(%s)
+              AND metadata->>'period_gregorian' >= %s
+              AND metadata->>'remarks' IS NOT NULL
             """,
-            (periods,),
+            (list(set(tickers)), since_period),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def update_taiwan_revenue_rank(
-    source_id: str,
-    *,
-    revenue_rank_signal: str,
-    signal_reason: str,
-    metadata: dict[str, Any],
-) -> None:
-    """Overwrite an existing mops_revenue row's rank/signal fields after a
-    later arrival in the same period changed the true field size.
-
-    ``revenue_rank_signal`` is HIGH/WEAK (rank_revenue_by_yoy's own
-    vocabulary, same as insert_taiwan_signal_classification's ``signal``
-    param) - mapped to signal_detection's signal/weak_signal vocabulary via
-    _TAIWAN_SIGNAL_MAP here so callers don't need to know about that
-    mapping, same division of responsibility as the insert path.
-
-    Only called when the newly-computed rank actually differs from what's
-    stored (see rank_revenue_by_yoy's changed-row detection) - most re-ranks
-    don't move anyone's position and this is a no-op for those rows. The
-    previous rank/signal are preserved in metadata.rank_revision_history so
-    a caller can see a row was revised rather than treating a changed value
-    as if it had always been that way.
-    """
+def get_taiwan_remark_translations(texts: list[str]) -> dict[str, str]:
+    """Chinese revenue remark -> its stored English translation, for the
+    texts that already have one. Lets translate_taiwan_articles reuse a
+    translation instead of paying a model call for a sentence the same
+    company files month after month."""
+    if not texts:
+        return {}
     with get_db() as conn:
-        conn.execute(
+        rows = conn.execute(
             """
-            UPDATE agent_classifications
-            SET signal_detection = %s, signal_reason = %s, metadata = %s
-            WHERE source_type = 'taiwan_market_signal' AND source_id = %s
+            SELECT DISTINCT ON (metadata->>'remarks')
+                   metadata->>'remarks' AS remarks,
+                   metadata->>'translated_remarks' AS translated
+            FROM agent_classifications
+            WHERE source_type = 'taiwan_market_signal'
+              AND metadata->>'source_category' = 'mops_revenue'
+              AND metadata->>'remarks' = ANY(%s)
+              AND metadata->>'translated_remarks' IS NOT NULL
+            ORDER BY metadata->>'remarks', stored_at DESC
             """,
-            (
-                _TAIWAN_SIGNAL_MAP[revenue_rank_signal],
-                signal_reason,
-                json.dumps(metadata, ensure_ascii=False),
-                source_id,
-            ),
-        )
+            (list(set(texts)),),
+        ).fetchall()
+    return {r["remarks"]: r["translated"] for r in rows}
 
 
 # geopolitical_signal's own vocabulary across both Stage A and Stage B
@@ -899,10 +890,17 @@ def update_taiwan_revenue_rank(
 # Stage B), HIGH->signal (Stage B's action classification). See db.py's
 # agent_classifications_signal_detection_check for the corresponding
 # schema change.
-# How much of news-retrieval's body Stage A keeps for Stage B's use.
-# Matches the limit Stage B sends to the model, so nothing is stored
-# that the model would never see.
-_STAGE_B_BODY_EXCERPT_CHARS = 2500
+# Stage A stores the article body WHOLE, under metadata.body, and no
+# storage-side cap exists. Each reading stage applies its own limit at
+# prompt-build time instead: Stage B slices _MAX_BODY_CHARS (8,000),
+# Stage C slices its own 24,000. One stored copy, two slices.
+#
+# There was a _STAGE_B_BODY_EXCERPT_CHARS here that truncated on write,
+# and it had to be kept in step with Stage B's prompt-side cap by hand -
+# raising one without the other changed nothing, which is a silent
+# failure. Worse, it capped at the IRREVERSIBLE stage's limit while
+# Stage C, licensed to read three times as much, got the short copy and
+# went back to news-retrieval for the rest.
 
 
 
@@ -913,10 +911,6 @@ _STAGE_B_BODY_EXCERPT_CHARS = 2500
 # honestly say about a row it rejected without reading.
 _GEOPOLITICAL_STAGE_A_REASON = {
     "non_english": "Dropped - the article is not in English.",
-    "domain_not_allowed": (
-        "Dropped - the source domain is not on the allowlist of wire "
-        "services, papers of record and government sites."
-    ),
     "signal": (
         "Federal Register notice whose title names a trade, sanctions or "
         "supply measure - treated as an action without a model call."
@@ -1008,16 +1002,70 @@ def insert_geopolitical_signal_classification(
     if result.get("outcome") == "waiting":
         body = article.get("body")
         if body:
-            metadata["body_excerpt"] = body[:_STAGE_B_BODY_EXCERPT_CHARS]
+            # The WHOLE body, uncapped. Stage B slices its own 8,000
+            # from this at prompt-build time and Stage C reads up to
+            # 24,000 of the same string, so one stored copy serves both
+            # rather than each stage keeping its own truncation.
+            #
+            # Stage C used to re-fetch the article from news-retrieval
+            # per row instead of reading what was already here. That is
+            # 63 HTTP calls a run for text we hold, and it fails open to
+            # headline-only whenever the fetch misses - which on a
+            # 7-day-retention domain it eventually does. Measured on job
+            # 1449: 3 of 63 rows were tagged `coverage: unreadable` and
+            # produced ZERO entities, each with a stored excerpt
+            # averaging 3,830 characters. The text was never missing;
+            # nothing read it. One of the three was an OFAC Iran
+            # sanctions notice naming three institutions.
+            #
+            # Uncapped because capping at Stage B's 8,000 would truncate
+            # 14% of this domain's articles (95 of 679 measured) for a
+            # stage licensed to read 24,000 - and those long documents
+            # are the filed determinations Stage C exists to read.
+            # Median is 3,473 characters, so the typical row costs
+            # nothing extra; p90 is 9,615 and the longest seen 112,168.
+            metadata["body"] = body
     # Which other outlets carried the same story, as news-retrieval's
     # own title-similarity dedup recorded it. Carried for the same
     # reason as the body: it arrives with the article, and Stage D was
     # re-fetching the whole article per row just to read this one list.
     # Only a survivor needs it - a dropped row never reaches Stage D.
     if result.get("outcome") in ("waiting", "signal"):
-        also = (article.get("metadata") or {}).get("also_reported_by")
+        source_meta = article.get("metadata") or {}
+        also = source_meta.get("also_reported_by")
         if also:
             metadata["also_reported_by"] = also
+        # Event Registry (newsapi.ai) returns its own enrichment with
+        # each article. Carried for the rows that survive, for the same
+        # reason as also_reported_by: it arrives with the article and a
+        # later stage would otherwise have to re-fetch to see it.
+        #
+        #   concepts   scored named entities the API extracted -
+        #              "Shell plc" 3, "Equinor" 3, "ExxonMobil" 1. An
+        #              INDEPENDENT read of the same question Stage C's
+        #              own entity extraction answers, so the two can be
+        #              compared rather than one trusted blindly.
+        #   event_uri  the API's same-event cluster id: articles sharing
+        #              one are the same underlying action.
+        #   sentiment  stored as returned, NOT acted on - measured on
+        #              real rows it tracks the outlet's prose tone, not
+        #              the direction of the measure (two outlets on one
+        #              EU sanctions package scored +0.271 and -0.075).
+        #   uri        the API's id for THIS article, distinct from the
+        #              two cluster ids above. Previously copied as
+        #              ("er_uri", "er_uri") - reading a key no source
+        #              writes, so it never copied anything.
+        # Copied under the SAME names news-retrieval stores them under.
+        # concepts/sentiment used to be renamed to er_concepts/er_sentiment
+        # here, so one value had two names depending on which table you
+        # were reading, and a query written against one service did not
+        # work against the other. The prefix also claimed a distinction
+        # the row does not make: event_uri is just as much Event
+        # Registry's, and it was never prefixed.
+        for key in ("concepts", "event_uri", "sentiment", "uri"):
+            value = source_meta.get(key)
+            if value is not None:
+                metadata[key] = value
     with get_db() as conn:
         conn.execute(
             """
@@ -1078,9 +1126,19 @@ def get_waiting_geopolitical_signal_articles() -> list[dict[str, Any]]:
     with get_db() as conn:
         rows = conn.execute(
             """
-            SELECT id, article_id, title,
+            SELECT id, article_id, title, url,
                    metadata->>'summary' AS summary,
-                   metadata->>'body_excerpt' AS body_excerpt
+                   -- The full stored body. Stage B applies its own
+                   -- _MAX_BODY_CHARS slice when building the prompt;
+                   -- Stage C reads the same key up to its own 24,000.
+                   -- One stored copy, sliced per stage - there is no
+                   -- separate body_excerpt key.
+                   metadata->>'body' AS body,
+                   -- The supplier's own same-event cluster id, where the
+                   -- source provides one. Stage B groups on it so seven
+                   -- outlets reporting one UN vote cost one model call
+                   -- rather than seven.
+                   metadata->>'event_uri' AS event_uri
             FROM agent_classifications
             WHERE source_type = 'geopolitical_signal' AND signal_detection = 'waiting'
             """,
@@ -1112,8 +1170,7 @@ def update_geopolitical_signal_classification(
     headline_only: bool = False,
 ) -> None:
     """Update one geopolitical_signal row in place after Stage B's HIGH/WEAK
-    call - the exact same update-in-place pattern as
-    update_taiwan_revenue_rank, keyed on this table's own id (Stage A/B
+    call - an update-in-place keyed on this table's own id (Stage A/B
     share one row per article_id, never insert a second one).
 
     outcome is already the stored label - Stage B answers with
@@ -1133,6 +1190,44 @@ def update_geopolitical_signal_classification(
                     || CASE WHEN %s
                             THEN jsonb_build_object('judged_on', 'headline_only')
                             ELSE '{}'::jsonb END
+                    -- judged_on records a verdict reached with no
+                    -- article text at all.
+                    --
+                    -- It had a second value, 'same_event', written
+                    -- alongside a judged_via_event key, for a verdict
+                    -- inherited from another article in the same
+                    -- event cluster. Both are gone: judged_via_event
+                    -- stored a VERBATIM COPY of metadata.event_uri,
+                    -- which is already on the row, and 'same_event'
+                    -- only restated that that key was present. Nothing
+                    -- downstream read either - no API filter, no route,
+                    -- no consumer - and an inherited row now carries
+                    -- the judged article's own reason text plus its
+                    -- title, which is what a reader actually needs.
+                    -- Both sources DELIVER a body on every row (measured
+                    -- 31/31 and 325/325), so this is no longer about a
+                    -- publisher serving nothing - it is about
+                    -- news-retrieval REJECTING a body it was given.
+                    -- Event Registry hands us its own crawl of an
+                    -- arbitrary publisher's page, and one row in 325
+                    -- arrived as column-interleaved letters; that body
+                    -- is dropped at fetch time (_is_readable_prose in
+                    -- news-retrieval's pipeline.py), which lands here as
+                    -- a row with a title and no text.
+                    --
+                    -- Stage B is irreversible, so a verdict reached on a
+                    -- headline alone must stay distinguishable from one
+                    -- reached on a full document. That is the whole job
+                    -- of this flag.
+                    --
+                    -- NB: never write a literal percent sign in this
+                    -- query, comments included. psycopg2 scans the whole
+                    -- string for format placeholders and does not skip
+                    -- SQL comments, so a stray one is read as a
+                    -- placeholder and every execute fails with
+                    -- IndexError: tuple index out of range. That is
+                    -- exactly what happened on job 1453: all 271 updates
+                    -- failed and the rows stayed `waiting`.
                 ,
                 signal_reason = COALESCE(%s::text, signal_reason)
             WHERE id = %s
@@ -1146,21 +1241,117 @@ def update_geopolitical_signal_classification(
         )
 
 
+def collapse_geopolitical_signal_event_group(
+    judged_row_id: int, siblings: list[dict[str, Any]],
+) -> int:
+    """Fold an event group into its judged row: record each other
+    member as coverage, then DELETE those rows. Returns how many were
+    deleted.
+
+    Stage B groups articles by metadata.event_uri and judges one - the
+    fullest text in the group. The rest used to be kept, each carrying a
+    copy of the judged row's verdict and reason, which put one verdict
+    in several places and showed a reader N rows for one event.
+
+    They are now stored the way news-retrieval's own title-similarity
+    duplicates already are: {outlet, title, url} appended to the judged
+    row's metadata.also_reported_by, which Stage D merges into
+    metadata.corroboration. One row per event, and the other outlets
+    remain visible with their own headlines - the headline variance
+    across a cluster is itself information, since "iPhones floating in
+    Strait of Hormuz" and "US says container ship hit by projectile"
+    are one event described two ways.
+
+    THIS DISCARDS DATA AND CANNOT BE UNDONE. The deleted row's body,
+    its own classification and its article_id are gone; only outlet,
+    title and url survive. The grouping is Event Registry's, not ours,
+    and ER's "event" is looser than "story" - a live-updates page
+    covering two events carries one event_uri, so an event the judged
+    row does not name is lost with it. Measured over 13 real clusters
+    before this was built: 11 were cleanly one event, and one was a
+    live-updates page whose other subject (a strike on a presidential
+    palace) existed in no other row.
+
+    Append and delete run in ONE transaction. A half-applied collapse
+    would either drop rows that were never recorded as coverage, or
+    record coverage for rows still present and counted twice.
+    """
+    entries = [
+        {
+            "outlet": s.get("outlet") or "",
+            "title": (s.get("title") or "").strip(),
+            "url": s.get("url") or "",
+        }
+        for s in siblings
+    ]
+    ids = [s["id"] for s in siblings if s.get("id") is not None]
+    if not ids:
+        return 0
+    with get_db() as conn:
+        # Appended with || onto whatever is already there, so the
+        # duplicates news-retrieval dropped at fetch time are kept
+        # alongside these. COALESCE covers a row with no such key yet.
+        conn.execute(
+            """
+            UPDATE agent_classifications
+            SET metadata = jsonb_set(
+                    metadata, '{also_reported_by}',
+                    COALESCE(metadata->'also_reported_by', '[]'::jsonb)
+                        || %s::jsonb)
+            WHERE id = %s
+            """,
+            (json.dumps(entries, ensure_ascii=False), judged_row_id),
+        )
+        cur = conn.execute(
+            "DELETE FROM agent_classifications WHERE id = ANY(%s)", (ids,),
+        )
+    return cur.rowcount if cur.rowcount is not None else len(ids)
+
+
 def get_untagged_geopolitical_signal_high_articles() -> list[dict[str, Any]]:
     """Return every geopolitical_signal row where signal_detection='signal'
-    (HIGH, from Stage B) that Stage C hasn't tagged yet - Stage C's entire
-    input. "Not tagged yet" means metadata has no stage_c_classified_at key
-    (set by update_geopolitical_signal_stage_c_tags below), not "metadata
-    is empty" - a HIGH row that failed Layer 2's parse still gets that
-    timestamp stamped (fail-open, per the spec: null tags, not a dropped
-    or re-attempted row).
+    (HIGH, from Stage B) that Stage C hasn't SUCCESSFULLY tagged yet -
+    Stage C's entire input.
+
+    Two kinds of row qualify. A row never attempted has no
+    stage_c_classified_at. A row whose model call failed carries
+    stage_c_failed_at instead (see
+    update_geopolitical_signal_stage_c_tags), and is deliberately picked
+    up again: the common failure here is a gateway 504, which the HTTP
+    layer already retries three times in-call, so a row that still
+    arrives here failed for longer than those attempts covered and the
+    next scheduled run is the right place to try again.
+
+    This is what keeps an untagged row OUT of Stage D rather than
+    letting it through empty - Stage D selects on
+    stage_c_classified_at, which a failed row does not have.
+
+    The failed row keeps its `signal` verdict and stays visible to
+    readers while untagged; fail-open means never hiding a real signal,
+    not pretending it was judged.
     """
     with get_db() as conn:
         rows = conn.execute(
             """
-            SELECT id, article_id, title FROM agent_classifications
+            SELECT id, article_id, title, published,
+                   -- Read from the row, not re-fetched per article from
+                   -- news-retrieval. Stage A stored the whole body here;
+                   -- the fetch cost 63 HTTP calls a run for text already
+                   -- in hand and failed open to headline-only whenever
+                   -- the article had aged out of a 7-day-retention
+                   -- domain. See store_geopolitical_signal_metadata.
+                   metadata->>'body' AS body,
+                   metadata->>'summary' AS summary
+            FROM agent_classifications
+            -- Key existence is tested with jsonb_exists(), never with
+            -- the bare operator. psycopg2 scans the RAW query string
+            -- for placeholders before the server sees it and does not
+            -- skip comments, so even naming the broken form in a
+            -- comment here would raise IndexError on this call -
+            -- confirmed against a real Postgres.
             WHERE source_type = 'geopolitical_signal' AND signal_detection = 'signal'
-              AND NOT jsonb_exists(metadata, 'stage_c_classified_at')
+              AND (NOT jsonb_exists(metadata, 'stage_c_classified_at')
+                   OR jsonb_exists(metadata, 'stage_c_failed_at'))
             """,
         ).fetchall()
     return [dict(r) for r in rows]
@@ -1193,7 +1384,9 @@ def update_geopolitical_signal_stage_c_tags(
     all possibly None on fail-open) - merged alongside
     stage_c_classified_at, which both marks this row done (see
     get_untagged_geopolitical_signal_high_articles) and feeds the Stage C
-    daily-cap counter above.
+    daily-cap counter above. impacted_categories is the one key NOT
+    merged into metadata: it is written to the `category` column instead,
+    and removed from the blob so the same list never exists twice.
 
     signal_detection is never touched here. Stage C tags a row, it does
     not re-judge one: Stage B already answered whether a real action
@@ -1219,20 +1412,57 @@ def update_geopolitical_signal_stage_c_tags(
     entity_names_normalized = [
         e["name"].lower() for e in (entities or []) if e.get("name")
     ]
+    # The sectors this event reaches go to the `category` COLUMN, not into
+    # metadata - the same move entities made above, for the same reason.
+    # They were stored as metadata.impacted_categories while `category`
+    # sat NULL on every row of this domain, which is one value under two
+    # names: a query written against `category` silently missed this
+    # domain entirely. Popped from `tags` so the metadata key is not
+    # written at all, rather than written and then ignored.
+    tags = dict(tags)
+    categories = tags.pop("impacted_categories", None) or None
+
+    # A row whose model call failed outright comes back with EVERY tag
+    # null (pipeline/geopolitical_signal_layer2._EMPTY_RESULT). Stamping
+    # stage_c_classified_at on it would be a lie with two consequences,
+    # both measured live on one 504 in a 45-row run:
+    #
+    #   1. Stage D's worklist gate is exactly
+    #      `jsonb_exists(metadata, 'stage_c_classified_at')`, so the row
+    #      went on to be GRADED with a null channel, null assets and no
+    #      category - an empty row reaching a stage that had nothing to
+    #      read.
+    #   2. Stage C's own worklist is the NEGATION of that key, so the
+    #      row became invisible to every later run. It could not heal.
+    #      Un-sticking it took manual SQL.
+    #
+    # So the stamp now records what actually happened. A failed row gets
+    # stage_c_failed_at instead: Stage D does not select it (nothing
+    # empty flows downstream), and Stage C does (it retries next run).
+    # The row keeps its `signal` verdict and stays visible throughout -
+    # fail-open is about never hiding a real signal, and that is
+    # untouched. `channel` is the probe because Layer 2 cannot return a
+    # usable result without one; a row that was genuinely judged always
+    # has it.
+    failed = tags.get("channel") is None and not (entities or []) and not categories
+    stamp = "stage_c_failed_at" if failed else "stage_c_classified_at"
+
     with get_db() as conn:
         conn.execute(
-            """
+            f"""
             UPDATE agent_classifications
-            SET metadata = metadata || (%s::jsonb) ||
-                jsonb_build_object('stage_c_classified_at', NOW()),
+            SET metadata = (metadata - 'stage_c_failed_at') || (%s::jsonb) ||
+                jsonb_build_object('{stamp}', NOW()),
                 entities_json = %s,
-                entity_names_normalized = %s
+                entity_names_normalized = %s,
+                category = %s
             WHERE id = %s
             """,
             (
                 json.dumps(tags, ensure_ascii=False),
                 json.dumps(entities or [], ensure_ascii=False),
                 entity_names_normalized,
+                categories,
                 row_id,
             ),
         )
@@ -1261,7 +1491,18 @@ def get_ungraded_geopolitical_signal_tagged_articles() -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT id, article_id, title, url,
-                   entities_json AS entities_json,
+                   -- The supplier's own same-event cluster id. Stage D
+                   -- groups on it to find the other outlets that
+                   -- reported this event; see build_corroboration.
+                   metadata->>'event_uri' AS event_uri,
+                   -- news-retrieval's OWN title-similarity dedup: the
+                   -- articles it discarded as near-duplicates of this
+                   -- one. A second, independent source of the same
+                   -- fact, and not a subset - measured over 87 real
+                   -- signals, event_uri covered 48 rows and this
+                   -- covered 30, overlapping on only 20. Ten rows had
+                   -- this and no event_uri, and reported no other
+                   -- coverage at all before Stage D read it.
                    metadata->'also_reported_by' AS also_reported_by
             FROM agent_classifications
             WHERE source_type = 'geopolitical_signal'
@@ -1271,6 +1512,55 @@ def get_ungraded_geopolitical_signal_tagged_articles() -> list[dict[str, Any]]:
             """,
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_geopolitical_signal_event_members(
+    event_uris: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return {event_uri: [member rows]} for every given event_uri.
+
+    ONE query for the whole run, not one per row - Stage D grades every
+    signal in a batch and the clusters overlap, so a per-row lookup
+    would re-read the same event repeatedly. Same reasoning as Stage
+    C's company list being loaded once per run.
+
+    Members are EVERY row sharing the event_uri regardless of verdict,
+    not just the signals: in a cluster of seven, Stage B judges one
+    member and the other six inherit, so six of them are weak_signal
+    rows. Those six ARE the corroborating coverage - filtering to
+    signals would return an empty list for exactly the clusters that
+    have the most coverage.
+
+    `outlet` is derived from the member's own url rather than read
+    from metadata: Stage A copies neither Event Registry's source_uri
+    nor its display name onto the row (confirmed: 0 of 325 rows carry
+    either), and the url is already stored. Deriving it costs nothing
+    and avoids adding a field to Stage A whose only consumer is this
+    query. Same "www." stripping every other domain derivation in this
+    service uses, so "cnbc.com" reads the same way here as in
+    also_reported_by.
+    """
+    if not event_uris:
+        return {}
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, title, url,
+                   metadata->>'event_uri' AS event_uri,
+                   regexp_replace(
+                       split_part(split_part(url, '://', 2), '/', 1),
+                       '^www[.]', ''
+                   ) AS outlet
+            FROM agent_classifications
+            WHERE source_type = 'geopolitical_signal'
+              AND metadata->>'event_uri' = ANY(%s)
+            """,
+            (event_uris,),
+        ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(row["event_uri"], []).append(dict(row))
+    return grouped
 
 
 def update_geopolitical_signal_stage_d_grade(
@@ -1294,6 +1584,115 @@ def update_geopolitical_signal_stage_d_grade(
             """,
             (json.dumps(grade_fields, ensure_ascii=False), row_id),
         )
+
+
+def get_geopolitical_signal_story_candidates() -> list[dict[str, Any]]:
+    """Every Stage-D-graded signal row - Stage E's entire input.
+
+    Unlike the earlier stages this reads the WHOLE set in one query
+    rather than only the rows not yet done, because grouping is a
+    property of the set: a row cannot be told which story it belongs
+    to without seeing the others. Stage E is therefore idempotent by
+    rewriting, not by skipping - it clears its own two keys first and
+    regroups from scratch, so a changed key or a later arrival never
+    leaves a half-grouped set behind.
+
+    Returns the fields the grouping reads: the entities Stage C
+    verified against the article text, the published time, and the
+    corroboration count that decides which member seeds a story.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, title, url, published, signal_reason,
+                   entities_json, metadata
+            FROM agent_classifications
+            WHERE source_type = 'geopolitical_signal'
+              AND signal_detection = 'signal'
+              -- jsonb_exists(), never the bare ? operator: psycopg2
+              -- scans the whole query for %s placeholders and reads
+              -- a literal ? as one, so the bare form fails with
+              -- 'type "s" does not exist'.
+              AND jsonb_exists(metadata, 'stage_d_graded_at')
+            ORDER BY published
+            """,
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["entities"] = json.loads(d.get("entities_json") or "[]")
+        except (ValueError, TypeError):
+            d["entities"] = []
+        out.append(d)
+    return out
+
+
+def clear_geopolitical_signal_story_fields() -> int:
+    """Remove Stage E's own two keys from every row of this domain.
+
+    Run before regrouping. Without it a row that moved out of a story
+    would keep a stale in_story pointer and stay hidden from the
+    one-row-per-story filter forever - the failure a reader could not
+    see, since the row simply never appears.
+    """
+    with get_db() as conn:
+        cur = conn.execute(
+            """
+            UPDATE agent_classifications
+            SET metadata = metadata - 'story_development' - 'in_story'
+            WHERE source_type = 'geopolitical_signal'
+              AND (jsonb_exists(metadata, 'story_development')
+                   OR jsonb_exists(metadata, 'in_story'))
+            """,
+        )
+    return cur.rowcount if cur.rowcount is not None else 0
+
+
+def apply_geopolitical_signal_story(
+    seed_row_id: int, *, development: dict[str, Any],
+    member_ids: list[int],
+) -> None:
+    """Write one story: the development onto its seed, a pointer onto
+    each member. ONE transaction - a half-applied story would either
+    hide members whose seed records nothing, or record members that are
+    still visible and therefore counted twice.
+
+    NOTHING IS DELETED, deliberately. Stage B collapses rows reporting
+    the same EVENT and deleting there is safe, because the dropped
+    article's headline survives on the row that kept it. A story's
+    members are different events - a Treasury designation, a mine
+    strike, a blockade - and each carries a verdict and a reason a
+    query may still want. metadata.in_story hides them from the
+    default view without destroying them:
+
+        signal_detection = 'signal' AND NOT (metadata ? 'in_story')
+
+    That also makes a wrong grouping reversible by clearing one key,
+    which matters while the grouping key is still being proven.
+    """
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE agent_classifications
+            SET metadata = metadata || jsonb_build_object(
+                    'story_development', %s::jsonb,
+                    'stage_e_grouped_at', to_jsonb(NOW()))
+            WHERE id = %s
+            """,
+            (json.dumps(development, ensure_ascii=False), seed_row_id),
+        )
+        if member_ids:
+            conn.execute(
+                """
+                UPDATE agent_classifications
+                SET metadata = metadata || jsonb_build_object(
+                        'in_story', %s::int,
+                        'stage_e_grouped_at', to_jsonb(NOW()))
+                WHERE id = ANY(%s)
+                """,
+                (seed_row_id, member_ids),
+            )
 
 
 def get_existing_filing_source_ids(source_ids: list[str]) -> set[str]:
@@ -1520,11 +1919,12 @@ def list_all_results(
     code: str | None = None,
     period: str | None = None,
     source_category: str | None = None,
-    grade: str | None = None,
     impacted_category: str | None = None,
     impacted_ticker: str | None = None,
     channel: str | None = None,
     corroborated: bool | None = None,
+    event_location: str | None = None,
+    coverage: str | None = None,
     published_from: str | None = None,
     published_to: str | None = None,
     macro_series: str | None = None,
@@ -1581,19 +1981,18 @@ def list_all_results(
     period_gregorian at all - crowding out the revenue rows a small limit
     would otherwise return).
 
-    grade matches metadata->>'grade' (TOP/STRONG/STANDARD) - only
-    geopolitical_signal rows Stage D has graded populate this field; a
-    digest wanting only TOP items (or only TOP+STRONG, via two calls)
-    filters here rather than client-side over a full page.
 
-    impacted_category matches against metadata->'impacted_categories', a
-    JSONB array - only geopolitical_signal rows Stage C has tagged
-    populate this field. Uses the `?` jsonb_exists operator's function
-    form (jsonb_exists(metadata->'impacted_categories', %s)), same reason
-    as elsewhere in this codebase the bare `?` operator is avoided: it is
-    ambiguous with psycopg2's %s paramstyle parser. One category per call
-    (not an array-overlap filter) - matches how a category picker/tab UI
+    impacted_category matches against the `category` column, a TEXT[] -
+    only geopolitical_signal rows Stage C has tagged populate it in this
+    domain. One category per call, as a single-element array overlap
+    (category && ARRAY[%s]), which matches how a category picker/tab UI
     would naturally query, one category at a time.
+
+    It reads a COLUMN rather than metadata->'impacted_categories' because
+    the list moved there - see update_geopolitical_signal_tags. The
+    jsonb_exists() function form this used to need is gone with it; the
+    bare `?` operator was never usable here, being ambiguous with
+    psycopg2's own %s paramstyle parser.
 
     impacted_ticker matches a ticker against entities_json - the
     companies the article itself names, each stored with its ticker (where
@@ -1617,10 +2016,25 @@ def list_all_results(
     conflict) - only geopolitical_signal rows Stage C has tagged populate
     this field.
 
-    corroborated matches metadata->>'corroborated' (a JSON boolean stored
-    as text by Stage D) - only geopolitical_signal rows Stage D has graded
-    populate this field. Compared as text ('true'/'false') since JSONB
-    booleans read back via ->> are strings, not Postgres booleans.
+    corroborated reads Stage D's metadata.corroboration.count - how many
+    OTHER outlets reported the same event, found by grouping on
+    event_uri. true means at least one, false means the story stands
+    alone (measured on one real pool: 30 of 81 signals had a sibling, 51
+    stood alone). It replaced a metadata.corroborated boolean that
+    matched also_reported_by against Stage A's domain allowlist; that
+    allowlist was removed from Stage A, the field went to 0 rows, and
+    the filter silently returned nothing rather than erroring.
+
+    event_location matches metadata->>'event_location' as a substring,
+    case-insensitively, so "Hormuz" finds "Strait of Hormuz" and "Ohio"
+    finds "Pike County, Ohio". Null on a legal instrument - a sanctions
+    designation happens in no place - so this filter necessarily
+    excludes most sanctions rows.
+
+    coverage matches metadata->>'coverage' ('outside_coverage' or
+    'unreadable'); the key is ABSENT on a row whose impacted_categories
+    are populated, so there is no 'mapped' value to filter on - absence
+    is that state.
 
     published_from/published_to filter by the article's own `published`
     timestamp (date-only, inclusive on both ends) - distinct from the
@@ -1699,11 +2113,8 @@ def list_all_results(
     if source_category:
         conditions.append("metadata->>'source_category' = %s")
         params.append(source_category)
-    if grade:
-        conditions.append("metadata->>'grade' = %s")
-        params.append(grade)
     if impacted_category:
-        conditions.append("jsonb_exists(metadata->'impacted_categories', %s)")
+        conditions.append("category && ARRAY[%s]::TEXT[]")
         params.append(impacted_category)
     if impacted_ticker:
         # Matches entities_json - the companies the article itself
@@ -1725,8 +2136,25 @@ def list_all_results(
         conditions.append("metadata->>'channel' = %s")
         params.append(channel)
     if corroborated is not None:
-        conditions.append("metadata->>'corroborated' = %s")
-        params.append("true" if corroborated else "false")
+        # Reads Stage D's corroboration.count - how many OTHER outlets
+        # reported the same event, found by grouping on event_uri.
+        #
+        # This used to test a metadata.corroborated boolean, which Stage
+        # D no longer writes: that boolean matched also_reported_by
+        # entries against Stage A's domain allowlist, and the allowlist
+        # was removed from Stage A entirely. The field went to 0 rows,
+        # so the filter accepted a value and silently returned nothing -
+        # worse than an error, because it reads as "no matching rows".
+        conditions.append(
+            "COALESCE((metadata->'corroboration'->>'count')::int, 0)"
+            + (" > 0" if corroborated else " = 0")
+        )
+    if event_location:
+        conditions.append("metadata->>'event_location' ILIKE %s")
+        params.append(f"%{event_location}%")
+    if coverage:
+        conditions.append("metadata->>'coverage' = %s")
+        params.append(coverage)
     if macro_series:
         conditions.append(
             """(
@@ -1941,11 +2369,12 @@ def list_results(
     ticker: str | None = None,
     period: str | None = None,
     source_category: str | None = None,
-    grade: str | None = None,
     impacted_category: str | None = None,
     impacted_ticker: str | None = None,
     channel: str | None = None,
     corroborated: bool | None = None,
+    event_location: str | None = None,
+    coverage: str | None = None,
     published_from: str | None = None,
     published_to: str | None = None,
     macro_series: str | None = None,
@@ -1959,8 +2388,9 @@ def list_results(
     details; only taiwan_market_signal mops_revenue rows populate it.
     source_category matches metadata->>'source_category' - see
     list_all_results for details.
-    grade matches metadata->>'grade' - see list_all_results for details.
-    impacted_category matches metadata->'impacted_categories' - see
+    corroborated, event_location and coverage behave exactly as in
+    list_all_results - see that function for what each reads and why.
+    impacted_category matches the `category` column (TEXT[]) - see
     list_all_results for details.
     impacted_ticker, channel, corroborated, published_from/published_to -
     see list_all_results for details.
@@ -1982,11 +2412,8 @@ def list_results(
     if source_category:
         extra_conditions += " AND metadata->>'source_category' = %s"
         params.append(source_category)
-    if grade:
-        extra_conditions += " AND metadata->>'grade' = %s"
-        params.append(grade)
     if impacted_category:
-        extra_conditions += " AND jsonb_exists(metadata->'impacted_categories', %s)"
+        extra_conditions += " AND category && ARRAY[%s]::TEXT[]"
         params.append(impacted_category)
     if impacted_ticker:
         # Same entities_json match as the sibling query above. This site
@@ -2004,8 +2431,18 @@ def list_results(
         extra_conditions += " AND metadata->>'channel' = %s"
         params.append(channel)
     if corroborated is not None:
-        extra_conditions += " AND metadata->>'corroborated' = %s"
-        params.append("true" if corroborated else "false")
+        # Same Stage D corroboration.count read as list_all_results -
+        # see that function for why the old boolean is gone.
+        extra_conditions += (
+            " AND COALESCE((metadata->'corroboration'->>'count')::int, 0)"
+            + (" > 0" if corroborated else " = 0")
+        )
+    if event_location:
+        extra_conditions += " AND metadata->>'event_location' ILIKE %s"
+        params.append(f"%{event_location}%")
+    if coverage:
+        extra_conditions += " AND metadata->>'coverage' = %s"
+        params.append(coverage)
     if macro_series:
         extra_conditions += """ AND (
             jsonb_exists(metadata->'member_series', %s)

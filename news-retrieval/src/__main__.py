@@ -189,6 +189,56 @@ def backfill_japan_seaj() -> None:
     )
 
 
+@cli.command("backfill-taiwan-revenue")
+@click.option("--from-month", default="2019-01", show_default=True,
+              help="First month to read, YYYY-MM. Ignored if --months-back is given.")
+@click.option("--to-month", default=None,
+              help="Last month to read, YYYY-MM. Defaults to last calendar month (UTC).")
+@click.option("--months-back", default=None, type=int,
+              help="Read only the last N months up to --to-month - the scheduled "
+              "monthly re-read uses this to recover missed filings and restatements.")
+def backfill_taiwan_revenue(from_month: str, to_month: str | None, months_back: int | None) -> None:
+    """Read Taiwan monthly revenue from MOPS's per-month CSVs into
+    company_financials (taiwan_financials.py).
+
+    One command for both jobs: the one-time history backfill (default
+    2019-01 onward, ~186 requests, ~5 minutes) and the monthly re-read of
+    recent months. Safe to re-run - rows UPSERT on (company, month), so a
+    re-read replaces rather than duplicates. Exits non-zero if any
+    exchange-month could not be fetched, so a gap is never silent.
+    """
+    from datetime import datetime, timezone
+
+    from models.company_financials import upsert_financials
+    from seed import TAIWAN_TICKER_UNIVERSE
+    from taiwan_financials import DOMAIN, fetch_range
+
+    init_db()
+
+    def _ym(value: str) -> tuple[int, int]:
+        year, month = (int(x) for x in value.split("-"))
+        return year, month
+
+    if to_month:
+        end = _ym(to_month)
+    else:
+        now = datetime.now(timezone.utc)
+        end = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
+    if months_back:
+        idx = end[0] * 12 + end[1] - 1 - (months_back - 1)
+        start = (idx // 12, idx % 12 + 1)
+    else:
+        start = _ym(from_month)
+
+    logger.info("[TW_FIN] reading MOPS revenue %d-%02d .. %d-%02d", *start, *end)
+    rows, failed = fetch_range(start, end, TAIWAN_TICKER_UNIVERSE)
+    written = upsert_financials(DOMAIN, rows)
+    logger.info("[TW_FIN] stored %d monthly revenue row(s)", written)
+    if failed:
+        logger.error("[TW_FIN] could not fetch: %s", ", ".join(failed))
+        sys.exit(1)
+
+
 @cli.command("fetch-macro-signals")
 @click.option(
     "--incremental",

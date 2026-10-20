@@ -82,6 +82,9 @@ GEOPOLITICAL_SIGNAL_STAGE_C_DAILY_CAP: int = int(
 # - both are single blocking HTTP calls per item, same shape as the other
 # CLASSIFY_CONCURRENCY knobs.
 TAIWAN_CLASSIFY_CONCURRENCY: int = int(os.environ.get("TAIWAN_CLASSIFY_CONCURRENCY", "5"))
+# Taiwan material announcements: rating + English summary, one SEC_FILING_MODEL
+# call per filing that is not fixed NOISE (pipeline/taiwan_announcement_classifier.py).
+TAIWAN_ANNOUNCEMENT_PROMPT: Path = PROMPTS_DIR / "taiwan_announcement_classifier_v1.txt"
 
 # research-universe: Stage C's category->ticker map (Layer 3) is generated
 # by a separate periodic refresh job that calls GET /companies, not fetched

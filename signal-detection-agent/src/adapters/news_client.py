@@ -75,6 +75,26 @@ async def fetch_china_revenue_history(
     return rows
 
 
+async def fetch_taiwan_revenue_history() -> list[dict[str, Any]] | None:
+    """Every stored Taiwan monthly revenue row (company, month, revenue,
+    prior-year revenue as printed), from news-retrieval's company_financials.
+
+    Returns None on failure - distinct from [] - because a revenue filing
+    classified without history would be stored permanently as
+    not_scored_short_history; the caller skips revenue for that run instead
+    and the next run retries.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(
+                f"{config.NEWS_RETRIEVAL_URL}/market/taiwan/revenue-history")
+            resp.raise_for_status()
+            return resp.json().get("rows") or []
+    except Exception:
+        logger.exception("Failed to fetch Taiwan revenue history")
+        return None
+
+
 async def trigger_run(domain: str, days_back: int = 7) -> int:
     """POST /run to news-retrieval; return run_id.
 

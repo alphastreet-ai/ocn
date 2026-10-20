@@ -135,7 +135,12 @@ def _render_html(
         '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">'
     )
     for i, article in enumerate(top_articles):
-        cat = article.get("category", "")
+        # A list since `category` became TEXT[]; a row can carry several.
+        # Joined for the label rather than showing only the first, which
+        # would silently drop the others. A bare string still renders,
+        # for rows written before the column changed type.
+        raw_cat = article.get("category") or ""
+        cat = raw_cat if isinstance(raw_cat, str) else ", ".join(raw_cat)
         cat_label = _html_escape(cat)
         border = "border-bottom:0.5px solid #E8E8E3" if i < len(top_articles) - 1 else ""
         parts.append(f'<tr style="{border}">')

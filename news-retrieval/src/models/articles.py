@@ -249,20 +249,33 @@ def iter_recent_articles_for_domain(
         last_id = rows[-1]["id"]
 
 
-def append_also_reported_by(article_id: int, domain: str) -> None:
-    """Record that another outlet (``domain``) also covered the story
-    already stored as ``article_id``, without inserting a duplicate row.
+def append_also_reported_by(article_id: int, entry: dict) -> None:
+    """Record that another outlet also covered the story already stored
+    as ``article_id``, without inserting a duplicate row.
 
-    Used when a new GDELT article's title matches an already-stored
-    article from an earlier poll run (cross-run duplicate) - the new
-    article carries the "same story, different outlet" signal that would
-    otherwise be lost by simply dropping it. Same-batch duplicates (two new
-    articles in one poll run) don't need this - the surviving article
-    hasn't been inserted yet, so its ``also_reported_by`` list is merged
-    in-memory before the first insert instead.
+    ``entry`` is {outlet, title, url} for the article being discarded as
+    a near-duplicate. It used to be a bare domain string, which told a
+    reader somebody else had the story but never what they called it -
+    and the headline is the part worth having, since outlets covering
+    one event describe it differently.
 
-    Idempotent: the ``NOT (... @> ...)`` guard means re-adding a domain
-    already present in the list is a no-op, not a duplicate entry.
+    Used when a new article's title matches an already-stored article
+    from an earlier run (cross-run duplicate); the discarded article
+    carries the "same story, different outlet" signal that would be lost
+    by dropping it. Same-batch duplicates don't need this - the
+    surviving article hasn't been inserted yet, so its list is merged
+    in-memory before the first insert.
+
+    Two guards, both enforced in SQL so a concurrent writer cannot slip
+    past them:
+
+      - NOT a duplicate url. Idempotent: re-recording the same discarded
+        article is a no-op.
+      - NOT the stored row's OWN outlet. Two Federal Register notices
+        filed the same day matched on title and each recorded the other,
+        leaving rows reading ["federalregister.gov"] - the publisher
+        corroborating itself. A publisher is not independent
+        confirmation of its own document.
     """
     with get_db() as conn:
         conn.execute(
@@ -272,15 +285,32 @@ def append_also_reported_by(article_id: int, domain: str) -> None:
                 COALESCE(metadata, '{}'::jsonb),
                 '{also_reported_by}',
                 COALESCE(metadata->'also_reported_by', '[]'::jsonb)
-                    || to_jsonb(:domain::text)
+                    || jsonb_build_array(:entry::jsonb)
             )
             WHERE id = :article_id
-              AND NOT COALESCE(
-                  metadata->'also_reported_by' @> to_jsonb(:domain::text),
-                  FALSE
+              AND NOT EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(
+                      COALESCE(metadata->'also_reported_by', '[]'::jsonb)
+                  ) e
+                  WHERE e->>'url' = :url OR e = to_jsonb(:outlet::text)
               )
+              -- metadata.article_url first: a row stored under its own
+              -- url scheme (er-me://{uri}) keeps the publisher's link
+              -- there, and its `url` host would never equal an outlet.
+              AND COALESCE(
+                  regexp_replace(
+                      split_part(split_part(
+                          COALESCE(metadata->>'article_url', url), '://', 2), '/', 1),
+                      '^www[.]', ''
+                  ), ''
+              ) <> :outlet
             """,
-            {"article_id": article_id, "domain": domain},
+            {
+                "article_id": article_id,
+                "entry": json.dumps(entry, ensure_ascii=False),
+                "url": entry.get("url") or "",
+                "outlet": entry.get("outlet") or "",
+            },
         )
 
 

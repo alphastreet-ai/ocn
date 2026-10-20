@@ -542,7 +542,14 @@ def test_title_dedup_drops_cross_run_near_duplicate() -> None:
         )
 
     assert result == []
-    mock_append.assert_called_once_with(42, "example-outlet-b.com")
+    # {outlet, title, url}, not a bare domain: the headline is the part
+    # worth keeping, since outlets covering one event describe it
+    # differently. See append_also_reported_by's docstring.
+    mock_append.assert_called_once_with(42, {
+        "outlet": "example-outlet-b.com",
+        "title": "OpenAI unveils its next-generation GPT-5 model",
+        "url": "https://www.example-outlet-b.com/new-story",
+    })
 
 
 def test_title_dedup_hard_match_found_in_later_chunk() -> None:
@@ -584,7 +591,11 @@ def test_title_dedup_hard_match_found_in_later_chunk() -> None:
         )
 
     assert result == []
-    mock_append.assert_called_once_with(42, "example-outlet-b.com")
+    mock_append.assert_called_once_with(42, {
+        "outlet": "example-outlet-b.com",
+        "title": "OpenAI Releases GPT-5",
+        "url": "https://www.example-outlet-b.com/new-story",
+    })
 
 
 def test_title_dedup_later_chunk_hard_match_clears_earlier_borderline() -> None:
@@ -632,7 +643,11 @@ def test_title_dedup_later_chunk_hard_match_clears_earlier_borderline() -> None:
         )
 
     assert result == []
-    mock_append.assert_called_once_with(42, "example-outlet-b.com")
+    mock_append.assert_called_once_with(42, {
+        "outlet": "example-outlet-b.com",
+        "title": "Iran president gives a wartime speech",
+        "url": "https://www.example-outlet-b.com/new-story",
+    })
     mock_same_event.assert_not_called()
 
 
@@ -663,8 +678,10 @@ def test_title_dedup_keeps_distinct_titles() -> None:
 def test_title_dedup_same_batch_duplicate_merged_in_memory() -> None:
     """Two near-duplicate articles surfacing in the same run are merged
     without a DB round-trip - only the first is kept, and the second
-    outlet's DOMAIN (from its own url) is recorded in its in-memory
-    also_reported_by list."""
+    article is recorded as {outlet, title, url} in its in-memory
+    also_reported_by list. Same shape as the cross-run path writes via
+    append_also_reported_by, so a consumer never has to handle two
+    forms depending on which run the duplicate arrived in."""
     first = _article(
         "OpenAI Releases GPT-5", "http://example-outlet-a.com/a", source="Outlet A",
     )
@@ -689,7 +706,11 @@ def test_title_dedup_same_batch_duplicate_merged_in_memory() -> None:
 
     assert len(result) == 1
     assert result[0]["url"] == "http://example-outlet-a.com/a"
-    assert result[0]["metadata"]["also_reported_by"] == ["example-outlet-b.com"]
+    assert result[0]["metadata"]["also_reported_by"] == [{
+        "outlet": "example-outlet-b.com",
+        "title": "OpenAI unveils GPT-5",
+        "url": "http://example-outlet-b.com/b",
+    }]
     mock_append.assert_not_called()
 
 

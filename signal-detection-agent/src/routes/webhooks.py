@@ -39,6 +39,7 @@ def _run_geopolitical_signal_pipeline_in_background() -> None:
         run_geopolitical_signal_stage_b,
         run_geopolitical_signal_stage_c,
         run_geopolitical_signal_stage_d,
+        run_geopolitical_signal_stage_e,
     )
     from models.jobs import create_job
 
@@ -61,6 +62,18 @@ def _run_geopolitical_signal_pipeline_in_background() -> None:
         stage_d_job_id = create_job(domain=config.GEOPOLITICAL_SIGNAL_DOMAIN)
         await run_geopolitical_signal_stage_d(stage_d_job_id)
 
+        # Stage E last, and never skipped: every API read of this domain
+        # is expected to be post-Stage-E, because the default signals
+        # view filters on NOT (metadata ? 'in_story'). If E never runs,
+        # that filter matches every row and the reader sees one story
+        # repeated under several headlines - the exact thing E exists to
+        # prevent. Unlike A-D it is not scoped to the rows the previous
+        # stage just wrote: grouping is a property of the whole signal
+        # set, so it re-reads every Stage-D-graded signal and regroups
+        # from scratch, clearing its own two keys first.
+        stage_e_job_id = create_job(domain=config.GEOPOLITICAL_SIGNAL_DOMAIN)
+        await run_geopolitical_signal_stage_e(stage_e_job_id)
+
         logger.info("[WEBHOOK] geopolitical_signal pipeline finished (triggered by webhook)")
 
     asyncio.run(_run())
@@ -73,8 +86,9 @@ async def news_retrieval_run_completed(
     caller: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Receive news-retrieval's run-completion callback and immediately
-    start the geopolitical_signal pipeline, instead of waiting for the
-    fixed-offset daily CloudWatch schedule to eventually pick it up.
+    start the geopolitical_signal pipeline (Stage A -> B -> C -> D -> E),
+    instead of waiting for the fixed-offset daily CloudWatch schedule to
+    eventually pick it up.
 
     Only acts on domain=geopolitical_news + status=completed - a failed
     run has nothing new to classify, and this endpoint has no reason to

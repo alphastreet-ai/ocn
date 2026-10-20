@@ -23,9 +23,10 @@ _AV_MIN_INTERVAL = 1.0  # 1 call/sec → 60/min, safely under 75/min premium lim
 _INDEX_TICKERS = ["SPY", "QQQ", "SOXX"]
 
 # quotes mode: 1 call/ticker + 3 indices + 1 market_status
-# At 1 call/sec, 600 tickers = ~604 sec (~10 min) — fits the 15-min schedule window
-# with headroom for slow AV responses. Increase if poll interval is widened.
-_MAX_QUOTES_TICKERS = 600
+# At 1 call/sec, 1000 tickers = ~1004 sec (~17 min) — fits the hourly schedule and
+# stays under the 20-min lock TTL. Tickers past the cap are dropped from the end
+# of the company-name order; increase if the universe grows past it.
+_MAX_QUOTES_TICKERS = 1000
 
 _AWS_REGION = os.environ.get("AWS_REGION", "eu-north-1")
 
@@ -528,7 +529,7 @@ def run_quotes(tickers: list[str], av_key: str) -> None:
     try:
         if len(tickers) > _MAX_QUOTES_TICKERS:
             logger.warning(
-                "[POLLER] ticker list truncated %d → %d to stay within 15-min window",
+                "[POLLER] ticker list truncated %d → %d to stay within the lock TTL",
                 len(tickers), _MAX_QUOTES_TICKERS,
             )
             tickers = tickers[:_MAX_QUOTES_TICKERS]
@@ -555,9 +556,9 @@ def run_quotes(tickers: list[str], av_key: str) -> None:
 
         elapsed = time.perf_counter() - t0
         logger.info("[POLLER] quotes complete elapsed=%.1fs", elapsed)
-        if elapsed > 840:
+        if elapsed > _LOCK_TTL_SECONDS - 120:
             logger.warning(
-                "[POLLER] quotes took %.1fs — approaching 15-min schedule window. "
+                "[POLLER] quotes took %.1fs — approaching the 20-min lock TTL. "
                 "Consider reducing ticker count or increasing poll interval.",
                 elapsed,
             )
