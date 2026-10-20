@@ -106,12 +106,33 @@ industries named. Return ONLY a JSON object with exactly these keys:
          goods, chips, minerals or metals moving between countries, or
          their supply chains -> "trade";
          armed groups, attacks, sabotage, security -> "conflict".
+       This includes company, stock, market, product, deal, listing,
+       conference and financing news IN these areas: a chip stock
+       falling, a chip index sliding, a chipmaker buying a startup, a
+       network chip launched, a minerals firm listing -> "trade"; a
+       firm building data-centre power, an LNG firm raising money, a
+       uranium fuel test -> "energy".
        "subsidies", "regulation", "sanctions" and "diplomacy" are
        instruments only a government uses - never give them when no
        government body acted.
+       WHICH RULE WINS: if ANY government measure is at stake in the
+       article - taken, pending, proposed, on a ballot, or argued over
+       by ANYONE (lawmakers, unions, residents, a columnist weighing a
+       possible moratorium or a city's choice), or a decision a
+       government body made (a council or
+       board vote, a lease or permit approval, a regulator reviewing
+       an incident) - the article takes that measure's instrument,
+       even when the headline is about a company, residents, an
+       activist or an opinion: a ballot measure to ban data centres,
+       a debate over a proposed moratorium, an op-ed on a city's
+       data-centre deal, a port board's lease approval -> "regulation".
+       The area rule above applies ONLY when no government measure of
+       any kind is involved - residents objecting to a planned site,
+       a company's plans or results, a market report -> its area.
      null ONLY when the subject falls in none of these areas - health
      and biotech, law and courts on non-economic matters, sports,
-     hotels and property, consumer software, advertising, history.
+     golf, hotels and property, consumer software, advertising,
+     history, lifestyle.
   3. WHICH INSTRUMENT. Match it to the eight above. Where two fit, the
      more specific wins, in this order:
        sanctions > trade > shipping > energy > conflict > subsidies >
@@ -158,6 +179,12 @@ industries named. Return ONLY a JSON object with exactly these keys:
     "Missile strike hits a power plant in Ukraine"  -> conflict
     "Province offers 30% subsidy for battery plants" -> subsidies
     "Development bank lends $500m to a lithium mine" -> subsidies
+    "New mining law gives better terms to partners who build
+     processing plants locally"                 -> subsidies (it rewards
+       building; a law that only limits would be "regulation")
+    "Union leader argues against a proposed national data centre
+     moratorium"                                -> regulation (a measure
+       argued over)
     "City council pauses new data centre permits"    -> regulation
     "Senator introduces bill to cap data centre water use" -> regulation
     "Competition authority opens probe into a chipmaker" -> regulation
