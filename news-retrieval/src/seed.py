@@ -136,6 +136,20 @@ DOMAINS: list[dict[str, Any]] = [
             " - see news-retrieval/CLAUDE.md."
         ),
     },
+    {
+        "name": "Middle East Market Signal",
+        "slug": "middle_east_market_signal",
+        "description": (
+            "Gulf AI buying and investment, US decisions on Gulf chip"
+            " sales, and the war, shipping, helium and energy disruptions"
+            " that reach US AI and chip stocks - fetched from the UAE and"
+            " Saudi state news agencies' own APIs, BIS press releases (with"
+            " DOJ case text), the Federal Register, Gulf funds' SEC 13D/13G"
+            " filings, Middle East AI News, and newsapi.ai. Every source is"
+            " an API or structured JSON, and every article carries a body -"
+            " see news-retrieval/CLAUDE.md."
+        ),
+    },
 ]
 
 # P0 core universe (spec Section 14.1), hardcoded pending research-universe
@@ -146,27 +160,120 @@ DOMAINS: list[dict[str, Any]] = [
 # native_name is the Chinese company name used for GDELT queries (native-
 # language press generally refers to companies by this name, not the English
 # one) — sourced from spec Section 14.1.
-TAIWAN_TICKER_UNIVERSE: list[dict[str, str]] = [
-    {"ticker": "2330", "company": "TSMC", "native_name": "台積電", "exchange": "TWSE"},
-    {"ticker": "2317", "company": "Hon Hai / Foxconn", "native_name": "鴻海", "exchange": "TWSE"},
-    {"ticker": "2382", "company": "Quanta", "native_name": "廣達", "exchange": "TWSE"},
-    {"ticker": "3231", "company": "Wistron", "native_name": "緯創", "exchange": "TWSE"},
-    {"ticker": "6669", "company": "Wiwynn", "native_name": "緯穎", "exchange": "TWSE"},
-    {"ticker": "2356", "company": "Inventec", "native_name": "英業達", "exchange": "TWSE"},
-    {"ticker": "3017", "company": "Asia Vital Components", "native_name": "奇鋐", "exchange": "TWSE"},
-    {"ticker": "3324", "company": "Auras Technology", "native_name": "雙鴻", "exchange": "TPEx"},
-    {"ticker": "2308", "company": "Delta Electronics", "native_name": "台達電", "exchange": "TWSE"},
-    {"ticker": "3665", "company": "BizLink", "native_name": "貿聯-KY", "exchange": "TWSE"},
-    {"ticker": "3533", "company": "Lotes", "native_name": "嘉澤", "exchange": "TWSE"},
-    {"ticker": "2059", "company": "King Slide", "native_name": "川湖", "exchange": "TWSE"},
-    {"ticker": "8210", "company": "Chenbro", "native_name": "勤誠", "exchange": "TWSE"},
-    {"ticker": "2368", "company": "Gold Circuit Electronics", "native_name": "金像電", "exchange": "TWSE"},
-    {"ticker": "2383", "company": "Elite Material", "native_name": "台光電", "exchange": "TWSE"},
-    {"ticker": "3037", "company": "Unimicron", "native_name": "欣興", "exchange": "TWSE"},
-    {"ticker": "3711", "company": "ASE Technology", "native_name": "日月光投控", "exchange": "TWSE"},
-    {"ticker": "2449", "company": "King Yuan Electronics", "native_name": "京元電子", "exchange": "TWSE"},
-    {"ticker": "3661", "company": "Alchip", "native_name": "世芯-KY", "exchange": "TWSE"},
-    {"ticker": "5274", "company": "Aspeed Technology", "native_name": "信驊", "exchange": "TPEx"},
+# customers: verified customers only, as {name, relationship} - copied onto every
+# Taiwan article's metadata.customers (pipeline._taiwan_customers, read from
+# here at fetch time, never from the seeded sources.config, so an edit takes
+# effect without a DB update). A customer is listed ONLY when a primary source
+# names it: the company's own disclosure (annual report 年報, MOPS filing,
+# press release), the customer's own disclosure (its SEC 10-K, Apple's
+# official supplier list), or an official MOPS announcement naming the
+# counterparty. Researched 2026-10-19. Not listed: analyst and press claims
+# however often repeated (Meta/AWS/Google for the server makers), partners and
+# investors (Amazon's 2026 placement in Gold Circuit, Sony-TSMC, Chenbro-NVIDIA
+# MGX), and customers a company reports only as codes (客戶A, 甲客戶) - no name
+# is guessed. [] means checked and none verified. Apple entries come from
+# Apple's fiscal-2023 list (published 2024-04), the latest Apple has issued.
+TAIWAN_TICKER_UNIVERSE: list[dict[str, Any]] = [
+    {"ticker": "2330", "company": "TSMC", "native_name": "台積電", "exchange": "TWSE", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
+        {"name": "NVIDIA", "relationship": "Customer: buys its semiconductor wafers from the company as its foundry"},
+        {"name": "AMD", "relationship": "Customer: buys wafers for its HPC, FPGA and adaptive SoC products"},
+        {"name": "Broadcom", "relationship": "Customer: outsources part of its front-end wafer manufacturing to the company"},
+        {"name": "Qualcomm", "relationship": "Customer: uses the company as a primary foundry for its integrated circuits"},
+        {"name": "Intel", "relationship": "Customer: buys key tiles for its products from the company as a foundry"},
+        {"name": "Analog Devices", "relationship": "Customer: sources part of its wafers from the company"},
+        {"name": "Lattice Semiconductor", "relationship": "Customer: has its 16nm FPGA products developed and manufactured by the company"},
+        {"name": "Astera Labs", "relationship": "Customer: has all of its ICs fabricated by the company"},
+        {"name": "Credo", "relationship": "Customer: bought all of its wafers from the company in fiscal 2026"},
+        {"name": "Silicon Labs", "relationship": "Customer: buys most of its wafers from the company as a primary foundry"},
+        {"name": "Cirrus Logic", "relationship": "Customer: has most of its wafers manufactured by the company"},
+        {"name": "SiTime", "relationship": "Customer: uses the company as a primary foundry for its analog circuits"},
+        {"name": "Allegro MicroSystems", "relationship": "Customer: uses the company as one of its primary fabs"},
+        {"name": "Navitas Semiconductor", "relationship": "Customer: buys its GaN wafers from the company, which it reports has announced it will stop GaN production"},
+        {"name": "Impinj", "relationship": "Customer: buys its endpoint IC wafers from the company (supplier since 2003)"},
+        {"name": "MaxLinear", "relationship": "Customer: uses the company as a key foundry"},
+        {"name": "indie Semiconductor", "relationship": "Customer: uses the company as a primary foundry"},
+        {"name": "Ambiq Micro", "relationship": "Customer: buys wafers for its SoC products (180nm to 12nm)"},
+    ]},
+    {"ticker": "2317", "company": "Hon Hai / Foxconn", "native_name": "鴻海", "exchange": "TWSE", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
+        {"name": "NVIDIA", "relationship": "Customer: uses the company as a contract manufacturer to assemble, test and package its final products"},
+        {"name": "Arista Networks", "relationship": "Customer: uses the company as a primary contract manufacturer"},
+        {"name": "NETGEAR", "relationship": "Customer: uses the company as a primary manufacturer of its products"},
+    ]},
+    {"ticker": "2382", "company": "Quanta", "native_name": "廣達", "exchange": "TWSE", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
+        {"name": "Extreme Networks", "relationship": "Customer: uses the company to manufacture its products"},
+    ]},
+    {"ticker": "3231", "company": "Wistron", "native_name": "緯創", "exchange": "TWSE", "customers": [
+        {"name": "NVIDIA", "relationship": "Customer: uses the company as a contract manufacturer to assemble, test and package its final products"},
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
+    ]},
+    {"ticker": "6669", "company": "Wiwynn", "native_name": "緯穎", "exchange": "TWSE", "customers": [
+        {"name": "Microsoft", "relationship": "Customer: buys cloud server components and system integration from the company (Microsoft supplier award release, 2019-05)"},
+    ]},
+    {"ticker": "2356", "company": "Inventec", "native_name": "英業達", "exchange": "TWSE", "customers": [
+        {"name": "HP", "relationship": "Customer: buys HP-brand notebooks built by the company (sales contract since 1998)"},
+        {"name": "Hewlett Packard Enterprise", "relationship": "Customer: buys HP-brand servers built by the company (sales contract since 2000)"},
+        {"name": "Inseego", "relationship": "Customer: uses the company's subsidiary Inventec Appliances as a primary contract manufacturer"},
+        {"name": "Damon", "relationship": "Customer: buys components for its electric motorcycles"},
+    ]},
+    {"ticker": "3017", "company": "Asia Vital Components", "native_name": "奇鋐", "exchange": "TWSE", "customers": []},
+    {"ticker": "3324", "company": "Auras Technology", "native_name": "雙鴻", "exchange": "TPEx", "customers": []},
+    {"ticker": "2308", "company": "Delta Electronics", "native_name": "台達電", "exchange": "TWSE", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
+        {"name": "EVgo", "relationship": "Customer: buys EV chargers under a supply agreement"},
+        {"name": "NETGEAR", "relationship": "Customer: uses the company as a primary manufacturer of its products"},
+        {"name": "Hushan Industrial Co., Ltd. (虎山實業股份有限公司)", "relationship": "Customer: contracted the company to install 989.48 kWp of solar at its Ruifang plant"},
+    ]},
+    {"ticker": "3665", "company": "BizLink", "native_name": "貿聯-KY", "exchange": "TWSE", "customers": [
+        {"name": "Credo", "relationship": "Customer: has its active electrical cables (AEC) manufactured by the company"},
+        {"name": "Siemens Healthineers", "relationship": "Customer: buys wiring harnesses, assemblies and cables (for over 30 years)"},
+        {"name": "Lam Research", "relationship": "Customer: gave the company its 2026 Supplier Excellence Award"},
+    ]},
+    {"ticker": "3533", "company": "Lotes", "native_name": "嘉澤", "exchange": "TWSE", "customers": []},
+    {"ticker": "2059", "company": "King Slide", "native_name": "川湖", "exchange": "TWSE", "customers": []},
+    {"ticker": "8210", "company": "Chenbro", "native_name": "勤誠", "exchange": "TWSE", "customers": []},
+    {"ticker": "2368", "company": "Gold Circuit Electronics", "native_name": "金像電", "exchange": "TWSE", "customers": []},
+    {"ticker": "2383", "company": "Elite Material", "native_name": "台光電", "exchange": "TWSE", "customers": [
+        {"name": "Insulectro", "relationship": "Customer (distributor): buys and resells the company's copper clad laminates"},
+    ]},
+    {"ticker": "3037", "company": "Unimicron", "native_name": "欣興", "exchange": "TWSE", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
+    ]},
+    {"ticker": "3711", "company": "ASE Technology", "native_name": "日月光投控", "exchange": "TWSE", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
+        {"name": "AMD", "relationship": "Customer: buys assembly, test, mark and packaging from the company's subsidiary SPIL"},
+        {"name": "Qualcomm", "relationship": "Customer: uses the company as a primary assembly and test supplier"},
+        {"name": "Broadcom", "relationship": "Customer: outsources assembly and test to the company"},
+        {"name": "Cirrus Logic", "relationship": "Customer: uses the company as a primary assembly and test house"},
+        {"name": "Lattice Semiconductor", "relationship": "Customer: uses the company as its primary assembly and test supplier"},
+        {"name": "Astera Labs", "relationship": "Customer: has its ICs assembled, packaged and tested by the company"},
+        {"name": "Credo", "relationship": "Customer: has its ICs packaged by the company"},
+        {"name": "SiTime", "relationship": "Customer: buys packaging, assembly and testing from the company"},
+        {"name": "Ambarella", "relationship": "Customer: has chips it buys as tested die assembled by the company"},
+        {"name": "MaxLinear", "relationship": "Customer: buys assembly, packaging and test from the company"},
+        {"name": "Silicon Motion", "relationship": "Customer: uses the company as a primary assembly and test subcontractor"},
+        {"name": "Sequans", "relationship": "Customer: buys chipset assembly and testing from the company"},
+        {"name": "Himax", "relationship": "Customer: buys assembly and testing from the company"},
+        {"name": "Valens Semiconductor", "relationship": "Customer: buys assembly and test from the company"},
+        {"name": "GCT Semiconductor", "relationship": "Customer: buys assembly and testing from the company"},
+        {"name": "GSI Technology", "relationship": "Customer: has most of its wafers packaged by the company"},
+        {"name": "Ambiq Micro", "relationship": "Customer: buys packaging and testing from the company"},
+        {"name": "Techpoint", "relationship": "Customer: buys packaging and testing from the company"},
+    ]},
+    {"ticker": "2449", "company": "King Yuan Electronics", "native_name": "京元電子", "exchange": "TWSE", "customers": [
+        {"name": "NVIDIA", "relationship": "Customer: prepaid for US test capacity the company reserves for it (MOPS filing 2026-10-13)"},
+        {"name": "AMD", "relationship": "Customer: buys assembly, test, mark and packaging from the company"},
+        {"name": "Credo", "relationship": "Customer: has its ICs tested by the company"},
+        {"name": "Lattice Semiconductor", "relationship": "Customer: uses the company as a second source for wafer sort testing"},
+        {"name": "Ambarella", "relationship": "Customer: has final testing of its products done by the company"},
+        {"name": "Himax", "relationship": "Customer: buys assembly and testing from the company"},
+        {"name": "Silicon Motion", "relationship": "Customer: uses the company as a primary assembly and test subcontractor"},
+        {"name": "Ambiq Micro", "relationship": "Customer: buys packaging and testing from the company"},
+    ]},
+    {"ticker": "3661", "company": "Alchip", "native_name": "世芯-KY", "exchange": "TWSE", "customers": []},
+    {"ticker": "5274", "company": "Aspeed Technology", "native_name": "信驊", "exchange": "TPEx", "customers": []},
 ]
 
 
@@ -3171,6 +3278,382 @@ CHINA_PRESS_ENGLISH_CHECK_SOURCE: dict[str, Any] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Middle East market signal
+# ---------------------------------------------------------------------------
+# The spec's 24 tracked companies and funds (section 4), hardcoded like
+# China rather than read from research-universe: most are unlisted (G42,
+# Humain, MGX, QatarEnergy) or listed only on Gulf exchanges, and
+# research-universe's US-ticker filter is what the poller keys on. The US
+# names these move are tracked by ticker through /market/* instead.
+#
+# `listing` is None for unlisted entities - everything about them is
+# "indirect" (government announcements, partners' filings, press).
+# `aliases` carries the other written forms press actually uses; a name
+# that is also a common word ("Elm", "Nova") is only ever matched in its
+# longer form, or every tree and every supernova would match.
+#
+# `us_rise_on_good_news` / `us_fall_on_good_news`: the spec's "good news
+# here means" column - which US tickers move which way when this company
+# has good news. Carried for the classifier; nothing here reads it.
+MIDDLE_EAST_UNIVERSE: list[dict[str, Any]] = [
+    # --- Gulf AI companies and data-centre builders (spec 4.1) ------------
+    {"company": "G42", "country": "UAE", "listing": None,
+     "aliases": ["Core42", "Khazna", "Stargate UAE"],
+     "us_rise_on_good_news": ["NVDA", "AMD", "CSCO", "ORCL", "MSFT", "CBRS"]},
+    {"company": "Humain", "country": "Saudi Arabia", "listing": None,
+     "aliases": [], "us_rise_on_good_news": ["NVDA", "AMD", "QCOM", "AMZN", "CSCO"]},
+    {"company": "Presight AI", "country": "UAE", "listing": "ADX:PRESIGHT",
+     "aliases": ["Presight"], "us_rise_on_good_news": ["PLTR"]},
+    {"company": "Space42", "country": "UAE", "listing": "ADX:SPACE42",
+     "aliases": [], "us_rise_on_good_news": []},
+    {"company": "e&", "country": "UAE", "listing": "ADX:EAND",
+     "aliases": ["Etisalat", "Emirates Telecommunications"],
+     "us_rise_on_good_news": ["CSCO", "ORCL", "MSFT"]},
+    {"company": "stc", "country": "Saudi Arabia", "listing": "Tadawul:7010",
+     "aliases": ["Saudi Telecom", "center3"],
+     "us_rise_on_good_news": ["NVDA", "CSCO", "ORCL", "MSFT"]},
+    {"company": "Elm Company", "country": "Saudi Arabia", "listing": "Tadawul:7203",
+     "aliases": [], "us_rise_on_good_news": []},
+    {"company": "Ooredoo", "country": "Qatar", "listing": "QSE:ORDS",
+     "aliases": [], "us_rise_on_good_news": ["NVDA"]},
+    # --- Gulf government investment funds (spec 4.2) ----------------------
+    {"company": "MGX", "country": "UAE", "listing": None,
+     "aliases": [], "us_rise_on_good_news": ["NVDA", "MSFT"]},
+    {"company": "Mubadala", "country": "UAE", "listing": None,
+     "aliases": [], "us_rise_on_good_news": ["GFS"]},
+    {"company": "Abu Dhabi Investment Authority", "country": "UAE", "listing": None,
+     "aliases": ["ADIA"], "us_rise_on_good_news": []},
+    {"company": "ADQ", "country": "UAE", "listing": None,
+     "aliases": [], "us_rise_on_good_news": []},
+    {"company": "Public Investment Fund", "country": "Saudi Arabia", "listing": None,
+     "aliases": ["PIF"], "us_rise_on_good_news": ["NVDA", "AMD", "QCOM"]},
+    {"company": "Qatar Investment Authority", "country": "Qatar", "listing": None,
+     "aliases": ["QIA"], "us_rise_on_good_news": []},
+    # --- Energy, power and helium (spec 4.3) -------------------------------
+    # QatarEnergy is the one row whose good news splits: a Ras Laffan
+    # restart lifts the helium buyers and lowers the helium sellers.
+    {"company": "QatarEnergy", "country": "Qatar", "listing": None,
+     "aliases": ["Qatar Energy", "Ras Laffan"],
+     "us_rise_on_good_news": ["MU", "INTC"],
+     "us_fall_on_good_news": ["XOM", "LIN", "APD"]},
+    {"company": "Saudi Aramco", "country": "Saudi Arabia", "listing": "Tadawul:2222",
+     "aliases": ["Aramco"], "us_rise_on_good_news": []},
+    {"company": "ACWA Power", "country": "Saudi Arabia", "listing": "Tadawul:2082",
+     "aliases": [], "us_rise_on_good_news": ["GEV", "VRT", "ETN"]},
+    {"company": "TAQA", "country": "UAE", "listing": "ADX:TAQA",
+     "aliases": ["Abu Dhabi National Energy"], "us_rise_on_good_news": ["GEV", "VRT"]},
+    {"company": "ADNOC Gas", "country": "UAE", "listing": "ADX:ADNOCGAS",
+     "aliases": ["ADNOC"], "us_rise_on_good_news": ["GEV", "VRT", "ETN"]},
+    {"company": "ICL Group", "country": "Israel", "listing": "NYSE:ICL",
+     "aliases": [], "us_rise_on_good_news": ["ICL"]},
+    # --- Israel: chip design, factories and equipment (spec 4.4) ----------
+    {"company": "Tower Semiconductor", "country": "Israel", "listing": "Nasdaq:TSEM",
+     "aliases": [], "us_rise_on_good_news": ["TSEM", "COHR", "LITE"],
+     "us_fall_on_good_news": ["GFS"]},
+    {"company": "Nova Ltd", "country": "Israel", "listing": "Nasdaq:NVMI",
+     "aliases": ["Nova Measuring"], "us_rise_on_good_news": ["NVMI", "KLAC", "ONTO"]},
+    {"company": "Camtek", "country": "Israel", "listing": "Nasdaq:CAMT",
+     "aliases": [], "us_rise_on_good_news": ["CAMT", "KLAC", "ONTO", "MU"]},
+    {"company": "Mobileye", "country": "Israel", "listing": "Nasdaq:MBLY",
+     "aliases": [], "us_rise_on_good_news": ["MBLY", "INTC"]},
+    {"company": "Nvidia Israel", "country": "Israel", "listing": None,
+     "aliases": ["Intel Kiryat Gat", "Kiryat Gat"],
+     "us_rise_on_good_news": ["NVDA", "INTC"]},
+]
+
+# Terms a WAM, SPA or BIS item must contain (title, or WAM's own lead) to
+# be kept. Both wires publish everything - weather, sport, condolence
+# cables - so this is the same "filter before the body fetch" order Japan
+# and China use. Company names come from the universe above; the topic
+# terms are the spec's eight event types (M1-M8). Matched on word
+# boundaries, case-insensitively, in pipeline._me_match_regex.
+_ME_TOPIC_TERMS: list[str] = [
+    # M1/M8 - US decisions on Gulf chip sales, enforcement
+    "export control", "export controls", "export licence", "export license",
+    "entity list", "Bureau of Industry and Security", "smuggling",
+    # M2/M6 - AI hardware, data centres, supplier choice
+    "AI", "artificial intelligence", "data centre", "data center",
+    "data centres", "data centers", "chip", "chips", "semiconductor",
+    "semiconductors", "GPU", "Nvidia", "AMD", "Qualcomm", "Cisco",
+    "Oracle", "Microsoft", "OpenAI", "Amazon Web Services", "AWS",
+    "Huawei", "cloud", "megawatt", "gigawatt",
+    # M3 - Gulf money into US AI
+    "sovereign wealth", "sovereign fund",
+    # M4/M5 - war, shipping, helium and gas
+    "Hormuz", "Red Sea", "Bab el-Mandeb", "Houthi", "Houthis", "tanker",
+    "shipping", "helium", "LNG", "force majeure",
+]
+
+_ME_MATCH_TERMS: list[str] = sorted({
+    term
+    for c in MIDDLE_EAST_UNIVERSE
+    for term in [c["company"], *c["aliases"]]
+} | set(_ME_TOPIC_TERMS))
+
+# The four Gulf funds that file with the SEC. 13F holdings are not
+# fetched: they arrive up to 45 days after quarter end, and the latest
+# ones touch almost nothing in the AI universe (PIF's lists five stocks,
+# none of them AI). 13D/13G stake filings arrive within days of a change
+# and carry real narrative text (13D item 4, "purpose of transaction").
+# MGX has no SEC filer of its own.
+MIDDLE_EAST_SEC_FUNDS: list[dict[str, str]] = [
+    {"cik": "1767640", "fund": "Public Investment Fund"},
+    {"cik": "1704268", "fund": "Mubadala Investment Company"},
+    {"cik": "1362558", "fund": "Abu Dhabi Investment Authority"},
+    {"cik": "1441449", "fund": "Qatar Investment Authority"},
+]
+
+_ME_GULF_OUTLETS: list[str] = [
+    "thenationalnews.com", "gulfnews.com", "khaleejtimes.com",
+    "arabnews.com", "english.aawsat.com", "english.alarabiya.net",
+    "saudigazette.com.sa", "thepeninsulaqatar.com", "zawya.com",
+    "gulf-times.com", "dohanews.co", "qna.org.qa",
+]
+
+
+def _er_concepts(*titles: str) -> dict[str, Any]:
+    """An Event Registry $or over English-Wikipedia concept URIs."""
+    return {"$or": [
+        {"conceptUri": f"http://en.wikipedia.org/wiki/{t}"} for t in titles
+    ]}
+
+
+def _er_keywords(terms: list[str], loc: str) -> dict[str, Any]:
+    """An Event Registry $or over keywords, matched in `loc` (title/body)."""
+    return {"$or": [{"keyword": t, "keywordLoc": loc} for t in terms]}
+
+
+MIDDLE_EAST_SOURCES: list[dict[str, Any]] = [
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "wam_wire:middle_east_market_signal",
+        "name": "WAM - Emirates News Agency (English)",
+        "source_type": "wam_wire",
+        "frequency_name": "daily",
+        "description": (
+            "UAE state news agency, English, via the JSON API its own site"
+            " calls: the latest-news view for the listing, then each"
+            " article by slug for the body. Official UAE announcements -"
+            " G42, Stargate UAE, MGX, state AI deals. newsapi.ai's copy of"
+            " WAM English was last updated ~21 days before this was built,"
+            " so it is fetched directly."
+        ),
+        "config": {
+            "source_outlet_type": "state_press",
+            "match_terms": _ME_MATCH_TERMS,
+        },
+    },
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "spa_wire:middle_east_market_signal",
+        "name": "SPA - Saudi Press Agency (English)",
+        "source_type": "spa_wire",
+        "frequency_name": "daily",
+        "description": (
+            "Saudi state news agency, English, via its portal API"
+            " (portalapi.spa.gov.sa/api/v1/news, 20 per page, then"
+            " /news/{uuid} for the body). Official Saudi announcements -"
+            " Humain, PIF, Aramco. Not indexed by newsapi.ai at all."
+        ),
+        "config": {
+            "source_outlet_type": "state_press",
+            "match_terms": _ME_MATCH_TERMS,
+        },
+    },
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "substack_post:middleeastainews",
+        "name": "Middle East AI News",
+        "source_type": "substack_post",
+        "frequency_name": "daily",
+        "description": (
+            "Dedicated Gulf AI newsletter linking to primary sources -"
+            " deals, data-centre phases, funding. Read through Substack's"
+            " own API (archive listing, then each post's body_html) rather"
+            " than its RSS feed, so no body depends on a page fetch; free"
+            " written posts only - podcast episodes repeat a written post"
+            " as show notes. Not indexed by newsapi.ai."
+        ),
+        "config": {"base_url": "https://www.middleeastainews.com"},
+    },
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "bis_press:middle_east_market_signal",
+        "name": "BIS Press Releases (Gulf and Israel)",
+        "source_type": "bis_press",
+        "frequency_name": "daily",
+        "description": (
+            "Bureau of Industry and Security press releases - licence"
+            " decisions, country-group changes, enforcement - read from the"
+            " JSON embedded in bis.gov/news-updates, kept when tagged with a"
+            " tracked country or naming a tracked company. A release whose"
+            " text lives on justice.gov gets its body from the DOJ press"
+            " API, matched by title and date; the few that only link a"
+            " scanned PDF are skipped, since every row needs a body."
+        ),
+        "config": {
+            "source_outlet_type": "official",
+            "countries": ["United Arab Emirates", "Saudi Arabia", "Qatar", "Israel"],
+            "match_terms": sorted({
+                term for c in MIDDLE_EAST_UNIVERSE
+                for term in [c["company"], *c["aliases"]]
+            } | {"Gulf", "Middle East", "UAE", "Emirati", "Saudi", "Qatar", "Israel"}),
+        },
+    },
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "federal_register:middle_east_market_signal",
+        "name": "Federal Register - BIS rules naming Gulf countries",
+        "source_type": "federal_register",
+        "frequency_name": "daily",
+        "description": (
+            "BIS rules and notices that name a Gulf country or Israel - the"
+            " gate on whether a Gulf chip order can ship. geopolitical_news"
+            " already fetches every BIS document; this copy is stored under"
+            " its own url scheme so the global url index does not drop it"
+            " from this domain."
+        ),
+        "config": {
+            "agencies": ["industry-and-security-bureau"],
+            "type": ["RULE", "PRORULE", "NOTICE"],
+            "terms": '"United Arab Emirates" | "Saudi Arabia" | Qatar | Israel',
+            "url_scheme": "me-federal-register",
+            "source_outlet_type": "official",
+            # Keeps these rows out of the domain's title-similarity dedup
+            # (see _DOMAIN_TITLE_DEDUP_EXCLUDED_CATEGORIES).
+            "source_category": "me_us_policy",
+            # Whole document, no 20,000-character cap: the UAE A:5 rule
+            # alone is 33,187 characters.
+            "body_max_chars": None,
+        },
+    },
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "sec_fund_stake:middle_east_market_signal",
+        "name": "SEC 13D/13G - Gulf sovereign funds",
+        "source_type": "sec_fund_stake",
+        "frequency_name": "daily",
+        "description": (
+            "Schedule 13D and 13G stake filings by PIF, Mubadala, ADIA and"
+            " QIA, read from each filing's structured primary_doc.xml -"
+            " issuer, percent of class, shares, event date, and the 13D's"
+            " narrative items as the body."
+        ),
+        "config": {
+            "source_outlet_type": "official",
+            "funds": MIDDLE_EAST_SEC_FUNDS,
+        },
+    },
+    # newsapi.ai. Five queries, each pairing an entity or place with a
+    # topic term - an entity alone was measured to drag in astronomy
+    # (helium), Jio's IPO anchor book (the funds) and Nvidia's MGX server
+    # platform ("MGX"). The free plan rejects a query with more than 15
+    # keywords, counting every word of a phrase. G42, Humain, MGX and
+    # Stargate UAE have no usable concept in Event Registry (G42 resolves
+    # to a Chinese expressway), which is why Gulf AI news comes from the
+    # Gulf-outlet query plus WAM, SPA and Middle East AI News rather than
+    # an entity query.
+    #
+    # `url_scheme`: rows are stored as er-me://{uri} with the real link in
+    # metadata.article_url. geopolitical_news runs a "Strait of Hormuz"
+    # query of its own, and 28 of 100 shipping articles were measured in
+    # both - under the global url index the second domain to fetch one
+    # would silently lose it.
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "eventregistry:me_shipping",
+        "name": "Event Registry - Hormuz and Red Sea shipping",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "M4: Strait of Hormuz / Bab-el-Mandeb concepts with a shipping term in the title.",
+        "config": {
+            "url_scheme": "er-me",
+            "require_body": True,
+            # ~100 matches a day against a 100-article page, and a run's
+            # window spans two calendar days; one extra token per run.
+            "max_pages": 2,
+            "query": {"$and": [
+                _er_concepts("Strait_of_Hormuz", "Bab-el-Mandeb"),
+                _er_keywords(["ships", "tanker", "transit", "vessel", "shipping",
+                              "closed", "reopen", "mine"], "title"),
+            ]},
+        },
+    },
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "eventregistry:me_helium",
+        "name": "Event Registry - helium supply",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "M5: helium in the title, with a supply or chip term in the body.",
+        "config": {
+            "url_scheme": "er-me",
+            "require_body": True,
+            "query": {"$and": [
+                _er_keywords(["helium"], "title"),
+                _er_keywords(["Qatar", "shortage", "chip", "semiconductor",
+                              "supply", "price"], "body"),
+            ]},
+        },
+    },
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "eventregistry:me_qatarenergy",
+        "name": "Event Registry - QatarEnergy and Ras Laffan",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "M5: QatarEnergy / Ras Laffan with an output term in the title.",
+        "config": {
+            "url_scheme": "er-me",
+            "require_body": True,
+            "query": {"$and": [
+                _er_concepts("QatarEnergy", "Ras_Laffan_Industrial_City"),
+                _er_keywords(["force majeure", "restart", "LNG", "helium",
+                              "production", "output"], "title"),
+            ]},
+        },
+    },
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "eventregistry:me_israel_sites",
+        "name": "Event Registry - Israeli chip sites",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "M7: Kiryat Gat, Tower Semiconductor, or Intel/Nvidia Israel and Mobileye in the title.",
+        "config": {
+            "url_scheme": "er-me",
+            "require_body": True,
+            "query": {"$or": [
+                _er_concepts("Kiryat_Gat", "Tower_Semiconductor"),
+                _er_keywords(["Intel Israel", "Nvidia Israel", "Mobileye"], "title"),
+            ]},
+        },
+    },
+    {
+        "domain_slug": "middle_east_market_signal",
+        "url": "eventregistry:me_gulf_outlets",
+        "name": "Event Registry - Gulf outlets, AI and energy",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": (
+            "M2/M3/M6: twelve Gulf outlets, restricted to AI, data-centre,"
+            " chip, helium and LNG headlines - the route for G42, Humain and"
+            " Stargate UAE coverage, which have no usable entity concept."
+        ),
+        "config": {
+            "url_scheme": "er-me",
+            "require_body": True,
+            "query": {"$and": [
+                {"$or": [{"sourceUri": s} for s in _ME_GULF_OUTLETS]},
+                _er_keywords(["AI", "data centre", "data center", "chips",
+                              "Nvidia", "G42", "Humain", "semiconductor",
+                              "helium", "LNG"], "title"),
+            ]},
+        },
+    },
+]
+
 # GDELT DOC 2.0 API, queried once per individual theme code (not OR-joined -
 # only single bare "theme:X" queries are confirmed working against the live
 # API; multi-theme "(theme:X OR theme:Y)" queries could not be verified and
@@ -3220,6 +3703,83 @@ GDELT_SOURCE: dict[str, Any] = {
         ],
     },
 }
+
+# Event Registry (newsapi.ai) - the primary geopolitical_news source.
+#
+# One source row per query, because the free tier caps a query at 15
+# keywords and a MULTI-WORD phrase counts per word ("export controls" is
+# 2) - so four phrases plus lang and two dates is the practical limit.
+# One token per query, five queries, against a 2,000-token allowance.
+#
+# Terms were chosen by measuring a real 7-day window per theme rather
+# than by reputation, and matched on TITLE: the same terms against the
+# body returned 11,020 results for a single day (Formula 1, local gas
+# prices) against 565 title-matched.
+#
+#   sanctions/tariffs/embargo   3,287   the core trade-action vocabulary
+#   semis/minerals              3,889
+#   energy                      1,646
+#   grid/power                    339   AI compute straining the grid -
+#                                       uncovered by the old queries and
+#                                       directly this domain's
+#                                       Energy & Grid / Data Centers
+#                                       categories
+#   nuclear fuel                  223   Nuclear & Advanced Energy had no
+#                                       query coverage at all
+#
+# Deliberately NOT included, each measured and rejected: nationalisation
+# (82/wk, 4 of 5 sampled were duplicates of one water-industry
+# petition), subsea cables (27/wk, 5 of 5 one Mediterranean story),
+# CFIUS/investment screening (10/wk), data sovereignty (12/wk), and
+# kinetic conflict terms (953/wk but rarely transmitting to an
+# AI-economy category - Stage A/B reject most of it).
+EVENT_REGISTRY_SOURCES: list[dict[str, Any]] = [
+    {
+        "domain_slug": "geopolitical_news",
+        "url": "eventregistry:trade_controls",
+        "name": "Event Registry - trade & controls",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "newsapi.ai title search: sanctions, tariffs, embargo, export controls.",
+        "config": {"keywords": ["sanctions", "tariffs", "embargo", "export controls"]},
+    },
+    {
+        "domain_slug": "geopolitical_news",
+        "url": "eventregistry:supply_chain",
+        "name": "Event Registry - supply chain",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "newsapi.ai title search: rare earths, critical minerals, semiconductor, chip curbs.",
+        "config": {"keywords": ["rare earths", "critical minerals", "semiconductor", "chip curbs"]},
+    },
+    {
+        "domain_slug": "geopolitical_news",
+        "url": "eventregistry:energy_shipping",
+        "name": "Event Registry - energy & shipping",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "newsapi.ai title search: LNG, pipeline, oil exports, Strait of Hormuz.",
+        "config": {"keywords": ["LNG", "pipeline", "oil exports", "Strait of Hormuz"]},
+    },
+    {
+        "domain_slug": "geopolitical_news",
+        "url": "eventregistry:grid_power",
+        "name": "Event Registry - grid & power",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "newsapi.ai title search: power grid, grid emergency, electricity shortage, data center.",
+        "config": {"keywords": ["power grid", "grid emergency", "electricity shortage", "data center"]},
+    },
+    {
+        "domain_slug": "geopolitical_news",
+        "url": "eventregistry:bans_nuclear",
+        "name": "Event Registry - bans & nuclear fuel",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "newsapi.ai title search: export ban, import ban, entity list, uranium.",
+        "config": {"keywords": ["export ban", "import ban", "entity list", "uranium"]},
+    },
+]
 
 # Google News search for geopolitical_news via SerpAPI.
 GEOPOLITICAL_GOOGLE_NEWS_SOURCE: dict[str, Any] = {
@@ -3674,11 +4234,34 @@ SOURCES: list[dict[str, Any]] = [
     # ------------------------------------------------------------------
     *COMPANY_NEWS_SOURCES,
     # ------------------------------------------------------------------
-    # Geopolitical news (Federal Register + Google News)
+    # Geopolitical news (Federal Register + Event Registry)
+    #
+    # GDELT and SerpAPI/Google News are DISABLED, not deleted - their
+    # definitions below are intact and restoring either is uncommenting
+    # one line. Both were measured against Event Registry on the same
+    # window and lost on every axis that matters here:
+    #
+    #   SerpAPI       its dedicated geopolitical quota is exhausted and
+    #                 returns 0 articles; it also charges one call per
+    #                 query, so the 7 queries cost 7 calls where Event
+    #                 Registry ORs them into one request.
+    #   GDELT         answers 429 under its own 15s-spaced retry policy,
+    #                 returns headlines with NO body (every article then
+    #                 needs a Trafilatura/curl_cffi/archive fetch), and
+    #                 its 27 theme codes skew to conflict coverage
+    #                 (ARMEDCONFLICT, TERROR, REBELLION) rather than the
+    #                 trade, export-control and supply-chain events this
+    #                 domain's taxonomy actually transmits.
+    #
+    # Measured over one real 7-day window:
+    #   eventregistry    245 articles, 245 with body (100%), 183 domains
+    #   gdelt+serpapi+rss 120 articles, 103 with body,        107 domains
+    #   federal_register   16 articles,  16 with body
     # ------------------------------------------------------------------
     *FEDERAL_REGISTER_SOURCES,
-    GEOPOLITICAL_GOOGLE_NEWS_SOURCE,
-    GDELT_SOURCE,
+    *EVENT_REGISTRY_SOURCES,
+    # GEOPOLITICAL_GOOGLE_NEWS_SOURCE,  # SerpAPI - quota exhausted
+    # GDELT_SOURCE,                     # GDELT - 429, and no article body
     # ------------------------------------------------------------------
     # Taiwan market signal (TWSE + TPEx OpenData)
     # ------------------------------------------------------------------
@@ -3725,6 +4308,13 @@ SOURCES: list[dict[str, Any]] = [
     CHINA_NBS_IC_OUTPUT_SOURCE,
     CHINA_PRESS_SOURCE,
     CHINA_PRESS_ENGLISH_CHECK_SOURCE,
+    # ------------------------------------------------------------------
+    # Middle East market signal. Every source is an API or structured
+    # JSON and every row carries a body - see news-retrieval/CLAUDE.md
+    # for the sources that were probed and dropped (PortWatch ran 8
+    # days behind; UKMTO, Tadawul and Home Front Command are blocked).
+    # ------------------------------------------------------------------
+    *MIDDLE_EAST_SOURCES,
 ]
 
 # VC commentary / investor blogs.

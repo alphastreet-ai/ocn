@@ -733,6 +733,39 @@ def classify_geopolitical_signals_stage_d() -> None:
     logger.info("geopolitical_signal Stage D job_id=%s finished", job_id)
 
 
+@cli.command("classify-geopolitical-signals-stage-e")
+def classify_geopolitical_signals_stage_e() -> None:
+    """One-shot: group Stage-D-graded signals into developing STORIES.
+
+    No model call, no network call - groups on the entities Stage C
+    already verified against the article text.
+
+    Writes metadata.story_development on each story's seed row and
+    metadata.in_story on the others. Nothing is deleted: one row per
+    story is a filter the caller applies -
+
+        signal_detection = 'signal' AND NOT (metadata ? 'in_story')
+
+    Safe to re-run: it clears its own keys and regroups from scratch,
+    because which story a row belongs to can change when a later row
+    arrives. Runs to completion and exits (not a server).
+    """
+    import asyncio
+
+    import config
+    from controllers.run import run_geopolitical_signal_stage_e
+    from models.jobs import create_job
+
+    logger.info("Initialising database...")
+    init_db()
+    seed()
+
+    job_id = create_job(domain=config.GEOPOLITICAL_SIGNAL_DOMAIN)
+    logger.info("Created geopolitical_signal Stage E job_id=%s", job_id)
+    asyncio.run(run_geopolitical_signal_stage_e(job_id))
+    logger.info("geopolitical_signal Stage E job_id=%s finished", job_id)
+
+
 @cli.command("run-geopolitical-signal-pipeline")
 @click.option(
     "--from-date",
@@ -747,14 +780,23 @@ def classify_geopolitical_signals_stage_d() -> None:
     "pools. Defaults to today (UTC).",
 )
 def run_geopolitical_signal_pipeline(from_date: str | None, to_date: str | None) -> None:
-    """One-shot: Stage A, then Stage B, then Stage C, then Stage D, in
-    sequence in one process. Each stage only ever acts on rows the
-    previous stage already wrote (A creates rows -> B classifies A's
-    'waiting' rows -> C tags B's 'signal'/HIGH rows -> D grades C's
-    tagged rows), so running them as separately-scheduled triggers risked
-    a later stage firing before the prior stage's run had finished. A
-    single combined command removes that race entirely - the stages are
-    inherently sequential, not independent jobs. Runs to completion and
+    """One-shot: Stage A, then B, then C, then D, then E, in sequence in
+    one process. Stages A-D each only ever act on rows the previous stage
+    already wrote (A creates rows -> B classifies A's 'waiting' rows -> C
+    tags B's 'signal'/HIGH rows -> D grades C's tagged rows), so running
+    them as separately-scheduled triggers risked a later stage firing
+    before the prior stage's run had finished. A single combined command
+    removes that race entirely - the stages are inherently sequential,
+    not independent jobs.
+
+    Stage E runs last and is NOT skippable here, for a different reason:
+    every API read of this domain is expected to be post-Stage-E, since
+    the default signals view filters on NOT (metadata ? 'in_story'). If E
+    never runs, that filter matches every row and a reader sees one story
+    repeated under several headlines. E is also not scoped to the rows D
+    just wrote - grouping is a property of the whole signal set, so it
+    re-reads every graded signal and regroups from scratch, clearing its
+    own two keys first. Runs to completion and
     exits (not a server).
     """
     import asyncio
@@ -766,6 +808,7 @@ def run_geopolitical_signal_pipeline(from_date: str | None, to_date: str | None)
         run_geopolitical_signal_stage_b,
         run_geopolitical_signal_stage_c,
         run_geopolitical_signal_stage_d,
+        run_geopolitical_signal_stage_e,
     )
     from models.jobs import create_job
 
@@ -799,6 +842,11 @@ def run_geopolitical_signal_pipeline(from_date: str | None, to_date: str | None)
     logger.info("Created geopolitical_signal Stage D job_id=%s", stage_d_job_id)
     asyncio.run(run_geopolitical_signal_stage_d(stage_d_job_id))
     logger.info("geopolitical_signal Stage D job_id=%s finished", stage_d_job_id)
+
+    stage_e_job_id = create_job(domain=config.GEOPOLITICAL_SIGNAL_DOMAIN)
+    logger.info("Created geopolitical_signal Stage E job_id=%s", stage_e_job_id)
+    asyncio.run(run_geopolitical_signal_stage_e(stage_e_job_id))
+    logger.info("geopolitical_signal Stage E job_id=%s finished", stage_e_job_id)
 
 
 @cli.command("expire-classifications")

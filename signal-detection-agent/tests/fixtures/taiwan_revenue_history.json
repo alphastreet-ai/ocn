@@ -1,0 +1,2255 @@
+{
+"_source": "MOPS t21sc03 monthly revenue CSVs (sii/otc), 2023-01..2026-09, NT$ thousands, downloaded 2026-10-16",
+"rows": [
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M01",
+"year": "2023",
+"revenue": 398876.0,
+"prior_revenue": 610647.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M02",
+"year": "2023",
+"revenue": 301533.0,
+"prior_revenue": 458074.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M03",
+"year": "2023",
+"revenue": 460898.0,
+"prior_revenue": 654801.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M04",
+"year": "2023",
+"revenue": 441580.0,
+"prior_revenue": 616382.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M05",
+"year": "2023",
+"revenue": 448539.0,
+"prior_revenue": 632711.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M06",
+"year": "2023",
+"revenue": 423745.0,
+"prior_revenue": 687542.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M07",
+"year": "2023",
+"revenue": 455896.0,
+"prior_revenue": 714280.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M08",
+"year": "2023",
+"revenue": 460282.0,
+"prior_revenue": 723298.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M09",
+"year": "2023",
+"revenue": 506831.0,
+"prior_revenue": 712808.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M10",
+"year": "2023",
+"revenue": 615320.0,
+"prior_revenue": 721412.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M11",
+"year": "2023",
+"revenue": 610458.0,
+"prior_revenue": 654596.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M12",
+"year": "2023",
+"revenue": 639013.0,
+"prior_revenue": 612080.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M01",
+"year": "2024",
+"revenue": 655548.0,
+"prior_revenue": 398876.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M02",
+"year": "2024",
+"revenue": 506067.0,
+"prior_revenue": 301533.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M03",
+"year": "2024",
+"revenue": 776192.0,
+"prior_revenue": 460898.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M04",
+"year": "2024",
+"revenue": 794727.0,
+"prior_revenue": 441580.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M05",
+"year": "2024",
+"revenue": 868403.0,
+"prior_revenue": 448539.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M06",
+"year": "2024",
+"revenue": 853539.0,
+"prior_revenue": 423745.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M07",
+"year": "2024",
+"revenue": 885818.0,
+"prior_revenue": 455896.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M08",
+"year": "2024",
+"revenue": 868862.0,
+"prior_revenue": 460282.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M09",
+"year": "2024",
+"revenue": 821999.0,
+"prior_revenue": 506831.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M10",
+"year": "2024",
+"revenue": 962289.0,
+"prior_revenue": 615320.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M11",
+"year": "2024",
+"revenue": 1013472.0,
+"prior_revenue": 610458.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M12",
+"year": "2024",
+"revenue": 1122385.0,
+"prior_revenue": 639013.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M01",
+"year": "2025",
+"revenue": 1233439.0,
+"prior_revenue": 655548.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M02",
+"year": "2025",
+"revenue": 1339536.0,
+"prior_revenue": 506067.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M03",
+"year": "2025",
+"revenue": 1381226.0,
+"prior_revenue": 776192.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M04",
+"year": "2025",
+"revenue": 1449099.0,
+"prior_revenue": 794727.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M05",
+"year": "2025",
+"revenue": 1393592.0,
+"prior_revenue": 868403.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M06",
+"year": "2025",
+"revenue": 1386041.0,
+"prior_revenue": 853539.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M07",
+"year": "2025",
+"revenue": 1406573.0,
+"prior_revenue": 885818.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M08",
+"year": "2025",
+"revenue": 1454984.0,
+"prior_revenue": 868862.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M09",
+"year": "2025",
+"revenue": 1507097.0,
+"prior_revenue": 821999.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M10",
+"year": "2025",
+"revenue": 1567264.0,
+"prior_revenue": 962289.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M11",
+"year": "2025",
+"revenue": 1659348.0,
+"prior_revenue": 1013472.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M12",
+"year": "2025",
+"revenue": 1722455.0,
+"prior_revenue": 1122385.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M01",
+"year": "2026",
+"revenue": 1774956.0,
+"prior_revenue": 1233439.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M02",
+"year": "2026",
+"revenue": 1756868.0,
+"prior_revenue": 1339536.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M03",
+"year": "2026",
+"revenue": 1918166.0,
+"prior_revenue": 1381224.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M04",
+"year": "2026",
+"revenue": 2595892.0,
+"prior_revenue": 1449101.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M05",
+"year": "2026",
+"revenue": 3791303.0,
+"prior_revenue": 1393592.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M06",
+"year": "2026",
+"revenue": 4442581.0,
+"prior_revenue": 1386041.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M07",
+"year": "2026",
+"revenue": 6407256.0,
+"prior_revenue": 1406573.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M08",
+"year": "2026",
+"revenue": 6466169.0,
+"prior_revenue": 1454984.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2059",
+"company": "King Slide",
+"period_type": "M09",
+"year": "2026",
+"revenue": 4464393.0,
+"prior_revenue": 1507097.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M01",
+"year": "2023",
+"revenue": 90070736.0,
+"prior_revenue": 100800443.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M02",
+"year": "2023",
+"revenue": 83351194.0,
+"prior_revenue": 90692342.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M03",
+"year": "2023",
+"revenue": 92759020.0,
+"prior_revenue": 110288470.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M04",
+"year": "2023",
+"revenue": 77840570.0,
+"prior_revenue": 66728103.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M05",
+"year": "2023",
+"revenue": 77011355.0,
+"prior_revenue": 79955154.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M06",
+"year": "2023",
+"revenue": 90177487.0,
+"prior_revenue": 123784105.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M07",
+"year": "2023",
+"revenue": 86891131.0,
+"prior_revenue": 129459679.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M08",
+"year": "2023",
+"revenue": 101355120.0,
+"prior_revenue": 131869030.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M09",
+"year": "2023",
+"revenue": 98258338.0,
+"prior_revenue": 120746508.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M10",
+"year": "2023",
+"revenue": 91392610.0,
+"prior_revenue": 108790516.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M11",
+"year": "2023",
+"revenue": 103600595.0,
+"prior_revenue": 112096960.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M12",
+"year": "2023",
+"revenue": 92902893.0,
+"prior_revenue": 106329239.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M01",
+"year": "2024",
+"revenue": 72936574.0,
+"prior_revenue": 90070736.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M02",
+"year": "2024",
+"revenue": 84293471.0,
+"prior_revenue": 83351194.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M03",
+"year": "2024",
+"revenue": 101709333.0,
+"prior_revenue": 92759020.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M04",
+"year": "2024",
+"revenue": 97337441.0,
+"prior_revenue": 77840570.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M05",
+"year": "2024",
+"revenue": 101298511.0,
+"prior_revenue": 77011355.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M06",
+"year": "2024",
+"revenue": 111318180.0,
+"prior_revenue": 90177487.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M07",
+"year": "2024",
+"revenue": 124262620.0,
+"prior_revenue": 86891131.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M08",
+"year": "2024",
+"revenue": 145176833.0,
+"prior_revenue": 101355120.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M09",
+"year": "2024",
+"revenue": 155109787.0,
+"prior_revenue": 98258338.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M10",
+"year": "2024",
+"revenue": 135893235.0,
+"prior_revenue": 91392610.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M11",
+"year": "2024",
+"revenue": 141353606.0,
+"prior_revenue": 103600595.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M12",
+"year": "2024",
+"revenue": 138415569.0,
+"prior_revenue": 92902893.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M01",
+"year": "2025",
+"revenue": 142560447.0,
+"prior_revenue": 72936574.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M02",
+"year": "2025",
+"revenue": 150564741.0,
+"prior_revenue": 84293471.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M03",
+"year": "2025",
+"revenue": 192546802.0,
+"prior_revenue": 101709333.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M04",
+"year": "2025",
+"revenue": 154010874.0,
+"prior_revenue": 97337441.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M05",
+"year": "2025",
+"revenue": 160242327.0,
+"prior_revenue": 101298511.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M06",
+"year": "2025",
+"revenue": 189868451.0,
+"prior_revenue": 111318180.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M07",
+"year": "2025",
+"revenue": 158342022.0,
+"prior_revenue": 124262620.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M08",
+"year": "2025",
+"revenue": 152807846.0,
+"prior_revenue": 145176833.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M09",
+"year": "2025",
+"revenue": 184108513.0,
+"prior_revenue": 155109787.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M10",
+"year": "2025",
+"revenue": 173195793.0,
+"prior_revenue": 135893235.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M11",
+"year": "2025",
+"revenue": 192946811.0,
+"prior_revenue": 141353606.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M12",
+"year": "2025",
+"revenue": 272494820.0,
+"prior_revenue": 140066068.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M01",
+"year": "2026",
+"revenue": 230834858.0,
+"prior_revenue": 142560447.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M02",
+"year": "2026",
+"revenue": 215583149.0,
+"prior_revenue": 150564741.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M03",
+"year": "2026",
+"revenue": 362803048.0,
+"prior_revenue": 192546802.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M04",
+"year": "2026",
+"revenue": 339921315.0,
+"prior_revenue": 154010874.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M05",
+"year": "2026",
+"revenue": 311481017.0,
+"prior_revenue": 160242327.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M06",
+"year": "2026",
+"revenue": 385190820.0,
+"prior_revenue": 189868451.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M07",
+"year": "2026",
+"revenue": 366274080.0,
+"prior_revenue": 158342022.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M08",
+"year": "2026",
+"revenue": 423970932.0,
+"prior_revenue": 152807846.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2382",
+"company": "Quanta",
+"period_type": "M09",
+"year": "2026",
+"revenue": 325299509.0,
+"prior_revenue": 184108513.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M01",
+"year": "2023",
+"revenue": 2564123.0,
+"prior_revenue": 3089213.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M02",
+"year": "2023",
+"revenue": 2497803.0,
+"prior_revenue": 2605989.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M03",
+"year": "2023",
+"revenue": 2702526.0,
+"prior_revenue": 3288635.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M04",
+"year": "2023",
+"revenue": 2612206.0,
+"prior_revenue": 3381747.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M05",
+"year": "2023",
+"revenue": 2755415.0,
+"prior_revenue": 3314909.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M06",
+"year": "2023",
+"revenue": 2799687.0,
+"prior_revenue": 3231605.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M07",
+"year": "2023",
+"revenue": 2855724.0,
+"prior_revenue": 3196133.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M08",
+"year": "2023",
+"revenue": 2879079.0,
+"prior_revenue": 2891833.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M09",
+"year": "2023",
+"revenue": 2858905.0,
+"prior_revenue": 2932369.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M10",
+"year": "2023",
+"revenue": 2878307.0,
+"prior_revenue": 3038915.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M11",
+"year": "2023",
+"revenue": 2844155.0,
+"prior_revenue": 2877778.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M12",
+"year": "2023",
+"revenue": 2777377.0,
+"prior_revenue": 2932870.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M01",
+"year": "2024",
+"revenue": 2807177.0,
+"prior_revenue": 2564123.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M02",
+"year": "2024",
+"revenue": 2511124.0,
+"prior_revenue": 2497803.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M03",
+"year": "2024",
+"revenue": 2896417.0,
+"prior_revenue": 2702526.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M04",
+"year": "2024",
+"revenue": 2078786.0,
+"prior_revenue": 1865601.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M05",
+"year": "2024",
+"revenue": 2217435.0,
+"prior_revenue": 1982592.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M06",
+"year": "2024",
+"revenue": 2246985.0,
+"prior_revenue": 2019960.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M07",
+"year": "2024",
+"revenue": 2344622.0,
+"prior_revenue": 2047867.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M08",
+"year": "2024",
+"revenue": 2351067.0,
+"prior_revenue": 2092095.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M09",
+"year": "2024",
+"revenue": 2343053.0,
+"prior_revenue": 2095692.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M10",
+"year": "2024",
+"revenue": 2410546.0,
+"prior_revenue": 2187829.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M11",
+"year": "2024",
+"revenue": 2440215.0,
+"prior_revenue": 2098524.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M12",
+"year": "2024",
+"revenue": 2446149.0,
+"prior_revenue": 2059257.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M01",
+"year": "2025",
+"revenue": 2384946.0,
+"prior_revenue": 1964530.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M02",
+"year": "2025",
+"revenue": 2286169.0,
+"prior_revenue": 1884634.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M03",
+"year": "2025",
+"revenue": 2644375.0,
+"prior_revenue": 2128009.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M04",
+"year": "2025",
+"revenue": 2781758.0,
+"prior_revenue": 2078786.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M05",
+"year": "2025",
+"revenue": 2764705.0,
+"prior_revenue": 2217435.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M06",
+"year": "2025",
+"revenue": 2815411.0,
+"prior_revenue": 2246985.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M07",
+"year": "2025",
+"revenue": 2918332.0,
+"prior_revenue": 2344622.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M08",
+"year": "2025",
+"revenue": 3100894.0,
+"prior_revenue": 2351067.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M09",
+"year": "2025",
+"revenue": 3271304.0,
+"prior_revenue": 2343053.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M10",
+"year": "2025",
+"revenue": 3418823.0,
+"prior_revenue": 2410546.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M11",
+"year": "2025",
+"revenue": 3292565.0,
+"prior_revenue": 2440215.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M12",
+"year": "2025",
+"revenue": 3254264.0,
+"prior_revenue": 2446149.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M01",
+"year": "2026",
+"revenue": 3369542.0,
+"prior_revenue": 2384946.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M02",
+"year": "2026",
+"revenue": 3224527.0,
+"prior_revenue": 2286169.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M03",
+"year": "2026",
+"revenue": 3597874.0,
+"prior_revenue": 2644375.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M04",
+"year": "2026",
+"revenue": 3743018.0,
+"prior_revenue": 2781758.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M05",
+"year": "2026",
+"revenue": 3776927.0,
+"prior_revenue": 2764705.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M06",
+"year": "2026",
+"revenue": 3621671.0,
+"prior_revenue": 2815411.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M07",
+"year": "2026",
+"revenue": 3990702.0,
+"prior_revenue": 2918332.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M08",
+"year": "2026",
+"revenue": 4080093.0,
+"prior_revenue": 3100894.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "2449",
+"company": "King Yuan Electronics",
+"period_type": "M09",
+"year": "2026",
+"revenue": 4071464.0,
+"prior_revenue": 3271304.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M01",
+"year": "2023",
+"revenue": 54967408.0,
+"prior_revenue": 66957794.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M02",
+"year": "2023",
+"revenue": 62066820.0,
+"prior_revenue": 64629461.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M03",
+"year": "2023",
+"revenue": 94965979.0,
+"prior_revenue": 94858526.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M04",
+"year": "2023",
+"revenue": 62125793.0,
+"prior_revenue": 68352110.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M05",
+"year": "2023",
+"revenue": 63328331.0,
+"prior_revenue": 74337356.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M06",
+"year": "2023",
+"revenue": 81098600.0,
+"prior_revenue": 101526536.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M07",
+"year": "2023",
+"revenue": 67719669.0,
+"prior_revenue": 79684558.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M08",
+"year": "2023",
+"revenue": 72891238.0,
+"prior_revenue": 76876839.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M09",
+"year": "2023",
+"revenue": 77882364.0,
+"prior_revenue": 93541711.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M10",
+"year": "2023",
+"revenue": 78402929.0,
+"prior_revenue": 78600200.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M11",
+"year": "2023",
+"revenue": 76435409.0,
+"prior_revenue": 88603854.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M12",
+"year": "2023",
+"revenue": 74698087.0,
+"prior_revenue": 96428739.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M01",
+"year": "2024",
+"revenue": 67299575.0,
+"prior_revenue": 54967408.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M02",
+"year": "2024",
+"revenue": 81097431.0,
+"prior_revenue": 62066820.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M03",
+"year": "2024",
+"revenue": 89831083.0,
+"prior_revenue": 94965979.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M04",
+"year": "2024",
+"revenue": 72642799.0,
+"prior_revenue": 62125793.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M05",
+"year": "2024",
+"revenue": 79501289.0,
+"prior_revenue": 63328331.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M06",
+"year": "2024",
+"revenue": 88787165.0,
+"prior_revenue": 81098600.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M07",
+"year": "2024",
+"revenue": 86190479.0,
+"prior_revenue": 67719669.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M08",
+"year": "2024",
+"revenue": 89820629.0,
+"prior_revenue": 72891238.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M09",
+"year": "2024",
+"revenue": 96903570.0,
+"prior_revenue": 77882364.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M10",
+"year": "2024",
+"revenue": 96284824.0,
+"prior_revenue": 78402929.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M11",
+"year": "2024",
+"revenue": 95242553.0,
+"prior_revenue": 76435409.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M12",
+"year": "2024",
+"revenue": 105654212.0,
+"prior_revenue": 74698087.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M01",
+"year": "2025",
+"revenue": 90786162.0,
+"prior_revenue": 67299575.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M02",
+"year": "2025",
+"revenue": 102714136.0,
+"prior_revenue": 81097431.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M03",
+"year": "2025",
+"revenue": 152984771.0,
+"prior_revenue": 89831083.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M04",
+"year": "2025",
+"revenue": 133703546.0,
+"prior_revenue": 72642799.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M05",
+"year": "2025",
+"revenue": 208405603.0,
+"prior_revenue": 79501289.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M06",
+"year": "2025",
+"revenue": 209182302.0,
+"prior_revenue": 88787165.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M07",
+"year": "2025",
+"revenue": 191725748.0,
+"prior_revenue": 86190479.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M08",
+"year": "2025",
+"revenue": 172642595.0,
+"prior_revenue": 89820629.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M09",
+"year": "2025",
+"revenue": 203436940.0,
+"prior_revenue": 96903570.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M10",
+"year": "2025",
+"revenue": 185061565.0,
+"prior_revenue": 96284824.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M11",
+"year": "2025",
+"revenue": 280624451.0,
+"prior_revenue": 95242553.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M12",
+"year": "2025",
+"revenue": 255254817.0,
+"prior_revenue": 105654212.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M01",
+"year": "2026",
+"revenue": 228366631.0,
+"prior_revenue": 90786162.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M02",
+"year": "2026",
+"revenue": 284893080.0,
+"prior_revenue": 102714136.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M03",
+"year": "2026",
+"revenue": 333043315.0,
+"prior_revenue": 152984771.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M04",
+"year": "2026",
+"revenue": 283437176.0,
+"prior_revenue": 133703546.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M05",
+"year": "2026",
+"revenue": 290183471.0,
+"prior_revenue": 208405603.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M06",
+"year": "2026",
+"revenue": 321821969.0,
+"prior_revenue": 209182302.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M07",
+"year": "2026",
+"revenue": 308219198.0,
+"prior_revenue": 191725748.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M08",
+"year": "2026",
+"revenue": 460065063.0,
+"prior_revenue": 172642595.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "3231",
+"company": "Wistron",
+"period_type": "M09",
+"year": "2026",
+"revenue": 380806168.0,
+"prior_revenue": 203436940.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M01",
+"year": "2023",
+"revenue": 220450.0,
+"prior_revenue": 384525.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M02",
+"year": "2023",
+"revenue": 223106.0,
+"prior_revenue": 334015.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M03",
+"year": "2023",
+"revenue": 225840.0,
+"prior_revenue": 432969.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M04",
+"year": "2023",
+"revenue": 228014.0,
+"prior_revenue": 454221.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M05",
+"year": "2023",
+"revenue": 225675.0,
+"prior_revenue": 465679.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M06",
+"year": "2023",
+"revenue": 226350.0,
+"prior_revenue": 505432.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M07",
+"year": "2023",
+"revenue": 231717.0,
+"prior_revenue": 427488.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M08",
+"year": "2023",
+"revenue": 243429.0,
+"prior_revenue": 402600.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M09",
+"year": "2023",
+"revenue": 321568.0,
+"prior_revenue": 476492.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M10",
+"year": "2023",
+"revenue": 323669.0,
+"prior_revenue": 516534.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M11",
+"year": "2023",
+"revenue": 341994.0,
+"prior_revenue": 419387.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M12",
+"year": "2023",
+"revenue": 318583.0,
+"prior_revenue": 390786.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M01",
+"year": "2024",
+"revenue": 362308.0,
+"prior_revenue": 220450.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M02",
+"year": "2024",
+"revenue": 292096.0,
+"prior_revenue": 223106.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M03",
+"year": "2024",
+"revenue": 359069.0,
+"prior_revenue": 225840.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M04",
+"year": "2024",
+"revenue": 415897.0,
+"prior_revenue": 228014.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M05",
+"year": "2024",
+"revenue": 435334.0,
+"prior_revenue": 225675.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M06",
+"year": "2024",
+"revenue": 504814.0,
+"prior_revenue": 226350.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M07",
+"year": "2024",
+"revenue": 601189.0,
+"prior_revenue": 231717.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M08",
+"year": "2024",
+"revenue": 677094.0,
+"prior_revenue": 243429.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M09",
+"year": "2024",
+"revenue": 708152.0,
+"prior_revenue": 321568.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M10",
+"year": "2024",
+"revenue": 685782.0,
+"prior_revenue": 323669.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M11",
+"year": "2024",
+"revenue": 681054.0,
+"prior_revenue": 341994.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M12",
+"year": "2024",
+"revenue": 736877.0,
+"prior_revenue": 318583.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M01",
+"year": "2025",
+"revenue": 700869.0,
+"prior_revenue": 362308.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M02",
+"year": "2025",
+"revenue": 609219.0,
+"prior_revenue": 292096.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M03",
+"year": "2025",
+"revenue": 755030.0,
+"prior_revenue": 359069.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M04",
+"year": "2025",
+"revenue": 704344.0,
+"prior_revenue": 415897.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M05",
+"year": "2025",
+"revenue": 759860.0,
+"prior_revenue": 435334.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M06",
+"year": "2025",
+"revenue": 782343.0,
+"prior_revenue": 504814.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M07",
+"year": "2025",
+"revenue": 771292.0,
+"prior_revenue": 601189.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M08",
+"year": "2025",
+"revenue": 744425.0,
+"prior_revenue": 677094.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M09",
+"year": "2025",
+"revenue": 814367.0,
+"prior_revenue": 708152.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M10",
+"year": "2025",
+"revenue": 730624.0,
+"prior_revenue": 685782.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M11",
+"year": "2025",
+"revenue": 840288.0,
+"prior_revenue": 681054.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M12",
+"year": "2025",
+"revenue": 872214.0,
+"prior_revenue": 736877.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M01",
+"year": "2026",
+"revenue": 900364.0,
+"prior_revenue": 700869.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M02",
+"year": "2026",
+"revenue": 1010964.0,
+"prior_revenue": 609219.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M03",
+"year": "2026",
+"revenue": 1235429.0,
+"prior_revenue": 755030.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M04",
+"year": "2026",
+"revenue": 1279040.0,
+"prior_revenue": 704344.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M05",
+"year": "2026",
+"revenue": 1282174.0,
+"prior_revenue": 759860.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M06",
+"year": "2026",
+"revenue": 1310195.0,
+"prior_revenue": 782343.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M07",
+"year": "2026",
+"revenue": 1524018.0,
+"prior_revenue": 771292.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M08",
+"year": "2026",
+"revenue": 1625937.0,
+"prior_revenue": 744425.0,
+"yoy_pct": null,
+"source": "mops_csv"
+},
+{
+"code": "5274",
+"company": "Aspeed Technology",
+"period_type": "M09",
+"year": "2026",
+"revenue": 1636326.0,
+"prior_revenue": 814367.0,
+"yoy_pct": null,
+"source": "mops_csv"
+}
+]
+}

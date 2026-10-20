@@ -80,13 +80,27 @@ def _build_and_send(job_id: int) -> None:
     results = signal_agent_client.get_job_results(job_id)
     logger.info("Fetched %d classification rows", len(results))
 
-    # Group all articles by category
+    # Group all articles by category.
+    #
+    # `category` is a LIST - one entry for a news row, several for a
+    # geopolitical_signal row, which reaches more than one sector. An
+    # article in three categories is listed under each, because a reader
+    # opening the Energy section wants it there whether or not it also
+    # touches Semiconductors.
+    #
+    # A bare string is still accepted: the column was TEXT before it was
+    # TEXT[], so this runs correctly against either. Without that branch
+    # the string case falls into `"Energy" not in CATEGORIES` being
+    # tested on a list, which is always True - every article skipped and
+    # an EMPTY DIGEST sent, with no error raised anywhere.
     all_categorised: dict[str, list[dict[str, Any]]] = {}
     for r in results:
-        category = r.get("category")
-        if not category or category not in config.CATEGORIES:
+        raw = r.get("category")
+        if not raw:
             continue
-        all_categorised.setdefault(category, []).append(r)
+        for category in ([raw] if isinstance(raw, str) else raw):
+            if category in config.CATEGORIES:
+                all_categorised.setdefault(category, []).append(r)
 
     # Only keep categories that have at least one signal or weak_signal
     categorised: dict[str, list[dict[str, Any]]] = {

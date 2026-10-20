@@ -16,7 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from pipeline.categories import ALLOWED_CATEGORIES
@@ -24,7 +26,28 @@ from pipeline.classifier import extract_json_object
 
 logger = logging.getLogger(__name__)
 
-_VALID_CHANNELS = frozenset({"energy", "trade", "sanctions", "shipping", "conflict"})
+# subsidies / regulation added 2026-10-20: 11 of 57 HIGH rows had been
+# forced into a channel that misdescribed them - state chip schemes filed
+# as "trade", data-centre moratoriums as "energy" or "trade".
+# diplomacy added 2026-10-20 (user decision): talks, summits, visits,
+# cooperation and statements between states - geopolitical news that uses
+# no other instrument had no channel at all.
+_VALID_CHANNELS = frozenset({"energy", "trade", "sanctions", "shipping", "conflict", "subsidies",
+                             "regulation", "diplomacy"})
+# Spellings of a valid channel (singular/plural, adjective, the
+# instrument's everyday name) - rewritten, never guessed across meanings.
+_CHANNEL_ALIASES = {
+    "sanction": "sanctions",
+    "subsidy": "subsidies",
+    "regulations": "regulation",
+    "regulatory": "regulation",
+    "tariff": "trade",
+    "tariffs": "trade",
+    "military": "conflict",
+    "diplomatic": "diplomacy",
+    "security": "conflict",
+}
+_NO_CHANNEL = frozenset({"none", "null", "n/a", ""})
 # One naming convention: the exposure's full name, lowercase, with
 # underscores. The list previously mixed three - full nouns
 # (crude_oil, natural_gas), abbreviations (semis, autos) and bare words
@@ -62,6 +85,63 @@ _ASSET_ALIASES = {
     "dollar": "usd",
 }
 
+# HTTP statuses worth a second attempt: the request never reached a
+# model, or the gateway gave up waiting for one. Measured live - a single
+# 504 on one row of a 45-row run left that row with every Stage C field
+# null, and the immediate manual re-run of that same row succeeded on
+# its first attempt. That is the whole case for retrying: the failure
+# was in the gateway, not in the request.
+#
+# Deliberately NOT retried: 400/401/403/404 (the request itself is
+# wrong, and will be wrong again), and any parse or validation failure.
+# The latter is not guesswork - a production run of this codebase's
+# filing classifier found 54 rows hitting the same parse failure twice,
+# "every one of the 54 failed IDENTICALLY on both attempts". Retrying a
+# bad response just buys the same bad response at double the price.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+_HTTP_MAX_ATTEMPTS = 3
+
+
+def _post_with_retry(req: Request, timeout: float) -> dict[str, Any]:
+    """POST and decode, retrying only TRANSPORT failures.
+
+    Raises the last exception once attempts are exhausted, so the
+    caller's existing fail-open handler stays the single place that
+    decides what a permanently failed row looks like.
+
+    Backoff is 1s then 2s. It sleeps inside the executor worker that
+    owns this row, so a retrying row holds one CLASSIFY_CONCURRENCY slot
+    for up to 3 extra seconds - immaterial at this domain's ~45 rows a
+    day, and worth re-checking if that volume grows by an order of
+    magnitude.
+    """
+    for attempt in range(1, _HTTP_MAX_ATTEMPTS + 1):
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8", errors="ignore"))
+        except HTTPError as exc:
+            if exc.code not in _TRANSIENT_HTTP_STATUSES:
+                raise
+            if attempt == _HTTP_MAX_ATTEMPTS:
+                raise
+            logger.warning(
+                "[GEOPOLITICAL_SIGNAL_STAGE_C] transient HTTP %s on attempt"
+                " %d/%d, retrying", exc.code, attempt, _HTTP_MAX_ATTEMPTS,
+            )
+        except (URLError, TimeoutError) as exc:
+            # No status to inspect - a connection reset or a read that
+            # ran past `timeout`. Same class as a 504: nothing about the
+            # request says it will fail again.
+            if attempt == _HTTP_MAX_ATTEMPTS:
+                raise
+            logger.warning(
+                "[GEOPOLITICAL_SIGNAL_STAGE_C] transport error on attempt"
+                " %d/%d (%s), retrying", attempt, _HTTP_MAX_ATTEMPTS, exc,
+            )
+        time.sleep(2 ** (attempt - 1))
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 _EMPTY_RESULT: dict[str, Any] = {
     "channel": None,
     "assets": None,
@@ -69,7 +149,32 @@ _EMPTY_RESULT: dict[str, Any] = {
     "generated_summary": None,
     "entities": None,
     "event_date": None,
+    "event_location": None,
 }
+
+# Where the event physically happened, as the text names it - one value
+# or None. Paired with event_date above and answering the same shape of
+# question: WHERE it occurred, as against where the document announcing
+# it was issued. A Federal Register notice is published in Washington
+# and that is almost never where anything happened.
+#
+# Expected to be None on a large share of rows, by design. A sanctions
+# designation or an export-control rule is an act of law, not an event
+# with a place - measured over one real pool, roughly half of this
+# domain's signals are legal instruments of that kind. The prompt is
+# explicit that the country a measure APPLIES TO is not the answer:
+# that country is already an "entities" row of type "country", and
+# repeating it here would state a party as if it were a place.
+#
+# Where it IS answerable - a strike, a sinking, a plant or data centre,
+# a pipeline or strait - it is usually in the BODY and not the
+# headline. Two real examples from one run: "Cargo ship carrying over
+# 2,500 containers sinks after reported naval mine" names no place at
+# all in its title, and "Federal officials tout $33B energy investment,
+# massive data center in So..." is cut off before its state. Stage C
+# already reads up to 24,000 characters of body for its other fields,
+# so this costs output tokens and no extra call.
+_MAX_EVENT_LOCATION_CHARS = 120
 
 # The date the action was taken or took effect, which is frequently NOT
 # the date the article was published. Federal Register notices are the
@@ -357,6 +462,60 @@ _INSTRUMENT_RE = re.compile(
 _SECTOR_WORD_RE = re.compile(r"\b(sectors?|industr(?:y|ies)|economy)\b", re.IGNORECASE)
 
 
+def resolve_against_universe(
+    entities: list[dict[str, Any]] | None,
+    companies: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    """Fill each company entity's ticker from the tracked universe, and
+    mark whether it is in that universe at all.
+
+    The universe is the authority where it matches: its own
+    ``company_name`` and ``ticker`` replace whatever the model wrote, so
+    one company reads identically on every row rather than as "Nvidia"
+    here and "NVIDIA Corp" there. A match also recovers a ticker the
+    model left null - measured on real rows, "MP Materials" came back
+    with no ticker and resolved to MP, a rare-earths name in a
+    critical-minerals story that was otherwise invisible to any
+    ticker-based reader.
+
+    ``in_universe`` is written on COMPANY entities only, and only as
+    True. A country or a ministry is not a company and the question does
+    not apply to it; an unmatched company gets no key rather than
+    ``false``, so "not in this taxonomy" is absence, not an assertion -
+    Sberbank and PDVSA are real companies that genuinely are not in an
+    AI-economy universe, and saying so explicitly on every sanctioned
+    foreign bank would be noise.
+
+    Matching is EXACT on lowercased name or uppercased ticker,
+    deliberately. A fuzzy match that attaches the wrong ticker is far
+    worse than a miss: the ticker is the one field a reader acts on
+    directly. "Russia's VTB Bank" therefore does not match a "VTB" row,
+    and that is the intended trade.
+    """
+    if not entities or not companies:
+        return entities
+    by_name = {
+        (c.get("company_name") or "").strip().lower(): c
+        for c in companies if c.get("company_name")
+    }
+    by_ticker = {
+        (c.get("ticker") or "").strip().upper(): c
+        for c in companies if c.get("ticker")
+    }
+    for entity in entities:
+        if entity.get("type") != "company":
+            continue
+        match = by_name.get((entity.get("name") or "").strip().lower())
+        if match is None and entity.get("ticker"):
+            match = by_ticker.get(entity["ticker"].strip().upper())
+        if match is None:
+            continue
+        entity["name"] = match.get("company_name") or entity["name"]
+        entity["ticker"] = match.get("ticker") or entity.get("ticker")
+        entity["in_universe"] = True
+    return entities
+
+
 def _is_not_a_product(name: str) -> str | None:
     """Return why ``name`` is not a product, or None when it is one.
 
@@ -588,6 +747,89 @@ def _spell_date(iso: str) -> str:
     ))
 
 
+# Does the body name ANY calendar date? Used to tell "this body states
+# dates and none is the claimed one" (a fabrication) from "this body
+# states no date at all" (nothing to check against).
+_ANY_DATE_IN_BODY_RE = re.compile(
+    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}\b"
+    r"|\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\b"
+    r"|\b\d{4}-\d{2}-\d{2}\b"
+    r"|\b\d{1,2}/\d{1,2}/\d{2,4}\b",
+    re.IGNORECASE,
+)
+
+
+def _day_month_is_supported(event_date: str, body: str | None) -> bool:
+    """True when ``event_date``'s day and month appear in ``body``.
+
+    The year check below was the field's only validation, and it leaves
+    a real gap: a date whose year is right and whose day is invented
+    passes it. "2026-08-09" and "2026-08-19" are equally defensible to a
+    year test, and a reader cannot sanity-check either.
+
+    Matched in the forms a document actually writes - "August 9",
+    "9 August", "August 9, 2026", "9 August 2026" and the ISO form -
+    reusing _spell_date, the same helper the summary's own figure check
+    uses, so one date vocabulary serves both rather than two drifting
+    copies.
+
+    Numeric spellings (8/9/2026, 09.08.2026, 2026-08-09) are matched
+    too: Federal Register and agency documents write dates that way far
+    more often than news prose does, and rejecting a correct date
+    because the source used slashes would be the exact failure the
+    spelling list exists to prevent.
+
+    Fail-open with no body, same rule as every other content check
+    here - "we could not verify" must never be recorded as "we checked
+    and it was wrong".
+    """
+    if not body:
+        return True
+    try:
+        year, month, day = event_date[:10].split("-")
+        mi, di = int(month), int(day)
+    except (ValueError, IndexError):
+        return True
+    # Periods dropped from BOTH sides before comparing. _normalize_for_match
+    # collapses whitespace and case but keeps punctuation, so searching
+    # "oct 15" against a body reading "Oct. 15" missed - measured on three
+    # real rows (138330 "Oct. 15", 138184 "Oct. 13", 138188 "Sept. 11")
+    # whose dates were present verbatim and were still being rejected.
+    haystack = _normalize_for_match(body).replace(".", "")
+    name = _MONTH_NAMES[mi - 1] if 1 <= mi <= 12 else month
+    # BOTH the full month and its abbreviation. Measured over 37 real
+    # dated rows: testing "October" alone rejected 22 of them, because
+    # news copy and agency notices overwhelmingly write "Oct. 16, 2026",
+    # "an Oct. 7 work session", "overnight on Oct. 16". A check that
+    # discards 59% of correct values is worse than the gap it closes.
+    # "Sept" is listed separately because September abbreviates to four
+    # letters as often as three.
+    names = {name, name[:3], name[:4]}
+    spellings: list[str] = []
+    for nm in names:
+        spellings += [
+            f"{nm} {di}", f"{di} {nm}",
+            f"{nm} {di}, {year}", f"{di} {nm} {year}",
+        ]
+    spellings += [
+        event_date,                       # 2026-08-09
+        f"{mi}/{di}/{year}", f"{di}/{mi}/{year}",
+        f"{mi:02d}/{di:02d}/{year}", f"{di:02d}/{mi:02d}/{year}",
+        f"{di:02d}.{mi:02d}.{year}",
+    ]
+    if any(_normalize_for_match(s).replace(".", "") in haystack for s in spellings):
+        return True
+    # A body that states no calendar date at all cannot refute one.
+    # News copy routinely writes "the US military reported on Thursday"
+    # and never prints the date; the model resolving that against the
+    # publication date is correct behaviour, not invention. Rejecting
+    # here would punish the model for reading the article properly.
+    #
+    # The check only bites when the body DOES name dates and none of
+    # them is the one claimed - which is the fabrication case.
+    return not _ANY_DATE_IN_BODY_RE.search(body)
+
+
 def _year_is_supported(
     event_date: str, body: str | None, published: str | None,
 ) -> bool:
@@ -717,8 +959,23 @@ def _validate(
     if not isinstance(parsed, dict):
         return None
 
-    channel = parsed.get("channel")
+    # Same near-miss rule as assets below: "Sanctions", " trade" or
+    # "subsidy" is a spelling of a valid answer, not a missing one - an
+    # exact-match check would store null and make it indistinguishable
+    # from a failed call. Anything still unknown is logged, then null.
+    # null is a valid answer: the article reports no instrument (analysis,
+    # a forecast, a company's plan, a hearing). Five reviewer personas
+    # agreed a "closest" channel there is a guess that floods the filters
+    # (2026-10-20). "none" / "null" written as a string mean the same.
+    raw_channel = parsed.get("channel")
+    channel = raw_channel.strip().lower() if isinstance(raw_channel, str) else None
+    channel = _CHANNEL_ALIASES.get(channel, channel)
     if channel not in _VALID_CHANNELS:
+        if raw_channel is not None and channel not in _NO_CHANNEL:
+            logger.warning(
+                "[GEOPOLITICAL_SIGNAL_STAGE_C] channel outside the vocabulary,"
+                " stored as null: %r", raw_channel,
+            )
         channel = None
 
     assets = parsed.get("assets")
@@ -892,6 +1149,36 @@ def _validate(
             })
         entities = cleaned[:_MAX_ENTITIES] or None
 
+    # Checked against the source text, exactly like event_date's year
+    # below and for the same reason: a fabricated place reads as
+    # authoritatively as a real one and nothing downstream could catch
+    # it. The model is asked for a place THE TEXT NAMES, so requiring
+    # the string to appear in the title or body is a direct test of
+    # that instruction rather than a guess at plausibility.
+    #
+    # Matched case-insensitively on the whole value. A multi-part answer
+    # ("El Dorado County, California") is also accepted when its first
+    # part appears, since a text often names the county once and the
+    # state separately, and the model composing the fuller form is
+    # correct behaviour rather than invention.
+    event_location = parsed.get("event_location")
+    if not isinstance(event_location, str):
+        event_location = None
+    else:
+        event_location = " ".join(event_location.split())[:_MAX_EVENT_LOCATION_CHARS]
+        if not event_location:
+            event_location = None
+        else:
+            haystack = (named_in or body or "").lower()
+            needle = event_location.lower()
+            head = needle.split(",")[0].strip()
+            if needle not in haystack and (not head or head not in haystack):
+                logger.warning(
+                    "[GEOPOLITICAL_SIGNAL_STAGE_C] dropping event_location"
+                    " %r: absent from the article text", event_location,
+                )
+                event_location = None
+
     event_date = parsed.get("event_date")
     if not isinstance(event_date, str) or not _EVENT_DATE_RE.match(event_date.strip()):
         event_date = None
@@ -919,9 +1206,21 @@ def _validate(
                 " publication date", event_date,
             )
             event_date = None
+        elif not _day_month_is_supported(event_date, body):
+            # A right year with an invented day is the gap the year
+            # check alone leaves open, and it is the half a reader
+            # cannot verify: "the determination was issued 9 August"
+            # against a body saying 19 August reads identically.
+            logger.warning(
+                "[GEOPOLITICAL_SIGNAL_STAGE_C] dropping event_date %r: its"
+                " day and month appear nowhere in the article text",
+                event_date,
+            )
+            event_date = None
 
     return {
         "event_date": event_date,
+        "event_location": event_location,
         "channel": channel,
         "assets": assets,
         "impacted_categories": impacted_categories,
@@ -990,10 +1289,34 @@ def classify_geopolitical_signal_tags(
         # spent before this code can trim it. The prompt now states the
         # limit too; this is the backstop for when the model ignores it.
         "max_tokens": 2000,
+        # System prompt FIRST and byte-identical on every call, same
+        # reason as Stage B's: this prompt is ~6,200 tokens against a
+        # body that averages far less, so most of every call is the
+        # instructions, and an OpenAI model caches a repeated prefix
+        # automatically. The stake is larger here than in Stage B - this
+        # prompt is half again as long.
+        #
+        # Two things keep it working: the prompt is read unmodified
+        # (no per-call interpolation into the system message - the
+        # publication date goes in the USER message above for exactly
+        # this reason), and the user message stays SECOND, since caching
+        # matches a prefix.
+        #
+        # Model is config.GEOPOLITICAL_SIGNAL_STAGE_C_MODEL, which
+        # defaults to SEC_FILING_MODEL (openai/gpt-4.1 here). Anthropic
+        # models on OpenRouter cache nothing without an explicit
+        # cache_control breakpoint on the system block, so repointing
+        # that variable at one silently ends the discount - the debug
+        # line below is what would show it.
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
+        # Ask OpenRouter to return token accounting, so a cost
+        # regression - cached_tokens dropping to 0 after a prompt edit
+        # or a model change - is visible in the logs rather than silent
+        # on the bill.
+        "usage": {"include": True},
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -1006,9 +1329,23 @@ def classify_geopolitical_signal_tags(
             headers=headers,
             method="POST",
         )
-        with urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        data = _post_with_retry(req, timeout)
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        # Cache accounting, at debug level - there when wanted, silent
+        # otherwise. A run whose cached count sits at 0 after the first
+        # few calls means the prefix stopped matching, and that is a
+        # cost regression nothing else reports. Logged BEFORE the parse
+        # below, so a row that overflows max_tokens and fails to parse
+        # still reports what it spent.
+        usage = data.get("usage") or {}
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        if cached is not None:
+            logger.debug(
+                "[GEOPOLITICAL_SIGNAL_STAGE_C] prompt_tokens=%s cached=%s"
+                " completion_tokens=%s",
+                usage.get("prompt_tokens"), cached,
+                usage.get("completion_tokens"),
+            )
         # confirmed live: this model wraps its JSON in a ```json ... ```
         # markdown fence despite the prompt saying "Return ONLY a JSON
         # object" - extract_json_object (pipeline/classifier.py) already

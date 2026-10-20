@@ -29,11 +29,13 @@ async def get_all_results(
     code: str | None = Query(default=None, description="Filter by metadata.code - the exchange code a market-signal domain files a company under, NOT the same field as ticker. japan_market_signal stores a TSE code ('6857', or Kioxia\'s '285A'); china_market_signal stores a mainland or HK code ('688981' SMIC, '09988' Alibaba). Case-insensitive."),
     period: str | None = Query(default=None, description="Filter by metadata.period_gregorian, e.g. '2026-07' (only populated for taiwan_market_signal mops_revenue rows)"),
     source_category: str | None = Query(default=None, description="Filter by metadata.source_category, e.g. 'mops_revenue', 'mops_material', 'gdelt' (only populated for taiwan_market_signal rows)"),
-    grade: str | None = Query(default=None, description="Filter by metadata.grade: 'TOP', 'STRONG', or 'STANDARD' (only populated for geopolitical_signal rows Stage D has graded)"),
     impacted_category: str | None = Query(default=None, description="Filter to rows whose metadata.impacted_categories includes this exact category name, e.g. 'Semiconductor Manufacturing' (only populated for geopolitical_signal rows Stage C has tagged)"),
     impacted_ticker: str | None = Query(default=None, description="Filter to rows whose entities_json includes this ticker, e.g. 'NVDA' - the companies the article itself names, each stored with the reason the text gives (only populated for geopolitical_signal rows Stage C has tagged; case-insensitive)"),
-    channel: str | None = Query(default=None, description="Filter by metadata.channel: 'energy', 'trade', 'sanctions', 'shipping', or 'conflict' (only populated for geopolitical_signal rows Stage C has tagged)"),
-    corroborated: bool | None = Query(default=None, description="Filter by metadata.corroborated (only populated for geopolitical_signal rows Stage D has graded)"),
+    channel: str | None = Query(default=None, description="Filter by metadata.channel: 'energy', 'trade', 'sanctions', 'shipping', 'conflict', 'subsidies', 'regulation' or 'diplomacy' (geopolitical_signal rows only; null when the article is not geopolitical)"),
+    grade: str | None = Query(default=None, deprecated=True, include_in_schema=False, description="REMOVED. Stage D no longer grades rows - its three checks had all collapsed against the real two-source pool (see pipeline/geopolitical_signal_stage_d.py). Passing this returns 400 rather than silently ignoring it, because an ignored filter returns EVERY row and reads as a successful broad query."),
+    corroborated: bool | None = Query(default=None, description="Filter by whether other outlets reported the same event (Stage D's metadata.corroboration.count > 0); true = at least one sibling outlet, false = the story stands alone"),
+    event_location: str | None = Query(default=None, description="Filter by metadata.event_location, case-insensitive substring - 'Hormuz' matches 'Strait of Hormuz'. Null on legal instruments (a sanctions designation happens in no place), so this excludes most sanctions rows"),
+    coverage: str | None = Query(default=None, description="Filter by metadata.coverage: 'outside_coverage' (read it, sectors not in this universe) or 'unreadable' (no text). ABSENT on rows whose impacted_categories are populated - there is no 'mapped' value"),
     published_from: str | None = Query(default=None, description="Filter to rows with published >= this date (YYYY-MM-DD), inclusive"),
     published_to: str | None = Query(default=None, description="Filter to rows with published <= this date (YYYY-MM-DD), inclusive"),
     macro_series: str | None = Query(default=None, description="Filter to macro_signal rows involving this series_id, e.g. 'DGS10' - matches either an interpreted event's member_series or a suppressed/audit row's own series_id"),
@@ -42,7 +44,21 @@ async def get_all_results(
     caller: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Return paginated classification results across all jobs, newest first."""
-    return list_all_results(limit=limit, cursor=cursor, signal_detection=signal_detection, source_type=source_type, ticker=ticker, code=code, period=period, source_category=source_category, grade=grade, impacted_category=impacted_category, impacted_ticker=impacted_ticker, channel=channel, corroborated=corroborated, published_from=published_from, published_to=published_to, macro_series=macro_series, macro_suspect=macro_suspect, macro_interpreted_only=macro_interpreted_only)
+    # An unknown query param is IGNORED by FastAPI, so a caller still
+    # sending ?grade=TOP would get every row back and read it as a
+    # successful broad query - worse than the empty result it used to
+    # get. Rejected explicitly instead, naming what replaced it.
+    if grade is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The 'grade' filter has been removed: Stage D no longer"
+                " grades geopolitical_signal rows. Use 'corroborated' for"
+                " whether other outlets reported the same event, or read"
+                " metadata.corroboration.count directly."
+            ),
+        )
+    return list_all_results(limit=limit, cursor=cursor, signal_detection=signal_detection, source_type=source_type, ticker=ticker, code=code, period=period, source_category=source_category, impacted_category=impacted_category, impacted_ticker=impacted_ticker, channel=channel, corroborated=corroborated, event_location=event_location, coverage=coverage, published_from=published_from, published_to=published_to, macro_series=macro_series, macro_suspect=macro_suspect, macro_interpreted_only=macro_interpreted_only)
 
 
 @router.get("/korea-signals/summary")
@@ -292,11 +308,13 @@ async def get_job_results(
     ticker: str | None = Query(default=None, description="Filter by ticker (only populated for source_type='sec_filing' today)"),
     period: str | None = Query(default=None, description="Filter by metadata.period_gregorian, e.g. '2026-07' (only populated for taiwan_market_signal mops_revenue rows)"),
     source_category: str | None = Query(default=None, description="Filter by metadata.source_category, e.g. 'mops_revenue', 'mops_material', 'gdelt' (only populated for taiwan_market_signal rows)"),
-    grade: str | None = Query(default=None, description="Filter by metadata.grade: 'TOP', 'STRONG', or 'STANDARD' (only populated for geopolitical_signal rows Stage D has graded)"),
     impacted_category: str | None = Query(default=None, description="Filter to rows whose metadata.impacted_categories includes this exact category name, e.g. 'Semiconductor Manufacturing' (only populated for geopolitical_signal rows Stage C has tagged)"),
     impacted_ticker: str | None = Query(default=None, description="Filter to rows whose entities_json includes this ticker, e.g. 'NVDA' - the companies the article itself names, each stored with the reason the text gives (only populated for geopolitical_signal rows Stage C has tagged; case-insensitive)"),
-    channel: str | None = Query(default=None, description="Filter by metadata.channel: 'energy', 'trade', 'sanctions', 'shipping', or 'conflict' (only populated for geopolitical_signal rows Stage C has tagged)"),
-    corroborated: bool | None = Query(default=None, description="Filter by metadata.corroborated (only populated for geopolitical_signal rows Stage D has graded)"),
+    channel: str | None = Query(default=None, description="Filter by metadata.channel: 'energy', 'trade', 'sanctions', 'shipping', 'conflict', 'subsidies', 'regulation' or 'diplomacy' (geopolitical_signal rows only; null when the article is not geopolitical)"),
+    grade: str | None = Query(default=None, deprecated=True, include_in_schema=False, description="REMOVED. Stage D no longer grades rows - its three checks had all collapsed against the real two-source pool (see pipeline/geopolitical_signal_stage_d.py). Passing this returns 400 rather than silently ignoring it, because an ignored filter returns EVERY row and reads as a successful broad query."),
+    corroborated: bool | None = Query(default=None, description="Filter by whether other outlets reported the same event (Stage D's metadata.corroboration.count > 0); true = at least one sibling outlet, false = the story stands alone"),
+    event_location: str | None = Query(default=None, description="Filter by metadata.event_location, case-insensitive substring - 'Hormuz' matches 'Strait of Hormuz'. Null on legal instruments (a sanctions designation happens in no place), so this excludes most sanctions rows"),
+    coverage: str | None = Query(default=None, description="Filter by metadata.coverage: 'outside_coverage' (read it, sectors not in this universe) or 'unreadable' (no text). ABSENT on rows whose impacted_categories are populated - there is no 'mapped' value"),
     published_from: str | None = Query(default=None, description="Filter to rows with published >= this date (YYYY-MM-DD), inclusive"),
     published_to: str | None = Query(default=None, description="Filter to rows with published <= this date (YYYY-MM-DD), inclusive"),
     macro_series: str | None = Query(default=None, description="Filter to macro_signal rows involving this series_id, e.g. 'DGS10' - matches either an interpreted event's member_series or a suppressed/audit row's own series_id"),
@@ -307,4 +325,18 @@ async def get_job_results(
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return list_results(job_id=job_id, limit=limit, cursor=cursor, signal_detection=signal_detection, source_type=source_type, ticker=ticker, period=period, source_category=source_category, grade=grade, impacted_category=impacted_category, impacted_ticker=impacted_ticker, channel=channel, corroborated=corroborated, published_from=published_from, published_to=published_to, macro_series=macro_series, macro_suspect=macro_suspect, macro_interpreted_only=macro_interpreted_only)
+    # An unknown query param is IGNORED by FastAPI, so a caller still
+    # sending ?grade=TOP would get every row back and read it as a
+    # successful broad query - worse than the empty result it used to
+    # get. Rejected explicitly instead, naming what replaced it.
+    if grade is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The 'grade' filter has been removed: Stage D no longer"
+                " grades geopolitical_signal rows. Use 'corroborated' for"
+                " whether other outlets reported the same event, or read"
+                " metadata.corroboration.count directly."
+            ),
+        )
+    return list_results(job_id=job_id, limit=limit, cursor=cursor, signal_detection=signal_detection, source_type=source_type, ticker=ticker, period=period, source_category=source_category, impacted_category=impacted_category, impacted_ticker=impacted_ticker, channel=channel, corroborated=corroborated, event_location=event_location, coverage=coverage, published_from=published_from, published_to=published_to, macro_series=macro_series, macro_suspect=macro_suspect, macro_interpreted_only=macro_interpreted_only)

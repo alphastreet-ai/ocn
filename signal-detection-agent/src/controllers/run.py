@@ -20,6 +20,7 @@ from adapters.news_client import (
     trigger_macro_fetch,
     trigger_run,
     fetch_china_revenue_history,
+    fetch_taiwan_revenue_history,
 )
 from models.geopolitical_signal_companies import get_companies_for_name_matching
 from models.jobs import (
@@ -33,7 +34,9 @@ from models.jobs import (
     get_existing_korea_signal_source_ids,
     get_existing_macro_signal_source_ids,
     get_existing_taiwan_source_ids,
-    get_taiwan_revenue_rows_for_periods,
+    get_taiwan_recent_remarks,
+    get_taiwan_remark_translations,
+    get_geopolitical_signal_event_members,
     get_ungraded_geopolitical_signal_tagged_articles,
     get_untagged_geopolitical_signal_high_articles,
     get_waiting_geopolitical_signal_articles,
@@ -46,11 +49,14 @@ from models.jobs import (
     list_all_results,
     list_macro_signal_events_for_confirmation_recheck,
     mark_macro_signal_event_suppressed,
+    apply_geopolitical_signal_story,
+    clear_geopolitical_signal_story_fields,
+    collapse_geopolitical_signal_event_group,
+    get_geopolitical_signal_story_candidates,
     update_geopolitical_signal_classification,
     update_geopolitical_signal_stage_c_tags,
     update_geopolitical_signal_stage_d_grade,
     update_job_status,
-    update_taiwan_revenue_rank,
 )
 from models.japan_company_habits import get_all_habits, replace_habits
 from models.japan_company_reference import get_all_company_reference, replace_company_reference
@@ -59,13 +65,20 @@ from pipeline.classifier import has_usable_body
 from pipeline.dispatch import get_domain_config, known_domains
 from pipeline.geopolitical_signal_classifier import classify_geopolitical_signal_stage_a
 from pipeline.geopolitical_signal_layer1 import find_direct_company_matches
-from pipeline.geopolitical_signal_layer2 import classify_geopolitical_signal_tags
+from pipeline.geopolitical_signal_layer2 import (
+    classify_geopolitical_signal_tags,
+    resolve_against_universe,
+)
 from pipeline.geopolitical_signal_overrides import apply_overrides
 from pipeline.geopolitical_signal_stage_b import (
     classify_geopolitical_signal_headline,
     load_stage_b_prompt,
 )
-from pipeline.geopolitical_signal_stage_d import grade_geopolitical_signal_article
+from pipeline.geopolitical_signal_stage_d import build_corroboration
+from pipeline.geopolitical_signal_stage_e import (
+    build_stories,
+    story_development,
+)
 from pipeline.japan_signal_classifier import (
     _article_published_dt,
     classify_japan_signal_batch,
@@ -108,7 +121,11 @@ from pipeline.macro_signal_thresholds import (
     tier_series_move,
 )
 from pipeline.macro_signal_zscore import compute_daily_changes, compute_series_zscores
-from pipeline.taiwan_signal_classifier import classify_taiwan_signal_batch
+from pipeline.taiwan_signal_classifier import (
+    build_revenue_history,
+    classify_taiwan_signal_batch,
+    taiwan_source_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,28 +180,6 @@ async def submit_run(
     return job_id, news_run_id, False
 
 
-def _is_period_in_active_filing_window(period_gregorian: str) -> bool:
-    """A revenue period is only re-ranked against newly-arrived stragglers
-    while it's the current or previous calendar month (UTC) - TWSE/TPEx
-    monthly filings land within roughly the first 2-3 weeks after
-    month-end, so anything older than that is treated as closed: no more
-    re-ranking, no more update_taiwan_revenue_rank calls for it, ever.
-
-    This bounds how long a stored row can change after the fact to a
-    known, short window, rather than every row being mutable forever -
-    the tradeoff decided over rank correctness vs. mutable history: fix
-    the field size while filings are still trickling in for a period, but
-    don't reopen a period that's long since settled.
-    """
-    try:
-        period = datetime.strptime(period_gregorian, "%Y-%m").replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return False
-    today = datetime.now(timezone.utc)
-    months_diff = (today.year - period.year) * 12 + (today.month - period.month)
-    return 0 <= months_diff <= 1
-
-
 async def run_taiwan_signal_classification(job_id: int, from_date: str, to_date: str) -> None:
     """Classify taiwan_market_signal items across ALL of news-retrieval's
     completed runs in [from_date, to_date] - not just the latest run.
@@ -203,16 +198,15 @@ async def run_taiwan_signal_classification(job_id: int, from_date: str, to_date:
     appear in multiple news-retrieval runs (re-fetched, not yet superseded)
     and must still only be classified once.
 
-    Revenue ranking is period-scoped, not just today's-batch-scoped: for
-    every mops_revenue period present in today's pooled articles, this
-    also pulls the already-stored rows for that period (if it's still in
-    the active filing window - see _is_period_in_active_filing_window) as
-    read-only ranking context, so a late-arriving filing gets ranked
-    against the true known field instead of just itself. Any already-
-    stored row whose rank/signal changes as a result is updated in place
-    via update_taiwan_revenue_rank - see that function and
-    rank_revenue_by_yoy's docstrings for why this is the one place
-    taiwan_market_signal data is allowed to change after insert.
+    Every item is judged on its own (revenue against its own company's
+    stored history, not against the other companies), so already-stored
+    items are filtered out BEFORE classifying - nothing is re-translated or
+    re-scored, and a filing is labelled in the run it arrives in. Stored
+    rows are never changed after insert.
+
+    Revenue needs the company history from news-retrieval. If it cannot
+    be read, revenue items are skipped for this run (not stored as
+    unscorable) and the next run retries them.
     """
     update_job_status(job_id, "running")
     try:
@@ -238,36 +232,41 @@ async def run_taiwan_signal_classification(job_id: int, from_date: str, to_date:
         update_job_status(job_id, "completed", article_count=0, set_completed_at=True)
         return
 
-    revenue_periods = {
-        a["metadata"]["period_gregorian"]
-        for a in all_articles
-        if (a.get("metadata") or {}).get("source_category") == "mops_revenue"
-        and a["metadata"].get("period_gregorian")
-    }
-    active_periods = [p for p in revenue_periods if _is_period_in_active_filing_window(p)]
-    revenue_context = get_taiwan_revenue_rows_for_periods(active_periods)
-    # get_taiwan_revenue_rows_for_periods returns {id, source_id, metadata}
-    # rows shaped for the DB, not news-retrieval's article shape -
-    # rank_revenue_by_yoy only ever reads/writes article["metadata"], so a
-    # thin wrapper is enough; "id" being present is how it tells a context
-    # row apart from a freshly-fetched article (see its docstring).
-    context_wrapped = [
-        {"id": r["id"], "source_id": r["source_id"], "metadata": r["metadata"]}
-        for r in revenue_context
-    ]
+    already_done = get_existing_taiwan_source_ids(
+        [sid for a in all_articles if (sid := taiwan_source_id(a))])
+    pending = [a for a in all_articles if taiwan_source_id(a) not in already_done]
 
-    # Rank/classify/translate needs the FULL pooled set together (ranking
-    # spans all tickers for a period), so this runs before the
-    # already-classified filter below - filtering first would rank against
-    # a partial set and produce wrong ranks, same reasoning as
-    # news-retrieval's original per-poll ranking gap.
-    classified, changed_context = classify_taiwan_signal_batch(
-        all_articles, revenue_context=context_wrapped,
+    def _is_revenue(a: dict[str, Any]) -> bool:
+        return (a.get("metadata") or {}).get("source_category") == "mops_revenue"
+
+    revenue_history: dict[str, Any] = {}
+    remark_translations: dict[str, str] = {}
+    past_remarks: list[dict[str, Any]] = []
+    revenue_pending = [a for a in pending if _is_revenue(a)]
+    if revenue_pending:
+        rows = await fetch_taiwan_revenue_history()
+        if rows is None:
+            logger.error(
+                "[TAIWAN_SIGNAL] job=%d revenue history unavailable - skipping"
+                " %d revenue filing(s) this run", job_id, len(revenue_pending))
+            pending = [a for a in pending if not _is_revenue(a)]
+        else:
+            revenue_history = build_revenue_history(rows)
+            remark_translations = get_taiwan_remark_translations(
+                [r for a in revenue_pending if (r := a["metadata"].get("remarks"))])
+            periods = sorted(p for a in revenue_pending if (p := a["metadata"].get("period_gregorian")))
+            if periods:
+                year, month = periods[0].split("-")  # 12 months before the earliest filing
+                past_remarks = get_taiwan_recent_remarks(
+                    [a["metadata"].get("ticker") for a in revenue_pending],
+                    f"{int(year) - 1}-{month}")
+
+    to_insert = classify_taiwan_signal_batch(
+        pending,
+        revenue_history=revenue_history,
+        known_remark_translations=remark_translations,
+        past_remarks=past_remarks,
     )
-
-    candidate_source_ids = [c["result"]["source_id"] for c in classified]
-    already_done = get_existing_taiwan_source_ids(candidate_source_ids)
-    to_insert = [c for c in classified if c["result"]["source_id"] not in already_done]
 
     update_job_status(job_id, "running", article_count=len(to_insert))
 
@@ -283,29 +282,11 @@ async def run_taiwan_signal_classification(job_id: int, from_date: str, to_date:
                 c["result"]["source_id"], job_id,
             )
 
-    revised = 0
-    for row in changed_context:
-        meta = row["metadata"]
-        try:
-            update_taiwan_revenue_rank(
-                row["source_id"],
-                revenue_rank_signal=meta["revenue_rank_signal"],
-                signal_reason=meta["revenue_rank_reason"],
-                metadata=meta,
-            )
-            revised += 1
-        except Exception:
-            logger.exception(
-                "Failed to update revised taiwan_market_signal rank for"
-                " source_id=%s (job %d)",
-                row["source_id"], job_id,
-            )
-
     logger.info(
-        "[TAIWAN_SIGNAL] job=%d runs=%d pooled_articles=%d classified=%d"
-        " already_done=%d inserted=%d revenue_context=%d revised=%d",
-        job_id, len(run_ids), len(all_articles), len(classified),
-        len(already_done), inserted, len(context_wrapped), revised,
+        "[TAIWAN_SIGNAL] job=%d runs=%d pooled_articles=%d already_done=%d"
+        " classified=%d inserted=%d",
+        job_id, len(run_ids), len(all_articles), len(already_done),
+        len(to_insert), inserted,
     )
     update_job_status(job_id, "completed", article_count=inserted, set_completed_at=True)
 
@@ -918,12 +899,9 @@ async def run_korea_signal_classification(job_id: int, from_date: str, to_date: 
     this domain every 4 hours, so a multi-day window or a slow day can
     still span more than one completed run).
 
-    Simpler than the Taiwan controller: no revenue-context re-ranking step
-    (see classify_korea_signal_batch's own docstring - no Korea signal
-    type judges an article against a field of peers the way Taiwan's YoY
-    ranking does), so this is pool -> classify -> dedup -> insert, no
-    "changed_context" second return value or update_taiwan_revenue_rank
-    equivalent.
+    No Korea signal type judges an article against a field of peers (see
+    classify_korea_signal_batch's own docstring), so this is pool ->
+    classify -> dedup -> insert.
 
     Only inserts items not already classified - checked via
     get_existing_korea_signal_source_ids against the source_id
@@ -1626,6 +1604,15 @@ async def run_geopolitical_signal_stage_a(job_id: int, from_date: str, to_date: 
     update_job_status(job_id, "completed", article_count=inserted, set_completed_at=True)
 
 
+def _outlet_from_url(url: str | None) -> str:
+    """The publisher's own domain, which is what identifies a source to
+    a reader. Same derivation news-retrieval uses when it records a
+    dropped duplicate, so both kinds of coverage entry read alike.
+    """
+    host = (url or "").split("://", 1)[-1].split("/", 1)[0].strip().lower()
+    return host[4:] if host.startswith("www.") else host
+
+
 async def run_geopolitical_signal_stage_b(job_id: int) -> None:
     """Stage B: one Haiku-class HIGH/WEAK call per Stage A survivor
     (signal_detection='waiting'), update each row in place. Rows are
@@ -1668,10 +1655,65 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
         update_job_status(job_id, "completed", article_count=0, set_completed_at=True)
         return
 
+    # Group by the supplier's own event id BEFORE spending calls. Seven
+    # outlets reporting one UN Security Council vote on Haiti sanctions
+    # is one event and one verdict, not seven - and they are not
+    # duplicates that could simply be dropped: each carries a different
+    # fact ("adds no new names", "with Russia abstaining", "aim to
+    # starve gangs of bullets"), so every row is kept and every row
+    # gets the group's verdict.
+    #
+    # One member is judged, on the fullest text in the group, because a
+    # verdict reached on 4,000 characters is better than the same
+    # verdict reached on a 300-character wire brief covering the same
+    # vote. The rest inherit it.
+    #
+    # Rows with no event_uri - a single-source story, or any source that
+    # supplies no clustering - are their own group of one, so this
+    # changes nothing for them.
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in waiting:
+        key = row.get("event_uri") or f"solo:{row['id']}"
+        groups.setdefault(key, []).append(row)
+
+    def _best_evidence(members: list[dict[str, Any]]) -> dict[str, Any]:
+        """Which member of an event group Stage B reads: the fullest one.
+
+        A talk-verb preference was tried here and removed - it cannot
+        fire. Stage A already short-circuits every talk-verb headline to
+        weak_signal before Stage B runs, so by the time a group is
+        formed no member can carry one, and the rule ranked all three
+        articles of the real ICC cluster identically.
+
+        That cluster is worth recording anyway, because it is the case
+        this choice cannot solve: "U.S. Sanctions ICC" (signal) and
+        "European states, Canada and Japan back ICC" (weak_signal alone)
+        share one event_uri and are both 2,500 characters. Neither
+        length nor any keyword separates the article reporting the
+        action from the one reporting reactions to it - only reading
+        them does, which is what judging every article used to do.
+
+        So length is the honest rule: more text is a better-evidenced
+        verdict, which is what settles the Iranian tanker cluster (five
+        articles, 303 to 1,962 characters, and both shortest were judged
+        weak_signal when read alone). The residual risk is the ICC
+        shape, measured at 1 of 21 clusters, and it is bounded by the
+        promotion rule below - if any member is judged signal, the
+        group is a signal.
+        """
+        return max(
+            members,
+            key=lambda r: len(r.get("body") or "") + len(r.get("summary") or ""),
+        )
+
     already_today = count_geopolitical_signal_stage_b_calls_today()
     remaining_cap = max(0, config.GEOPOLITICAL_SIGNAL_STAGE_B_DAILY_CAP - already_today)
-    to_classify = waiting[:remaining_cap]
-    capped = len(waiting) - len(to_classify)
+    # The cap counts MODEL CALLS, which is now one per group.
+    group_keys = list(groups)[:remaining_cap]
+    to_classify = [_best_evidence(groups[k]) for k in group_keys]
+    followers = {k: groups[k] for k in group_keys}
+    capped = len(groups) - len(group_keys)
+    grouped_away = len(waiting) - len(groups)
 
     update_job_status(job_id, "running", article_count=len(to_classify))
 
@@ -1688,8 +1730,19 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
     semaphore = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
     loop = asyncio.get_event_loop()
 
-    async def classify_one(row: dict[str, Any]) -> str | None:
-        """Classify + persist one row; returns its outcome, or None on failure."""
+    async def classify_one(row: dict[str, Any]) -> tuple[str, str | None] | None:
+        """Classify + persist one row; returns (outcome, reason), or None on
+        failure.
+
+        The REASON is returned alongside the outcome, not just the
+        outcome, because the siblings of an event group need it: a row
+        that inherits a verdict used to be given only the provenance
+        ("Same event as X"), which says how the verdict arrived and
+        never why it was reached. A reader opening one of six inherited
+        rows got no account of what happened - they had to find the
+        judged row to learn that two ships had been sunk. Every member
+        of a group now carries this sentence and nothing else.
+        """
         async with semaphore:
             # Both come from the row Stage A already wrote - no fetch
             # here. news-retrieval sends the body with the article
@@ -1707,15 +1760,19 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
             # Stage C read the whole thing. Stage B makes the
             # irreversible call, so it gets at least as much evidence as
             # the stage that merely tags.
-            body = row.get("body_excerpt")
-            # Recorded so a WEAK verdict reached without any text is
-            # distinguishable from one reached by reading the article.
-            # Stage B is irreversible - a WEAK row never reaches Stage C
-            # - so a headline-only rejection is the one failure nothing
-            # downstream can revisit. The EU-China trade item was
-            # rejected this way: bloomberg.com serves no body to any
-            # fetch strategy, so the model saw a truncated title and
-            # nothing else.
+            body = row.get("body")
+            # Recorded so a verdict reached with no article text stays
+            # distinguishable from one reached by reading the document.
+            # Stage B is irreversible - a weak_signal row never reaches
+            # Stage C - so this is the one failure nothing downstream
+            # can revisit.
+            #
+            # Both sources deliver a body on every row, so this now
+            # fires for a different reason than it used to: a body
+            # news-retrieval REJECTED as unreadable. Event Registry
+            # serves its own crawl of a publisher's page, and one row in
+            # 325 arrived column-interleaved - stored as NULL rather
+            # than as 5,220 characters of noise.
             headline_only = not summary and not body
             outcome, reason = await loop.run_in_executor(
                 _executor,
@@ -1735,7 +1792,7 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
                     row["id"], outcome=outcome, reason=reason,
                     headline_only=headline_only,
                 )
-                return outcome
+                return outcome, reason
             except Exception:
                 logger.exception(
                     "Failed to update geopolitical_signal Stage B result for"
@@ -1747,16 +1804,57 @@ async def run_geopolitical_signal_stage_b(job_id: int) -> None:
     outcomes = await asyncio.gather(*[classify_one(row) for row in to_classify])
     outcome_counts: dict[str, int] = {"signal": 0, "weak_signal": 0, "noise": 0}
     updated = 0
-    for outcome in outcomes:
-        if outcome is not None:
-            outcome_counts[outcome] += 1
-            updated += 1
+    inherited = 0
+    for key, result in zip(group_keys, outcomes):
+        if result is None:
+            continue
+        outcome, judged_reason = result
+        outcome_counts[outcome] += 1
+        updated += 1
+        # One row per event. The other members of this group are folded
+        # into the judged row as coverage - {outlet, title, url} on its
+        # metadata.also_reported_by, which Stage D merges into
+        # metadata.corroboration - and then DELETED.
+        #
+        # They used to be kept, each carrying a copy of this row's
+        # verdict and reason, which stored one verdict in several places
+        # and showed a reader four rows for one Strait of Hormuz
+        # sinking. Their headlines survive on the judged row, which is
+        # the part worth keeping: the variance across a cluster is
+        # itself information.
+        #
+        # See collapse_geopolitical_signal_event_group for what this
+        # discards and why it cannot be undone.
+        judged = to_classify[group_keys.index(key)]
+        siblings = [r for r in followers[key] if r["id"] != judged["id"]]
+        if siblings:
+            try:
+                inherited += collapse_geopolitical_signal_event_group(
+                    judged["id"],
+                    [
+                        {
+                            "id": s["id"],
+                            "title": s.get("title"),
+                            "url": s.get("url"),
+                            "outlet": _outlet_from_url(s.get("url")),
+                        }
+                        for s in siblings
+                    ],
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to collapse geopolitical_signal event group"
+                    " judged_row=%s members=%d (job %d)",
+                    judged["id"], len(siblings), job_id,
+                )
 
     logger.info(
-        "[GEOPOLITICAL_SIGNAL_STAGE_B] job=%d waiting=%d already_today=%d"
-        " capped=%d classified=%d updated=%d signal=%d weak_signal=%d noise=%d",
-        job_id, len(waiting), already_today, capped, len(to_classify),
-        updated, outcome_counts["signal"], outcome_counts["weak_signal"],
+        "[GEOPOLITICAL_SIGNAL_STAGE_B] job=%d waiting=%d events=%d"
+        " grouped_away=%d already_today=%d capped=%d classified=%d"
+        " updated=%d inherited=%d signal=%d weak_signal=%d noise=%d",
+        job_id, len(waiting), len(groups), grouped_away, already_today,
+        capped, len(to_classify), updated, inherited,
+        outcome_counts["signal"], outcome_counts["weak_signal"],
         outcome_counts["noise"],
     )
     update_job_status(job_id, "completed", article_count=updated, set_completed_at=True)
@@ -1776,16 +1874,25 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
     same pool as Stage B and the news domain), not one at a time - each
     row's flow above runs as a single unit in the shared thread pool.
 
-    Stage C's row data (title only) comes entirely from this table
-    (get_untagged_geopolitical_signal_high_articles); body text is fetched
-    per article from news-retrieval (get_article) so Layer 2 isn't judging
-    off a headline alone - a terse headline often omits the specific
-    goods/sector the prompt's own empty-impacted_categories rule requires.
-    That fetch fails open to headline-only (None body) if the article has
-    since expired from news-retrieval's 7-day geopolitical_news retention,
-    or the request otherwise fails - a missing body must never drop or
-    fail the row, same fail-open discipline as Layer 2's own model-call
-    handling. Layer 1's company list is loaded ONCE for the whole run, not
+    Stage C's row data - title, published, body and summary - comes
+    entirely from this table (get_untagged_geopolitical_signal_high_
+    articles), with NO per-article fetch from news-retrieval. Stage A
+    stores the whole body under metadata.body and both reading stages
+    slice it themselves, so Layer 2 isn't judging off a headline alone -
+    a terse headline often omits the specific goods/sector the prompt's
+    own empty-impacted_categories rule requires.
+
+    This stage used to re-fetch each article with get_article. That cost
+    one HTTP round-trip per row for text already stored here, and it
+    fails open to headline-only whenever the article has expired from
+    news-retrieval's 7-day geopolitical_news retention - so the rows
+    most worth describing were the ones most likely to arrive bare.
+    Measured on job 1449: 3 of 63 rows were tagged
+    `coverage: unreadable` and produced ZERO entities while holding a
+    stored body averaging 3,830 characters. A row with no body at all
+    still degrades to headline-only rather than failing, the same
+    fail-open discipline as Layer 2's own model-call handling.
+    Layer 1's company list is loaded ONCE for the whole run, not
     once per article (see get_companies_for_name_matching's docstring) -
     this was a deliberate fix during design review, not the naive
     per-article refetch the original plan implied.
@@ -1856,6 +1963,18 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
             timeout=timeout,
         )
 
+        # Resolve company entities against the tracked universe before
+        # anything reads them: the universe's own name and ticker win
+        # where it matches, so one company reads identically on every
+        # row, and a ticker the model left null is recovered (measured:
+        # "MP Materials" resolved to MP, which no ticker-based reader
+        # could otherwise have found). `companies` is the same list
+        # Layer 1 already loaded once for this whole run, so this costs
+        # no extra query.
+        layer2_result["entities"] = resolve_against_universe(
+            layer2_result["entities"], companies,
+        )
+
         # Deterministic overrides - only ever add categories.
         final_categories = apply_overrides(
             channel=layer2_result["channel"],
@@ -1887,6 +2006,12 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
             # Register notice is the date it appeared in the Register,
             # not the date the determination was issued.
             "event_date": layer2_result["event_date"],
+            # WHERE it physically happened, as the text names it -
+            # paired with event_date above, which says WHEN. Null on a
+            # legal instrument (a sanctions designation happens in no
+            # place) and on anything whose text names no location;
+            # a country where that is the finest the text gives.
+            "event_location": layer2_result["event_location"],
             "channel": layer2_result["channel"],
             "assets": layer2_result["assets"],
             "impacted_categories": final_categories or None,
@@ -1996,22 +2121,25 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
 
     async def tag_one(row: dict[str, Any]) -> dict[str, Any] | None:
         async with semaphore:
-            # get_article is already async (own httpx.AsyncClient per call,
-            # same as Stage D's grade_one) - fetched here, before handing
-            # off to the executor, so the blocking Layer1->Layer3 body
-            # doesn't also have to manage an event loop. None (article
-            # expired/404, or body missing/blank) degrades Layer 2 to
-            # headline-only rather than failing the row.
-            article = await get_article(row["article_id"])
-            body = (article.get("body") or None) if article else None
+            # Both come from the row Stage A already wrote - no fetch
+            # here, same as Stage B. This used to call get_article per
+            # row to re-read text this service already stores, which
+            # cost one HTTP round-trip per row and, worse, failed open
+            # to headline-only whenever news-retrieval had expired the
+            # article (geopolitical_news is a 7-day retention domain).
+            # Measured on job 1449: 3 of 63 rows came back
+            # `coverage: unreadable` with ZERO entities while holding a
+            # stored body averaging 3,830 characters - including an OFAC
+            # Iran sanctions notice naming three institutions. The text
+            # was never missing; nothing read it.
+            body = row.get("body") or None
             # The source's OWN summary, where the fetcher stored one.
             # Federal Register rows carry the document's filed abstract
             # here (news-retrieval maps the API's `abstract` field to
             # `summary`); a generated summary can only ever paraphrase
             # that, so it is preferred verbatim - see _tag_one_sync's
-            # summary/summary_source resolution. Free to read: the
-            # get_article call above is already made for `body`.
-            summary = (article.get("summary") or None) if article else None
+            # summary/summary_source resolution.
+            summary = row.get("summary") or None
             return await loop.run_in_executor(
                 _executor, _tag_one_sync, row, body, summary,
             )
@@ -2028,16 +2156,19 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
 
 
 async def run_geopolitical_signal_stage_d(job_id: int) -> None:
-    """Stage D: grade every Stage-C-tagged HIGH article into TOP/STRONG/
-    STANDARD via three free checks (see pipeline/geopolitical_signal_
-    stage_d.py's module docstring for the exact rules).
+    """Stage D: attach each signal's same-event sibling coverage - which
+    other outlets reported this event, and what they called it.
 
     No model call, no daily cap (unlike Stage B/C - there's no external
-    API cost here to tripwire against), and no news-retrieval call: every
-    input comes from the row Stage A wrote, including
-    metadata.also_reported_by, which arrives with the article and is
-    stored alongside it. This stage used to fetch each article again just
-    to read that one list; nothing else in the response was used.
+    API cost here to tripwire against), and no news-retrieval call: the
+    siblings are rows in this service's own table, written by Stage A,
+    found by grouping on metadata.event_uri.
+
+    This stage used to compute a TOP/STRONG/STANDARD grade from three
+    booleans. All three had collapsed against the real two-source pool
+    and the grade carried no information; see the module docstring in
+    pipeline/geopolitical_signal_stage_d.py for the measurements and
+    for why a rebuilt grade was rejected rather than retuned.
     """
     update_job_status(job_id, "running")
 
@@ -2048,54 +2179,113 @@ async def run_geopolitical_signal_stage_d(job_id: int) -> None:
 
     update_job_status(job_id, "running", article_count=len(ungraded))
 
-    # get_article is already async (its own httpx.AsyncClient per call), and
-    # grade_geopolitical_signal_article is pure/local (no I/O) - no thread
-    # pool needed here, just gather the news-retrieval fetches behind the
-    # same concurrency cap the other stages use.
-    semaphore = asyncio.Semaphore(config.CLASSIFY_CONCURRENCY)
+    # Every cluster for this whole batch in ONE query, before the loop -
+    # clusters overlap (seven signals can share one event), so a per-row
+    # lookup would re-read the same event repeatedly. Same reasoning as
+    # Stage C loading its company list once per run.
+    event_uris = sorted({r["event_uri"] for r in ungraded if r.get("event_uri")})
+    clusters = get_geopolitical_signal_event_members(event_uris)
 
-    async def grade_one(row: dict[str, Any]) -> bool:
-        async with semaphore:
-            # From the row Stage A wrote - no fetch. also_reported_by
-            # arrives with the article (news-retrieval's own dedup
-            # records it in metadata), so re-reading the whole article
-            # per row to extract this one list was a round trip for
-            # data the service already held.
-            also_reported_by = row.get("also_reported_by")
-
-            grade_fields = grade_geopolitical_signal_article(
-                url=row["url"],
-                title=row["title"],
-                also_reported_by=also_reported_by,
-                # "specific" asks whether the item is about something
-                # concrete. A named company is the clearest evidence of
-                # that, and the entities Stage C extracted from the
-                # headline AND body are a far better source for it than
-                # the headline-only match this read before - which was
-                # null on every geopolitical row, making the check
-                # effectively digit-only.
-                named_entities=_json_list(row.get("entities_json")),
+    # No semaphore, no executor, no gather. This stage makes no model
+    # call and no network call - it reads rows this service already has
+    # and writes them back - so the async scaffolding the other stages
+    # need would only add machinery around two synchronous queries.
+    graded = 0
+    with_siblings = 0
+    for row in ungraded:
+        corroboration = build_corroboration(
+            event_uri=row.get("event_uri"),
+            row_id=row["id"],
+            cluster=clusters.get(row.get("event_uri") or ""),
+            # The second source: what news-retrieval's own dedup
+            # discarded as near-duplicates of this article. Ten of 87
+            # signals carry this and no event_uri, and reported no
+            # coverage at all until Stage D read it.
+            also_reported_by=_json_list(row.get("also_reported_by")),
+            # This row's own url, so an entry naming the article itself
+            # is never counted as another outlet covering it.
+            self_url=row.get("url"),
+        )
+        try:
+            update_geopolitical_signal_stage_d_grade(
+                row["id"], grade_fields={"corroboration": corroboration},
+            )
+            graded += 1
+            if corroboration["count"]:
+                with_siblings += 1
+        except Exception:
+            logger.exception(
+                "Failed to update geopolitical_signal Stage D corroboration"
+                " for row id=%s article_id=%s (job %d)",
+                row["id"], row.get("article_id"), job_id,
             )
 
-            try:
-                update_geopolitical_signal_stage_d_grade(row["id"], grade_fields=grade_fields)
-                return True
-            except Exception:
-                logger.exception(
-                    "Failed to update geopolitical_signal Stage D grade for"
-                    " row id=%s article_id=%s (job %d)",
-                    row["id"], row.get("article_id"), job_id,
-                )
-                return False
-
-    outcomes = await asyncio.gather(*[grade_one(row) for row in ungraded])
-    graded = sum(outcomes)
-
     logger.info(
-        "[GEOPOLITICAL_SIGNAL_STAGE_D] job=%d ungraded=%d graded=%d",
-        job_id, len(ungraded), graded,
+        "[GEOPOLITICAL_SIGNAL_STAGE_D] job=%d ungraded=%d updated=%d"
+        " events=%d with_siblings=%d alone=%d",
+        job_id, len(ungraded), graded, len(event_uris),
+        with_siblings, graded - with_siblings,
     )
     update_job_status(job_id, "completed", article_count=graded, set_completed_at=True)
+
+
+async def run_geopolitical_signal_stage_e(job_id: int) -> None:
+    """Stage E: group signals that belong to one developing STORY.
+
+    No model call and no network call - the evidence is the entities
+    Stage C already verified against the article text.
+
+    Stage D asked who else reported the same EVENT. This asks whether
+    two different events belong to one situation: a mine strike, a
+    blockade and a Treasury designation can be three real events and
+    still read as one Strait of Hormuz story to anyone scrolling.
+
+    Nothing is deleted. The seed row gets metadata.story_development
+    and the others metadata.in_story, so one row per story is a filter
+    the caller applies:
+
+        signal_detection = 'signal' AND NOT (metadata ? 'in_story')
+
+    See pipeline/geopolitical_signal_stage_e.py for why grouping must
+    not delete here where Stage B's collapse safely does.
+
+    Idempotent by REWRITING, not by skipping: both keys are cleared
+    first and every story regrouped. Grouping is a property of the
+    whole set, so a row arriving later can change which story an
+    existing row belongs to - skipping already-done rows would leave a
+    stale pointer hiding a row from the default view permanently.
+    """
+    rows = get_geopolitical_signal_story_candidates()
+    cleared = clear_geopolitical_signal_story_fields()
+
+    stories = build_stories(rows)
+
+    grouped = members_total = 0
+    for story in stories:
+        seed = story["seed"]
+        member_ids = [m["row"]["id"] for m in story["members"]]
+        try:
+            apply_geopolitical_signal_story(
+                seed["id"],
+                development=story_development(story),
+                member_ids=member_ids,
+            )
+            grouped += 1
+            members_total += len(member_ids)
+        except Exception:
+            logger.exception(
+                "Failed to apply story grouping seed=%s members=%d (job %d)",
+                seed["id"], len(member_ids), job_id,
+            )
+
+    logger.info(
+        "[GEOPOLITICAL_SIGNAL_STAGE_E] job=%d signals=%d cleared=%d"
+        " stories=%d absorbed=%d visible=%d",
+        job_id, len(rows), cleared, grouped, members_total,
+        len(rows) - members_total,
+    )
+    update_job_status(
+        job_id, "completed", article_count=grouped, set_completed_at=True)
 
 
 async def run_agent_pipeline(job_id: int, domain: str, news_run_id: int, limit: int | None = None) -> None:

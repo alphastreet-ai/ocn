@@ -169,6 +169,19 @@ resource "aws_ecs_task_definition" "news_retrieval" {
           valueFrom = "arn:aws:secretsmanager:${var.aws_region}:${var.aws_account_id}:secret:ocn/${var.env}/news-retrieval:NEWSAPI_KEY::"
         },
         {
+          # newsapi.ai / Event Registry. NOT the same key as NEWSAPI_KEY
+          # above (newsapi.org) - different vendor, different account.
+          # Required for the eventregistry source_type, which is one of
+          # the two sources the geopolitical_news domain fetches from
+          # (the other is federal_register). Without it the fetch does
+          # not fail - _fetch_sources logs "EVENT_REGISTRY_API_KEY not
+          # set - skipping N eventregistry source(s)" and carries on, so
+          # the domain silently runs on half its sources. Also used by
+          # middle_east_market_signal's er-me:// rows.
+          name      = "EVENT_REGISTRY_API_KEY"
+          valueFrom = "arn:aws:secretsmanager:${var.aws_region}:${var.aws_account_id}:secret:ocn/${var.env}/news-retrieval:EVENT_REGISTRY_API_KEY::"
+        },
+        {
           name      = "ALPHA_VANTAGE_API_KEY"
           valueFrom = "arn:aws:secretsmanager:${var.aws_region}:${var.aws_account_id}:secret:ocn/${var.env}/news-retrieval:ALPHA_VANTAGE_API_KEY::"
         },
@@ -699,6 +712,42 @@ resource "aws_cloudwatch_event_target" "news_retrieval_japan_market_signal_month
       {
         name    = "news-retrieval"
         command = ["python", "__main__.py", "trigger", "--domain", "japan_market_signal", "--days-back", "31"]
+      }
+    ]
+  })
+}
+
+resource "aws_cloudwatch_event_rule" "news_retrieval_taiwan_revenue_monthly" {
+  name        = "${var.env}-news-retrieval-taiwan-revenue-monthly"
+  description = "Re-read the last 3 months of Taiwan monthly revenue from MOPS CSVs into company_financials"
+  # The daily taiwan_market_signal fetch reads the TWSE/TPEx OpenAPI feeds,
+  # which only ever hold the latest month - a missed poll is otherwise lost
+  # for good. This re-read recovers it and picks up restatements. Filings
+  # are due by the 10th, so on the 15th the previous month is complete;
+  # 3 months back covers a late filer plus a restatement window.
+  schedule_expression = "cron(0 3 15 * ? *)"
+}
+
+resource "aws_cloudwatch_event_target" "news_retrieval_taiwan_revenue_monthly" {
+  rule     = aws_cloudwatch_event_rule.news_retrieval_taiwan_revenue_monthly.name
+  arn      = aws_ecs_cluster.main.arn
+  role_arn = aws_iam_role.ecs_events.arn
+
+  ecs_target {
+    task_definition_arn = "arn:aws:ecs:${var.aws_region}:${var.aws_account_id}:task-definition/${aws_ecs_task_definition.news_retrieval.family}"
+    launch_type         = "FARGATE"
+    network_configuration {
+      subnets          = var.public_subnet_ids
+      security_groups  = [var.news_sg_id]
+      assign_public_ip = true
+    }
+  }
+
+  input = jsonencode({
+    containerOverrides = [
+      {
+        name    = "news-retrieval"
+        command = ["python", "__main__.py", "backfill-taiwan-revenue", "--months-back", "3"]
       }
     ]
   })
@@ -1938,15 +1987,34 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_news_expire_weekl
 }
 
 # geopolitical_signal funnel: Stage A (rule-based) -> Stage B (talk vs
-# action LLM call) -> Stage C (company/category tagging, reads the
-# geopolitical_signal_companies cache). Stages A/B/C are NOT independent
-# jobs - B only acts on rows A just wrote ('waiting'), and C only acts on
-# rows B just wrote ('signal'/HIGH) - so they run as one CLI command
+# action LLM call, the one IRREVERSIBLE verdict - weak_signal/noise never
+# reach a later stage) -> Stage C (channel/actors/assets/category tagging,
+# reads the geopolitical_signal_companies cache) -> Stage D (corroboration
+# grading, no model call). Stages A-D are NOT independent jobs - B only
+# acts on rows A just wrote ('waiting'), C only on rows B just wrote
+# ('signal'/HIGH), D only on rows C tagged - so they run as one CLI command
 # (run-geopolitical-signal-pipeline) inside a single scheduled task rather
-# than three separately-scheduled triggers. Three separate cron rules
-# risked B or C firing before the prior stage's run had actually finished
+# than four separately-scheduled triggers. Separate cron rules risked a
+# later stage firing before the prior stage's run had actually finished
 # (e.g. Stage A running long on a heavy news day); a single sequential
 # command removes that race entirely.
+#
+# Stage E (story grouping - groups signals reporting DIFFERENT events in
+# one developing situation, marking a seed row with
+# metadata.story_development and the rest with metadata.in_story) runs
+# LAST in this same sequence, and also in the webhook path in
+# signal-detection-agent's routes/webhooks.py. Both, not one: every API
+# read of this domain is expected to be post-Stage-E, because the default
+# signals view filters on NOT (metadata ? 'in_story') - if E never ran,
+# that filter would match every row and the reader would see one story
+# repeated under several headlines. Any new trigger path must include it.
+#
+# Unlike A-D it is not scoped to the rows the previous stage just wrote:
+# grouping is a property of the whole signal set, so it reads every
+# Stage-D-graded signal and regroups from scratch, clearing its own two
+# keys first. That makes a second run in the same day safe - which this
+# rule relies on, since it is the fallback for the webhook and both can
+# fire. Measured on the live 57-signal set: a re-run changed 0 of 57 rows.
 #   03:00 - company/category cache refresh (research-universe -> cache
 #            table). Kept on its own schedule, independent of the news
 #            cycle - company/ticker/category data changes rarely, so it
@@ -1954,7 +2022,7 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_news_expire_weekl
 #            before the 05:00 UTC pipeline slot so Stage C's cache read
 #            is never more than ~2 hours stale, and before a first-ever
 #            deploy's first pipeline run so the cache starts populated.
-#   05:00 - Stage A -> Stage B -> Stage C -> Stage D, in sequence, in one
+#   05:00 - Stage A -> B -> C -> D -> E, in sequence, in one
 #            task. This is a FALLBACK, not the primary trigger: the
 #            primary path is news-retrieval's own --callback-url webhook
 #            (news_retrieval_geopolitical_news_daily above passes
@@ -2001,7 +2069,7 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_geopolitical_sign
 
 resource "aws_cloudwatch_event_rule" "signal_detection_agent_geopolitical_signal_pipeline_daily" {
   name                = "${var.env}-signal-detection-agent-geo-signal-pipeline-daily"
-  description         = "geopolitical_signal Stage A -> Stage B -> Stage C, run sequentially in one task"
+  description         = "geopolitical_signal Stage A -> B -> C -> D -> E, run sequentially in one task"
   schedule_expression = "cron(0 5 * * ? *)"
   state               = "ENABLED"
 }

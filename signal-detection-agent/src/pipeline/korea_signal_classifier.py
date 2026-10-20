@@ -1614,7 +1614,15 @@ def _publications_carrying_story(article: dict[str, Any]) -> int:
     also_reported_by = (article.get("metadata") or {}).get("also_reported_by") or []
     domains = {_extract_domain(article.get("url"))}
     for entry in also_reported_by:
-        domain = (entry or "").strip().lower()
+        # Two shapes. Rows written before geopolitical_news needed the
+        # headline carry a bare domain string; rows written after carry
+        # {outlet, title, url}, so the discarded duplicate's own
+        # headline survives rather than only its domain. Both are read
+        # here - this counts outlets, and the outlet is in both shapes.
+        if isinstance(entry, dict):
+            domain = (entry.get("outlet") or "").strip().lower()
+        else:
+            domain = (entry or "").strip().lower()
         if domain.startswith("www."):
             domain = domain[len("www."):]
         if domain:
@@ -2135,13 +2143,10 @@ def classify_export_surprise(
 ) -> list[dict[str, Any]]:
     """Classify kr_customs_export articles per Korea Signals spec Section
     5.1 - the one signal type here that needs real historical context,
-    not just the current batch (same shape as Taiwan's
-    rank_revenue_by_yoy - see that function's own context_articles
-    parameter for the precedent this mirrors).
+    not just the current batch.
 
     ``context_articles``: already-stored kr_customs_export rows (as
-    {"metadata": {...}} dicts - caller's own DB read shape, matching how
-    rank_revenue_by_yoy's own context_articles are documented) covering
+    {"metadata": {...}} dicts - caller's own DB read shape) covering
     at least the last ~13 periods per period_type, so a genuine YoY
     comparison and 12-period average/spread can be computed. Optional -
     omitting it means every article in this batch is classified against
@@ -2344,13 +2349,9 @@ def classify_korea_signal_batch(
     pooled batch of articles read from news-retrieval, translate whatever
     survived, and return one {"article", "result"} dict per classified item
     for insert_korea_signal_classification - same top-level shape as
-    Taiwan's classify_taiwan_signal_batch, minus the revenue re-ranking
-    machinery Korea has no equivalent of (no signal type here needs
-    already-stored context the way rank_revenue_by_yoy's "top 3 of 20"
-    does - every Korea classifier judges each article/filing against
-    fixed thresholds or its own filing body, never against a field of
-    peers), so this returns a plain list, not a (results, changed_context)
-    tuple.
+    Taiwan's classify_taiwan_signal_batch. Every Korea classifier judges
+    each article/filing against fixed thresholds or its own filing body,
+    never against a field of peers, so this returns a plain list.
 
     ``tracked_companies``: caller's own KOREA_TICKER_UNIVERSE-shaped list
     ({"ticker", "company", "korean_name", "group_prefix", "exclude_terms",

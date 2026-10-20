@@ -53,13 +53,24 @@ def load_stage_b_prompt() -> str:
 # cannot turn the cheapest call in the pipeline into the most expensive.
 _MAX_SUMMARY_CHARS = 1200
 
-# Used only when there is no source summary. Far below Stage C's 24,000:
-# this call decides one binary and returns one word, and a government
-# notice or news lead states what it does in its opening paragraphs. The
-# operative facts - who acted, on what, in force or proposed - are at the
-# top of both document types, so a larger window would add tokens on
-# every row without changing many verdicts.
-_MAX_BODY_CHARS = 2500
+# How much article text accompanies the headline. Stage A stores the
+# body WHOLE under metadata.body, so this is the only cap that applies
+# to Stage B and raising it here is sufficient - there is no longer a
+# storage-side limit to keep it in step with. Stage C slices the same
+# stored string at its own 24,000.
+#
+# 8,000. Measured over 265 real stored rows at this cap: mean 3,424,
+# median 2,861, p90 7,007, and 22 rows (8%) long enough to be truncated.
+# The old 2,500 truncated 60% of them. The mean sits well under the cap
+# because most items are short - the ceiling exists for the long tail,
+# not to pad the typical call.
+#
+# Still well below Stage C's 24,000, and deliberately: this call answers
+# one binary question and returns one word, and a government notice or
+# news lead states who acted and whether it is in force in its opening
+# paragraphs. The extra 16,000 characters Stage C reads are for naming
+# goods, entities and dates, which is a different job.
+_MAX_BODY_CHARS = 8000
 
 
 # Written only when the call itself failed, so a reader can tell a
@@ -154,10 +165,44 @@ def classify_geopolitical_signal_headline(
         # is what makes a verdict reviewable, so starving it would save
         # a trivial amount and cost the thing a reader needs.
         "max_tokens": 80,
+        # System prompt FIRST and byte-identical on every call, which is
+        # what makes OpenAI's automatic prompt caching apply. It is not
+        # a micro-optimisation here: the prompt is ~3,450 tokens and the
+        # article averages ~860, so ~80% of every call is the
+        # instructions. Measured live on openai/gpt-4.1 via OpenRouter -
+        # the cache warms after a few calls and then reports
+        # cached_tokens=2944 of 3453, i.e. 85% of the prompt served from
+        # cache at a fraction of the input price.
+        #
+        # This stage's model is config.GEOPOLITICAL_SIGNAL_MODEL, which
+        # defaults to SEC_FILING_MODEL (openai/gpt-4.1 in this
+        # deployment) - NOT SIGNAL_DETECTION_MODEL, which is an
+        # Anthropic model here. That distinction is what makes the
+        # automatic caching below correct: OpenAI models cache a
+        # repeated prefix on their own, Anthropic models on OpenRouter
+        # cache NOTHING without an explicit cache_control breakpoint on
+        # the system block. Verified live: with no breakpoint an
+        # Anthropic model reports cached_tokens=0 on every call, and
+        # with one it reports a ~3,990-token write then a read per call.
+        # So pointing SEC_FILING_MODEL at an Anthropic model silently
+        # ends the discount and nothing errors - the debug line below is
+        # the only thing that would show it.
+        #
+        # Two things keep it working, and both are easy to break:
+        #   - load_stage_b_prompt() reads the file unmodified, so no
+        #     per-call interpolation (a date, a row id) may be added to
+        #     the system message - one changed byte invalidates the
+        #     prefix for every row.
+        #   - the user message stays SECOND, since caching matches a
+        #     prefix; putting the article first would cache nothing.
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
+        # Ask OpenRouter to return token accounting, so a regression -
+        # cached_tokens dropping back to 0 after a prompt edit - is
+        # visible in the logs rather than silent on the bill.
+        "usage": {"include": True},
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -173,6 +218,18 @@ def classify_geopolitical_signal_headline(
         with urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="ignore"))
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        # Cache accounting, at debug level so it is there when wanted
+        # and silent otherwise. A run whose cached count sits at 0 after
+        # the first few calls means the prefix stopped matching - most
+        # likely because something per-row crept into the system
+        # message - and that is a cost regression nothing else reports.
+        usage = data.get("usage") or {}
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        if cached is not None:
+            logger.debug(
+                "[GEOPOLITICAL_SIGNAL_STAGE_B] prompt_tokens=%s cached=%s",
+                usage.get("prompt_tokens"), cached,
+            )
         return _parse_answer(content)
     except Exception as exc:
         logger.warning(

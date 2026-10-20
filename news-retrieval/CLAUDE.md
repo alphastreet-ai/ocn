@@ -45,7 +45,8 @@ news-retrieval/
 │   ├── test_pagination.py
 │   ├── test_webhook.py
 │   ├── test_ownership.py
-│   └── test_pipeline.py
+│   ├── test_pipeline.py
+│   └── test_middle_east.py
 └── src/
     ├── __main__.py       # CLI entry point (uvicorn + click)
     ├── app.py            # FastAPI app factory
@@ -141,7 +142,7 @@ Manual run: `python __main__.py expire-articles --domain <slug> --days <n>` - de
 
 | Domain | Retention | Schedule (CloudWatch) | Rationale |
 |--------|-----------|------------------------|-----------|
-| `geopolitical_news` | 7 days | Sunday 04:00 UTC | Short-lived event coverage; GDELT/SerpAPI volume is high and low-value past a week |
+| `geopolitical_news` | 7 days | Sunday 04:00 UTC | Short-lived event coverage; volume is high and low-value past a week |
 | `company_news` | 30 days | Sunday 05:00 UTC | Matches the TTL already used for Alpha Vantage's other data types (`ocn-market-overview`, `ocn-market-earnings`) |
 
 Both schedules run after that domain's own daily fetch completes (`geopolitical_news` fetches at 02:00 UTC, `company_news` at 01:00 UTC) and are offset from each other, so no two scheduled jobs overlap. CloudWatch targets reference the task definition by family name only (no revision pinned), so a scheduled run always launches whatever revision is currently `ACTIVE` — see `infra/CLAUDE.md` for why revision-pinned targets are a real drift risk in this repo.
@@ -161,6 +162,17 @@ translation of bare 2-4 character Taiwan company names was confirmed live to pro
 errors, e.g. 2383 Elite Material mistranslated as "Taiwan Semiconductor Manufacturing
 Company" - so this field is never LLM-translated).
 
+Each entry also carries `customers`: the company's **verified** customers as
+`{name, relationship}` - the one source of truth for Taiwan customers. A customer is listed only
+when a primary source names it (the company's own annual report / MOPS filing / press release,
+the customer's own SEC 10-K or Apple's official supplier list, or an official MOPS announcement
+naming the counterparty); press and analyst claims, partners, investors and code-only customers
+(客戶A) are left out; `[]` means checked and none verified (researched 2026-10-19, 68 customers
+across 12 of the 20 companies). `pipeline._taiwan_customers` copies the list onto every Taiwan
+revenue, material-announcement and GDELT article as `metadata.customers`, reading it from code at
+fetch time - not from the seeded `sources.config` like `ticker_names` - so an edit takes effect on
+the next run without a DB update. signal-detection-agent stores it unchanged.
+
 | Source | `source_type` | `source_category` (metadata) | What it fetches |
 |--------|---------------|-------------------------------|------------------|
 | TWSE Monthly Revenue | `twse_revenue` | `mops_revenue` | TWSE OpenAPI monthly revenue (`t187ap05_L`), full-dump filtered to TWSE tickers in the universe, with MoM/YoY deltas |
@@ -171,13 +183,39 @@ Company" - so this field is never LLM-translated).
 
 Both TWSE/TPEx OpenData endpoints are full-dump, keyless JSON with no ticker/date query
 param - the fetcher pulls the entire dataset each poll and filters to
-`TAIWAN_TICKER_UNIVERSE`, and there is no backfill: missing a poll window loses that day's
-new rows permanently, so the poll schedule (below) is the only capture mechanism.
+`TAIWAN_TICKER_UNIVERSE`. For material announcements and GDELT there is no backfill:
+missing a poll window loses that day's new rows permanently. Monthly revenue is the
+exception - see below.
+
+### Monthly revenue history (`company_financials`, `src/taiwan_financials.py`)
+
+signal-detection-agent judges each revenue filing against the company's own past 36
+months, so revenue is also stored as a series in `company_financials`
+(`domain = 'taiwan_market_signal'`, `metric = 'revenue'`, `period_type = 'M01'..'M12'`,
+`period_year`, `value` = the month, `prior_value` = the same month last year **as printed
+in that filing**, values in NT$ thousands). `yoy_pct` is left null (it is `value /
+prior_value`) and last month's revenue is not stored (it is the previous row).
+`prior_value` comes from the filing, never our own row from 12 months earlier, because
+companies restate - KYEC restated 2023-04..2024-03 by about -28%.
+
+Two writers, one table (UPSERT on company + month):
+- **Daily:** every `taiwan_market_signal` run stores its OpenAPI revenue rows
+  (`_store_taiwan_revenue` in `controllers/run.py`, best-effort - never fails the run).
+- **MOPS CSV:** `python __main__.py backfill-taiwan-revenue` reads MOPS's per-month
+  revenue CSV for each exchange (`mopsov.twse.com.tw/server-java/FileDownLoad`,
+  `t21sc03_{ROC year}_{month}.csv`, `sii` / `otc`) - same columns as the OpenAPI feeds,
+  confirmed equal from ECS. Default `--from-month 2019-01` is the one-time backfill (~186
+  requests, ~5 min); `--months-back 3` is the monthly re-read
+  (`news_retrieval_taiwan_revenue_monthly`, 15th 03:00 UTC) that recovers a missed poll
+  and picks up restatements. Exits non-zero if any exchange-month could not be fetched.
+
+Read by `GET /market/taiwan/revenue-history` (same row shape as the China endpoint).
 
 GDELT's own API response (`mode=artlist`) has no body/snippet field, but this domain's GDELT
 fetch does not rely on that - it separately fetches each surviving article's real webpage via
-Trafilatura and sets `article["body"]` from the extracted page text, same as
-`geopolitical_news`'s GDELT path.
+Trafilatura and sets `article["body"]` from the extracted page text. `taiwan_market_signal` is
+now the only domain using GDELT; `geopolitical_news` fetches from Event Registry, which
+returns the body with the article.
 
 **Schedule:** `${env}-news-retrieval-taiwan-market-signal` CloudWatch rule, every 4 hours
 bounded to 01:00-16:00 UTC (fires 01/05/09/13 UTC), Mon-Fri only. The window covers TWSE/TPEx's
@@ -872,9 +910,204 @@ stats.gov.cn is network-blocked from dev machines but reachable from ECS. See th
 No backfill is needed before enabling these, unlike Japan: Comtrade walks back months on its
 own and NBS publishes monthly.
 
-### GDELT source scope: `geopolitical_news`
+### Sources: `geopolitical_news`
 
-The `geopolitical_news` domain's GDELT source (`source_type = 'gdelt'`) queries are scoped with `sourcecountry:US` on every theme query (e.g. `theme:SANCTIONS sourcelang:english sourcecountry:US`) - used as a proxy for "does this event involve or affect the US," on the reasoning that a US-relevant event is highly likely to be covered by at least one US-domiciled outlet. Real tradeoff: this can miss US-relevant stories where foreign outlets (Reuters, BBC, Al Jazeera, etc.) cover an event before/instead of domestic US press. Source of truth for the query list: `GDELT_SOURCE` in `src/seed.py` - existing rows are `ON CONFLICT (url) DO NOTHING` on seed, so changing this list in code does **not** retroactively update an already-seeded database; an already-existing source row must be updated directly (SQL `UPDATE sources SET config = ...`) for the change to take effect.
+**Two sources, `federal_register` and `eventregistry`.** GDELT (`gdelt`) and SerpAPI Google
+News (`google_news`) were removed from this domain; GDELT remains in use by
+`taiwan_market_signal`, which is a different source row and unaffected.
+
+Event Registry (newsapi.ai, `EVENT_REGISTRY_API_KEY`) replaces both and returns more per
+article than either did: the body itself (no separate Trafilatura fetch), its own scored
+`concepts`, a `sentiment` score, an article `uri`, and an `eventUri` cluster id that
+signal-detection-agent's Stage D reads to group articles reporting one event.
+
+Two things about the body are worth knowing. It is Event Registry's own crawl of the
+publisher's page, not ours, so a page that renders oddly can produce prose-shaped noise: one
+article in 325 arrived column-interleaved and was stored as NULL rather than as 5,220
+characters of garbage (`_er_body_or_none`, a stopword-rate check that only applies above 400
+characters). And title-similarity dedup drops near-duplicates before storage — 153 of 481
+articles in the 2026-10-16 run — recording each dropped article as a
+`{outlet, title, url}` entry in the survivor's `metadata.also_reported_by`, which is the only
+record it ever existed.
+
+Source rows are seeded `ON CONFLICT (url) DO NOTHING`, so changing a query list in
+`src/seed.py` does **not** retroactively update an already-seeded database; an existing row
+must be updated directly (`UPDATE sources SET config = ...`) for the change to take effect.
+
+## Middle East Market Signal (`middle_east_market_signal` domain)
+
+Fetch-and-store only, same boundary as the four Asian market domains. Built from the
+"Middle East Market Signals for the AI Economy" spec (Oct 2026). Two rules shaped every
+source choice: **data comes from an API or structured JSON, never PDF extraction**, and
+**every stored row has a body** - a row whose text cannot be reached is dropped, not
+stored headline-only.
+
+Company universe: `MIDDLE_EAST_UNIVERSE` in `src/seed.py` - the spec's 24 companies and
+funds, hardcoded like China (most are unlisted or Gulf-listed, so research-universe's US
+ticker filter does not fit). Each row carries the spec's "good news here means" column as
+`us_rise_on_good_news` / `us_fall_on_good_news` for the classifier. The US names they move
+(NVDA, MU, XOM, BNO for the oil price, ...) are read by ticker from `/market/*`, not fetched
+here.
+
+| Source | `source_type` | Route | Body |
+|--------|---------------|-------|------|
+| WAM (UAE news agency, English) | `wam_wire` | `GET wam.ae/api/app/views/GetViewByUrl?url=en/list/latest-news`, further pages `POST .../GetSectionArticlesFDto` with the section's paging object | `GET .../articles/GetArticleBySlug?slug={urlSlug}` |
+| SPA (Saudi Press Agency, English) | `spa_wire` | `GET portalapi.spa.gov.sa/api/v1/news?page=N` (20/page) | `GET .../news/{uuid}` -> `content` |
+| Middle East AI News | `substack_post` | Substack `GET /api/v1/archive?sort=new&offset=N` | `GET /api/v1/posts/{slug}` -> `body_html` |
+| BIS press releases | `bis_press` | `__NEXT_DATA__` JSON on `bis.gov/news-updates` (whole archive, one request) | inline body, else DOJ press API matched by title + date |
+| Federal Register (BIS, Gulf terms) | `federal_register` | existing fetcher, `config.terms` + `config.url_scheme` | govinfo / raw text |
+| SEC 13D/13G (PIF, Mubadala, ADIA, QIA) | `sec_fund_stake` | `data.sec.gov/submissions` | `primary_doc.xml`: cover facts + narrative items |
+| newsapi.ai, 5 queries | `eventregistry` | existing fetcher, `config.query` | with the article |
+
+WAM and SPA publish everything (weather, sport, condolence cables), so items are matched
+against `match_terms` - universe names plus the spec's M1-M8 topic terms - **before** the
+body fetch, the same order Japan and China use. Matching is word-bounded on "not a word
+character or &", so "AI" does not match inside "Dubai" and "e&" matches on its own.
+
+**Every source was probed live (2026-10-19), from a local machine and from ECS:**
+- **WAM's site is an Angular shell** and newsapi.ai's copy of WAM English was ~21 days
+  stale (WAM Arabic is current there), so WAM is read from the API its own site calls.
+  `GetArticleBySlug` returns 204 for the bare `slug`; it keys on `urlSlug`
+  (`{shortCode}-{slug}`). The paging POST rejects the paging object inside any envelope.
+- **SPA's homepage data holds 7 items**; the list behind it is the portal API, which
+  answers without auth. SPA is not indexed by newsapi.ai at all.
+- **BIS links to DOJ pages that have since moved** - one BIS link 404s while the DOJ API
+  serves the same release under a different slug. Matching on url found 77/130 linked
+  releases; normalized title + a 14-day date window finds 122/130. The 14 releases whose
+  only text is a scanned settlement PDF have no API route and are skipped.
+- **13F was dropped.** It arrives up to 45 days after quarter end, and PIF's latest lists
+  five stocks, none in the AI universe. 13D/13G arrive within days of a stake change, and
+  the XML schema (mandatory since Dec 2024) carries the narrative - a 13D's item 4,
+  "purpose of transaction", ran 1,700 characters. 13D and 13G spell the same facts
+  differently (`percentOfClass`/`classPercent`, ...); `_SEC_STAKE_FIELDS` maps both.
+- **Federal Register terms match Russian-airline denial orders** (they mention flights to
+  the UAE) - about one a month. Kept: a denial order naming a Gulf company (M8) has the same
+  form, so excluding them would drop real signals.
+
+**newsapi.ai queries** (`eventregistry:me_*`). Each pairs an entity or place with a topic
+term - an entity alone was measured to match astronomy ("helium"), Jio's IPO anchor book
+(the Gulf funds) and Nvidia's MGX server platform ("MGX"). G42, Humain, MGX and Stargate UAE
+have no usable Event Registry concept (G42 resolves to a Chinese expressway), so Gulf AI
+news comes from the Gulf-outlet query (12 Gulf outlets, AI/energy headlines) plus WAM, SPA
+and Middle East AI News. The free plan rejects a query with more than 15 keywords, counting
+every word of a phrase. Measured volumes over a day: shipping ~100, Gulf outlets ~10,
+QatarEnergy ~5, Israel sites ~5, helium ~3. The chip-exports-to-the-Gulf query returned 0,
+so M1/M8 come from BIS, the Federal Register and DOJ.
+
+**Own url schemes, because dedup is global.** `geopolitical_news` already fetches every
+BIS Federal Register document and runs a "Strait of Hormuz" query; 28 of 100 shipping
+articles were measured in both. Under the global `uq_articles_url` index the second domain
+to fetch an article would silently lose it, so this domain stores
+`me-federal-register://{document_number}` and `er-me://{uri}`, with the real link in
+`metadata.html_url` / `metadata.article_url`. The two shared fetchers gained four optional
+config keys for this, all defaulting to the old behaviour: `url_scheme`, `query` (a whole
+Event Registry condition), `require_body`, `max_pages` (Event Registry, one token per page).
+
+**Title-similarity dedup, same settings as `geopolitical_news`** (168h window; three
+bands - at or above 0.82 same story outright, below `_SAME_EVENT_SIMILARITY_FLOOR` (0.50)
+definitely not, and only the band between them costs an LLM same-event call;
+near-duplicates recorded in the survivor's `metadata.also_reported_by` as
+`{outlet, title, url}`). The 0.50 floor is measured, not round: the lowest similarity
+between two confirmed-same-story headlines in real `geopolitical_news` data was 0.5951
+(two framings of one September 2026 EU Council decision), and the floor sits just below
+it. Widening the band downward from 0.72 was checked against real pairs first - every
+missed US-Japan duplicate already sat inside the band at 0.62-0.80, while three correct
+Strait of Hormuz separations sit at 0.41-0.48 and would have been wrongly merged by a
+lower auto-threshold. The war is re-reported
+across hundreds of outlets: the first run with it on went 148 -> 65 rows, one Hormuz mine
+strike carrying 31 other outlets. Official and filing rows (`source_category`
+`me_official_wire`, `me_us_policy`, `me_fund_stake`) are excluded from both sides of the
+comparison - whichever copy is stored first survives, so a WAM release stored after the
+press covered it would otherwise be dropped as the duplicate. `also_reported_by` reads the
+publisher's link from `metadata.article_url` for `er-me://` rows (`_publisher_url`), and
+`append_also_reported_by`'s own-outlet guard does the same in SQL; before that change an
+outlet would have been recorded as "9509743911".
+
+**Two domain-level guards in `run()`** (`_BODY_REQUIRED_DOMAINS`), applied to every source
+after fetch: a row with no body is dropped (every source here already reads its body from
+an API; this is the backstop for any source added later), and so is a row published more than `days_back` + 1 day
+ago - Event Registry selects on crawl date, and measured late crawls brought in a 6-day-old
+story on a 1-day run and a July story on a 30-day run. A failed later listing page (WAM,
+SPA) stops paging and keeps the pages already read.
+
+**End-to-end (local, 2026-10-19):** a 30-day run stored 369 rows from 641 fetched; two
+1-day runs after it stored 5 and 3 (repeats of the window, no duplicate urls). All 377
+rows checked: every core column and body filled, every source's metadata keys present, no
+numeric or `er-me://` outlet in `also_reported_by`. Values were compared against each live
+source (title, date, body, plus issuer/percent/form for SEC, `effective_on` for the
+Federal Register) with no mismatch. Steady-state daily volume after dedup: ~50-60 rows -
+newsapi.ai the bulk (shipping), WAM ~5, SPA ~5, Middle East AI News ~3; SEC ~1 a week,
+Federal Register ~1 a month, BIS Gulf releases a few a year.
+
+**Metadata is kept to fields with a use** (anything already in the url, the body or
+another column is left out):
+- every Middle East row: `source_type`, `source_category` (the dedup exclusion keys on it),
+  `source_outlet_type` (`state_press` / `official` - the spec treats state outlets as proof
+  of what a government said, never of a business fact)
+- `bis_press`: `country_tags` (why it was kept), `topics` (Enforcement = M8, Regulations =
+  M1), `body_source` (`bis` / `doj`), `external_link` (the link BIS published, which can be
+  stale) and `doj_url` (the DOJ release actually read)
+- `sec_fund_stake`: the url `sec-stake://{cik}/{accession}` is only a dedup key, so every
+  value it encodes is also its own field - `fund_cik`, `accession_number`, `filing_date` -
+  alongside `fund`, `form` (13D active / 13G passive), `filing_url`, `issuer_name`,
+  `issuer_cik` (maps to a ticker), `issuer_cusip`, `event_date`, `percent_of_class`,
+  `shares_owned` (the M3 >20% change rule) and `reporting_persons`
+- `federal_register` copy: adds `effective_on`, `html_url`
+- `eventregistry`: the shared field set, plus `article_url` and `er_query` (which M-type
+  query found it)
+
+**Full bodies, not just non-empty ones.** Checked per source (2026-10-19):
+- **Federal Register:** the shared fetcher caps a body at 20,000 characters (geopolitical
+  reads only the first 2,000). This source sets `body_max_chars: null`. The UAE A:5 rule is
+  32,904 characters, and three Russian-airline orders of 21.5-21.8k had been cut. Every
+  stored document now ends with its `[FR Doc. ... BILLING CODE]` end marker.
+- **newsapi.ai:** some bodies are only part of the article. `_er_body_is_partial` drops
+  (under `require_body`) a body ending in "..." (a paywall teaser - Bloomberg 3/3, Telegraph
+  3/3, Bloomberg Law 2/2 over 871 rows), a video/podcast page (a description, 8/871), and
+  the outlets whose body is only ever an opening (`_ER_PARTIAL_BODY_OUTLETS` - Reuters' first
+  paragraph plus credits, The Africa Report's teaser). The repo's page-fetch tiers were
+  tried and do not recover them: Reuters returned nothing, Telegraph only its navigation.
+  A bracketed "[...]" ending counts as a teaser too. Plus a floor: every one of 851 stored
+  bodies under 300 characters was partial (a video series' standing blurb, The National's
+  "Manus on Markets" at 263; teasers) and the shortest complete one was a 310-character
+  liveblog entry, so `_ER_MIN_FULL_BODY_CHARS = 300`. A title-word-overlap test was tried and
+  rejected: the series blurb scored inside the range of real market wraps.
+- **Substack:** stored body equals the API's `body_html` on 58/58 rows. Substack answers
+  429 to bursts (19 of 68 posts lost with 5 parallel requests), so posts are fetched one at
+  a time, 0.5s apart, and a 429 is retried after its `Retry-After` - the next 30-day run
+  stored 68/68.
+- **SPA:** bodies end with the agency sign-off ("-- SPA 16:24 Local Time ..."), i.e. whole.
+- **SEC 13D/13G:** the body is the filing's own cover facts and narrative items; exhibits
+  (agreements filed alongside) are separate documents and not included.
+
+**Middle East AI News through Substack's API, not its RSS feed.** The feed's body is its
+content field, and when that is short the shared RSS path falls back to a page fetch that
+can fail and leave no body. Substack's own API gives every post's `body_html` directly.
+Only `type: newsletter` with `audience: everyone` is kept: `podcast` posts are audio
+episodes whose text is show notes repeating a written post under another title ("Only one
+in ten UAE firms Agentic AI ready" vs the article "Only one in 10 UAE organisations feels
+ready for agentic AI"), and a paid post's `body_html` is truncated. The archive listing
+carries no body, so each kept post costs one `/posts/{slug}` request.
+
+**Dropped after probing:** IMF PortWatch (data 8 days behind), UKMTO (incident list loads
+from an API that could not be found), Lloyd's war-risk list (PDF only), ADX (PDF
+disclosures), Tadawul and Israel's Home Front Command (Access Denied from ECS too), QNA
+(newsapi.ai indexes its English feed within minutes), EIA/Alpha Vantage commodity series (3
+trading days behind - BNO's quote is used instead), Congress.gov, USGS, Suez Canal Authority.
+
+**Token budget:** 6 newsapi.ai tokens a run (shipping takes 2 pages). Twice a day is ~360 a
+month, against a 2,000-token plan that `geopolitical_news` also draws on.
+
+**Trigger:**
+```bash
+python __main__.py trigger --domain middle_east_market_signal --days-back 1
+```
+First local run (2026-10-19, `--days-back 1`): 121 rows - 108 newsapi.ai, 5 SPA, 4 WAM,
+4 Middle East AI News - every one with a body.
+
+**Needs before deploy:** `EVENT_REGISTRY_API_KEY` is not in the news-retrieval task
+definition or Terraform yet (also true for `geopolitical_news`), and the domain has no
+CloudWatch schedule yet (planned: twice a day).
 
 ## Guidance
 - Read only the docs relevant to your task - not all of them

@@ -33,7 +33,9 @@ signal-detection-agent/
 ├── STRUCTURE.md
 ├── prompts/
 │   ├── ai_universe_signal_classifier_v1.txt
-│   └── ai_universe_signal_classifier_v2_refine.txt
+│   ├── ai_universe_signal_classifier_v2_refine.txt
+│   ├── geopolitical_signal_stage_b_v1.txt   (talk vs action; the irreversible verdict)
+│   └── geopolitical_signal_stage_c_v1.txt   (channel definitions + precedence, assets, category)
 ├── src/
 │   ├── __main__.py
 │   ├── app.py
@@ -44,7 +46,8 @@ signal-detection-agent/
 │   ├── routes/
 │   │   ├── health.py
 │   │   ├── run.py
-│   │   └── jobs.py
+│   │   ├── jobs.py
+│   │   └── webhooks.py   (news-retrieval run-completed callback -> geopolitical_signal pipeline)
 │   ├── controllers/
 │   │   └── run.py
 │   ├── models/
@@ -58,7 +61,14 @@ signal-detection-agent/
 │   │   ├── japan_signal_classifier.py   (japan_market_signal: J1-J7 + WATCHING)
 │   │   ├── japan_signal_view.py      (japan_market_signal: row -> card shaping)
 │   │   ├── china_companies.py        (china_market_signal: the one static company table - signal_roles + read-through)
-│   │   └── china_signal_classifier.py   (china_market_signal: Gate 1 + C1-C7, read-through, confirmation, translate)
+│   │   ├── china_signal_classifier.py   (china_market_signal: Gate 1 + C1-C7, read-through, confirmation, translate)
+│   │   ├── geopolitical_signal_classifier.py  (geopolitical_signal Stage A: rule-based noise removal, no model call)
+│   │   ├── geopolitical_signal_layer1.py      (geopolitical_signal Stage A: rule-based row creation)
+│   │   ├── geopolitical_signal_overrides.py   (geopolitical_signal Stage A: source-specific overrides)
+│   │   ├── geopolitical_signal_stage_b.py     (geopolitical_signal Stage B: talk vs action - the irreversible verdict)
+│   │   ├── geopolitical_signal_layer2.py      (geopolitical_signal Stage C: channel/actors/assets/category/summary)
+│   │   ├── geopolitical_signal_stage_d.py     (geopolitical_signal Stage D: corroboration grading, no model call)
+│   │   └── geopolitical_signal_stage_e.py     (geopolitical_signal Stage E: story grouping, no model call)
 │   └── adapters/
 │       ├── news_client.py
 │       └── web_search.py
@@ -93,14 +103,217 @@ coverage) is classified by a separate path from the AI-universe `POST /run` pipe
 classify-taiwan-signals` (Click command in `__main__.py`), scheduled twice daily (14:00 UTC
 post-Asia-close, 21:00 UTC pre-US-open, Mon-Fri) via the `signal_detection_agent_taiwan_signals`
 CloudWatch rule in `infra/modules/ecs_cluster/services.tf`. news-retrieval fetches this domain
-on its own independent 4-hourly schedule and stops at fetch/dedup; all ranking, clause-code
-lookup, translation (`OPENAI_MODEL_V2`), and LLM classification (gdelt only) happen in
+on its own independent 4-hourly schedule and stops at fetch/dedup; all revenue scoring,
+clause-code lookup, translation (`OPENAI_MODEL_V2`), and LLM classification (gdelt only) happen in
 `pipeline/taiwan_signal_classifier.py`. Results persist to the same `agent_classifications`
 table as the AI-universe pipeline, distinguished by `source_type = 'taiwan_market_signal'`,
-with Taiwan-specific fields (rank, clause reason, translated text) in the `metadata JSONB`
+with Taiwan-specific fields (revenue scores, clause reason, translated text) in the `metadata JSONB`
 column. Dedup across the two daily runs (and across news-retrieval's ~4-6 polls per day) is by
-a deterministic `source_id` (ticker+period or ticker+timestamp), not article row id, enforced
-by a partial unique index - a run never re-classifies or re-inserts something already done.
+a deterministic `source_id` (ticker+period, ticker+timestamp, or url), not article row id,
+enforced by a partial unique index. Already-stored items are dropped BEFORE classifying, so
+nothing is re-translated, and stored rows are never changed after insert.
+
+### Revenue signal (`mops_revenue`)
+
+Each monthly filing is judged against **that company's own** past 36 months (min 24), never
+against the other companies - the old top-3-by-YoY ranking was worse than random in the
+backtest and always produced exactly three HIGHs. Two scores, each `(value - median) /
+(MAD x 1.4826)` on log changes:
+
+- `mom_deviation` - this month vs last month
+- `yoy_change_deviation` - this month's YoY minus last month's YoY (YoY from each filing's own
+  prior-year figure, so restatements never show as a jump)
+
+`revenue_deviation = (mom_deviation + yoy_change_deviation) / 2 / 0.87` (0.87 restores the scale of a
+single score, since the two correlate at 0.52). `|score| >= 2.5` HIGH, `>= 1.5` WEAK, else
+NOISE; **direction is the sign of `revenue_deviation`** (not stored separately). Named `deviation`, not
+`surprise` or `signal_score`: "surprise" means vs analyst consensus in finance, and `signal_score`
+is a column with a different meaning (a model's 0-1 confidence, `NUMERIC(5,4)`, max 9.9999).
+
+Backtest, 2021-07..2026-06, 1,000 scored company-months, point-in-time: HIGH up moved +3.9%
+and HIGH down -4.4% vs the other tracked companies by the 11th (t = +2.5 / -3.8); next-quarter
+growth improved 82% / 24% of the time vs 54% normally; same pattern in 2021-23 and 2024-26;
+HIGH fires a median of once a month (16 of 50 months had none). There is no edge after the
+11th - the market prices it by then - so speed matters. Rejected after testing: YoY level
+(+0.08 correlation), seasonal adjustment, 3-month acceleration, standard deviation instead of
+MAD (65% fewer signals, downside lost), US read-through (no relationship).
+
+Stored per row: `signal_reason` = one or two plain sentences built by template from the row's
+own numbers (`revenue_reason`, no model call), e.g. "2026-09 revenue fell 31.0% from 2026-08;
+year on year it was +196.2%, down from +344.4% in 2026-08. That is far outside King Slide's
+usual month-to-month swings: a strong downward break from its own pattern." Unscored rows (all
+NOISE) say why in a sentence: Jan/Feb (Lunar New Year - the score predicted nothing there),
+short history, flat history or a bad value; the scorer's internal codes
+(`not_scored_lunar_new_year` etc.) are only counted in the run log. `metadata`: `revenue_deviation`, `mom_deviation`,
+`yoy_change_deviation` (only when scored - absent means not measured), `prior_yoy_pct` (last
+month's YoY, for "slowed from +177% to +77%"), `is_12m_high` (revenue above each of the previous
+12 months - a tag, not a signal), `is_repeated_remark_12m` (the company gave the same explanation,
+ignoring whitespace, in any of its previous 12 months - 66% of 2019-26 remarks do, vs 58% caught
+by a last-month-only check; absent when there is no explanation; reads stored rows, so it sees
+less than 12 months back until the pipeline has run a year). History comes
+from news-retrieval's `GET /market/taiwan/revenue-history`; if it cannot be read, revenue is
+skipped for that run rather than stored as unscorable. Each distinct company remark is
+translated once (stored translations reused; identical texts in a batch share one call).
+
+### Customers (`metadata.customers`, every Taiwan row)
+
+The company's verified customers, `[{name, relationship}]`, set by news-retrieval from
+`TAIWAN_TICKER_UNIVERSE` (`news-retrieval/src/seed.py` - the one source of truth; see that
+service's CLAUDE.md for what counts as verified) and stored here unchanged. `[]` means checked and
+none verified. This service keeps no copy of the list.
+
+### Material announcements (`mops_material`): clause meaning
+
+Every announcement stores `clause_label`, the plain-English meaning of its clause
+(`disclosure_clause_code`, e.g. `第20款` -> "Asset purchase or sale"), looked up per
+**exchange** in `taiwan_signal_classifier.py`: TWSE has 51 clauses (official procedure
+FL007111, 2026-09-30); TPEx has 53 - the same as TWSE through 46 plus two TPEx-only clauses
+(47 withdrawn move to TWSE, 50 annual report correction), so TPEx 48-53 = TWSE 47-51 and the
+catch-all is TWSE 51 / TPEx 53. TPEx 39, 42 and 44 are not in TPEx's published documents and
+get no label until confirmed; an unknown clause gets no label and a warning, never a guess.
+It lives here, not in news-retrieval, because a clause's meaning and its rating belong in
+one place, and because a lookup here can label any stored row without re-fetching.
+
+**Rating and summary** (`pipeline/taiwan_announcement_classifier.py`, prompt
+`prompts/taiwan_announcement_classifier_v1.txt`, model `SEC_FILING_MODEL`). A price backtest
+over ~4,300 historical announcements showed the clause often cannot decide materiality, so:
+- **Fixed NOISE, no model call:** clauses 12 (investor conference), 18, 22, 23, 36, and
+  clause-31 meeting-DATE notices - each moved prices no more than an ordinary day; and
+  clause-14 dividends filed on behalf of a subsidiary (paid to the parent, inside the group),
+  and clause-14 ex-dividend / record-date timetables (subject names 基準日/除息/除權 - all 185
+  such subjects in 2019-2026 are timetables of a dividend decided in an earlier filing).
+- **Rules on top of the model's answer** (the prompt says the same; the model did not follow
+  it reliably): clause 40 (trading halt) is always HIGH; a subject marking a supplement or
+  correction (補充/更正/補正) caps the rating at WEAK - the news was the first filing. From the
+  clause-14 dividend form's own fields (`dividend_figures`): no dividend at all (every amount 0,
+  or 不分配…股利) is fixed NOISE; a stock dividend of half the par value or more (Wiwynn's NT$20
+  per NT$10 share = 2 new shares per share) is HIGH with a reason built from the figures.
+- **Known names** (`KNOWN_NAMES`): verified English names of group companies that file under
+  their Chinese name only (Cyntec 乾坤科技, SPIL 矽品, ASE Inc. 日月光半導體製造, FII 富士康工業互聯網,
+  MasterLink 元富證券 - LEI record) -
+  given to the model when present and enforced on its answer and on the title translation; the
+  model had given 乾坤科技 three different wrong names. Add a name only with a source pairing the two.
+- **Par value check:** a share issue form's 發行總金額 is the par-value total; an answer that calls
+  it the money raised is refused and repaired (BizLink: NT$50M at par vs ~NT$1.15bn raised).
+- **Review 2026-10-19** (Ayushi Shah's doc, 17 card changes + 8 rule breaks): adopted the rules
+  that are checkable on the cards (overseas-subsidiary injections, own equipment purchases and
+  minority/land sales -> weak; new-plant construction and stated share offerings -> signal;
+  stoppage notices capped at weak; results need figures; buyback form fields). Regression set:
+  25 cards with a wanted label - 8/25 before, 23/25 after (the two left are a product choice -
+  founder resignation - and a supplement kept at noise). Not adopted yet: an `ai_relevance`
+  field, a company AI profile, code-computed deal size, linking related earlier filings.
+- **Five-reviewer test 2026-10-19** (analyst, trader, AI-economy, technical, sceptic on 80
+  unseen filings, set 5): model 82% vs the reviewers' majority before fixes, 91% after (tuned on
+  it - optimistic); regression set 26/28. Code rules added from it: term-end board elections are
+  counted from the form's old/new lists (`board_seat_changes`; the 三分之一 box reads 是 in every
+  full election) - the count goes to the model, and an unchanged board is NOISE; a clause-20
+  capital injection into a Latin-named (non-Taiwan, non-holding) subsidiary is at least WEAK;
+  the plain own-equipment form is capped at WEAK; per-share dividend recalculations (調整配息率,
+  58/58 share-count causes) are fixed NOISE. Name checks (generic - no per-company lists, work
+  for any company added later): a romanised word in an English name must be spelled by its own
+  Chinese in any pinyin or Wade-Giles reading (`romanisation_not_in_original`, pypinyin: catches
+  "Suzhou" for 黃石, "Yuanta" for 元富, "Nanya" for 南茂); an English word that is another listed
+  company's coined brand, where the original starts like that company, is refused
+  (`other_listed_brand`, table `taiwan_listed_companies.py` generated from TWSE/TPEx open data:
+  catches "Darfon" for 達豐). Measured on 521 stored glosses: 0 false refusals. Not catchable
+  generically: a foreign brand that is neither pinyin nor Taiwan-listed (Entegris) - the prompt's
+  pinyin rule covers it. Unverified Chinese-only names go in pinyin. Guard fixes:
+  dates must be the filing's own (yearless 12/19 may take the filing's year; quarter ends allowed),
+  table unit headers scale their figures ((1000000元) 958 = 958,000,000), names are not read
+  across lines or from regulation titles. Full 160: 0 fallbacks, every row with a summary.
+- **Review rules applied 2026-10-19 (user decision):** founder, chairman or CEO leaving is
+  weak_signal, not signal (review: "a product choice for an AI-economy feed") - code caps a
+  clause-6 HIGH at WEAK unless a third of the board really changes. Further code rules, each
+  checked on the 2019-2026 history: leases of land/buildings with anyone outside the group
+  (related parties such as WNC included) are WEAK; the company's own equipment/plant-works form is
+  WEAK; overseas holding-company injections count as overseas injections (floor WEAK); a press
+  report of an acquisition the company does not deny is at least WEAK; a working-capital/debt
+  bond issue with no named investor is capped at WEAK; a ransomware/intrusion incident is at
+  least WEAK (website-only DDoS excluded); stoppage/epidemic notices are at least WEAK; a CFO
+  (財務主管) change is at least WEAK; routine officer posts (spokesperson, governance, audit,
+  accounting, CISO) and same-firm audit-partner rotation (clause 7) are fixed NOISE. Prompt: capex
+  revisions are weak unless they add a site or raise the year's budget by half or more; a
+  subsidiary's new-plant contract stays signal. Results: set 5 79/80 (the one miss is a CEO
+  change, weak by the new rule), regression 28/28, full 160 0 fallbacks.
+- **Everything else:** one model call returns `signal_detection` (signal/weak_signal/noise -
+  the column's own vocabulary), `signal_reason` (one or two plain sentences, readable on their
+  own, naming the facts in the filing that decided it), a 3-6 sentence summary whose first
+  sentence states what happened, and key facts. Fixed-NOISE and fallback rows get plain-sentence
+  reasons too - no codes.
+- **Stored fields:** the label goes to the `signal_detection` column and its reason to
+  `signal_reason` (carried in memory as `announcement_materiality_signal` / `_reason` and
+  popped before insert - never stored twice). In `metadata`: `translated_title` = literal
+  translation of the subject line (same key GDELT rows use); `translated_summary` = the
+  model's summary + key facts, written ONLY from the filing's own subject and body and
+  checked against them - 1 to 6 sentences, as many as the filing supports, so a short
+  notice gets a short summary and a missing amount or counterparty is simply left out;
+  `translated_body` = literal translation of the whole filing, ONLY on rows with no checked
+  summary (~1%). A row has a summary or a full translation, never both.
+- **Every filing gets the summary call**, fixed-NOISE rows included (their label and reason
+  stay set by rule; the model's label is ignored). Up to two repair attempts. A filing the
+  model did not answer at all (outage, timeout) is retried once at the end of the same run
+  after a 60s pause, then stored with the literal translation - never deferred to a later
+  run, because the scheduled run reads only today's fetches and a deferred filing could be
+  lost. Remaining refusals are logged (`[TAIWAN_ANNOUNCEMENT] ... model_output_rejected: <why>`):
+  review them each test round and fix the cause (most so far were the checker being too
+  strict - 49億, "April 2025", 每仟股, 7仟萬). The prompt ends with a FINAL CHECK that
+  restates each code check with WRONG/RIGHT examples, so the first answer passes: first
+  answers passing went from 71% to 84-88% on fresh 80-filing samples (2026-10-18); every
+  retry is logged with its cause (`... retry: <why>`).
+- **Cost:** the instructions (~4,600 tokens, ~94% of each call's input) are identical for
+  every filing and sent first, so the provider caches them automatically (measured 86-90%
+  of input tokens cached; ~$0.004-0.01 per filing). Keep anything per-filing out of the
+  system prompt or the cache is lost. Each run logs
+  `[TAIWAN_ANNOUNCEMENT] spend: N filings, N calls, N input tokens (N% cached), ..., $X`
+  from the cost OpenRouter returns per call. At ~5 filings a day this is ~$1-2 a month.
+- **Guardrails:** Taiwan-calendar dates (all six digit formats and Chinese-numeral years) are
+  converted before the model sees the text; the filing is passed as delimited data; JSON mode,
+  temperature 0; every number, Chinese name and company-style English name in the output must
+  appear in the filing; month names, figure-free quantity words and predictions or
+  generalisations ("potential", "could", "usually") are refused - the prompt alone did not stop
+  the model writing them. A refused
+  answer gets one repair attempt (with a unit hint when an amount failed - the model wrote
+  49億 as "49 billion"), re-checked in full. If it still fails, the summary is discarded and
+  the row keeps its literal translation; the label and reason are kept if they pass the checks
+  on their own (a results release used to drop to WEAK because one key fact failed). Only
+  when they fail too is the row rated WEAK with a fallback reason - never shown unverified and
+  never hidden as NOISE. Chinese-numeral amounts are converted to digits, but never a unit
+  after Arabic digits ("441佰萬元" once became "4411000000元", a ten-times error). Western
+  years written the Chinese way (2025年4月) become 2025-04 too. In the output, a month name
+  WITH a year ("April 2025") is rewritten to 2025-04 and then checked like any date; without
+  a year it is refused. Two-part amounts (3,495億6,700萬元) are checked by their total value.
+- **Names, English first:** every Chinese-only name (company, exchange, person) is written
+  "English translation (exact Chinese as filed)" in the reason, summary, key facts, the
+  translated title and entities_json. The checker refuses Chinese outside those brackets, and
+  accepts an English company name only when it sits right before the filing's own Chinese
+  name (or is in the filing). It cannot verify the English translation itself; the
+  Chinese next to it is the filing's text. Exchanges, regulators, courts and prosecutors
+  are dropped from entities by rule.
+- **Entities, subsidiary:** the subsidiary a filing is made for is taken from the subject
+  ("代子公司XXX公告") by rule - the model left it out on ~15 of 80 reviewed filings.
+- **Entities:** companies that are parties to the event (counterparty, target, investor,
+  contractor, the subsidiary filed for) go to the existing `entities_json` /
+  `entity_names_normalized` columns, like the SEC classifier's. The filing company comes from
+  our ticker list; the others from the model, each only if its name appears in the filing.
+  Appraisers, law firms, payment banks and companies named only in a person's background are
+  excluded; for clauses with no counterparty (6, 7, 8, 12, 17, 18, 29, 31) the filing company
+  is the only entity, by rule - the model did not follow that instruction reliably.
+- **What the label means: worth reading, not price impact.** `signal` = worth an analyst's or
+  trader's time (new company-level information), `weak_signal` = worth a glance, `noise` = safe
+  to skip (routine operations purchases, administrative notices, money moved inside the group).
+  This matches what `signal_detection` means elsewhere in this service (relevance, not market
+  impact). It was tested against prices on 400 historical filings and does NOT predict the
+  event-day move (all three labels ~20% big moves vs 10% on ordinary days) - so the page must
+  not present it as a price signal. The one filing type that does move prices is a results
+  approval (clause 31, excluding date notices: ~30-40% big moves). Validation of the
+  worth-reading label is by analyst agreement on a sample, not by price.
+- **Validation (2026-10-18):** four independent reviewer personas (analyst, trader,
+  technical auditor, sceptic) read the Chinese filing for 80 random filings at a time. On
+  sets the prompt had never seen, the model matched the reviewers' majority 76-78%; the
+  reviewers matched each other 90-93%. After each round's fixes the same set reached 84-89%
+  (tuned, so optimistic) - the honest number is always the next unseen set. No filing the
+  reviewers called signal was ever labelled noise. The last audit found no wrong number,
+  unit or date in 80 summaries.
 
 ## Japan Signal Pipeline
 
@@ -390,6 +603,119 @@ US-listed supplier will disclose a licence denial attributing it to the measure 
 trade remedy or export control, false of a statistics bulletin, an industry plan or an
 exhibition notice. Gated on C1's own `binding` verdict rather than a new judgment: 11 of 13
 stored C1 rows are `checkpoint_source: not_applicable`.
+
+## Geopolitical Signal Pipeline
+
+`geopolitical_signal` is a five-stage funnel over the `geopolitical_news` domain, which
+fetches from exactly two sources: `federal_register` and `eventregistry` (newsapi.ai).
+Same fetch/classify boundary as the other non-`ai_news` domains - news-retrieval fetches,
+dedups and stops; every judgment happens here.
+
+```
+Stage A  rule-based   creates rows (status 'waiting')          geopolitical_signal_layer1/overrides
+Stage B  LLM call     talk vs action -> signal/weak_signal/noise   geopolitical_signal_stage_b
+Stage C  LLM call     channel, actors, assets, category, summary   prompts/..._stage_c_v1.txt
+Stage D  no model     corroboration grading                     geopolitical_signal_stage_d
+Stage E  no model     story grouping                            geopolitical_signal_stage_e
+```
+
+Each stage only ever acts on rows the previous stage wrote, so they are inherently
+sequential, not independent jobs - `run-geopolitical-signal-pipeline` runs A→B→C→D→E in one
+process for exactly that reason (separate cron rules risked B firing before A had
+finished). The primary trigger is news-retrieval's run-completed webhook; the 05:00 UTC
+CloudWatch rule is a fallback for a lost delivery.
+
+**Stage E runs last in both paths, and is not optional.** Every API read of this domain is
+expected to be post-Stage-E, because the default signals view filters on
+`NOT (metadata ? 'in_story')`. If E never ran, that filter would match every row and a
+reader would see one story repeated under several headlines - precisely what E exists to
+prevent. So it is wired into *both* sequences: `__main__.py`'s combined command and
+`routes/webhooks.py`'s background task. Anything that adds a third trigger path must
+include it too; wiring only one leaves the other writing no story fields at all.
+
+Unlike A-D, Stage E is not scoped to the rows the previous stage just wrote - grouping is a
+property of the whole signal set, so it reads every Stage-D-graded signal and regroups from
+scratch. That makes running it twice in a day safe, which matters because the webhook and
+the fallback schedule can both fire: verified on the live 57-signal set, a second run
+changed 0 of 57 rows and left 5 seeds / 8 members intact, with no orphaned `in_story`
+pointer, no row marked both seed and member, and no story field on a non-signal row.
+
+### Stage B's verdict is irreversible
+
+`weak_signal` and `noise` never reach Stage C, D or E. That one-way door is why Stage B
+fails open: a row the model could not judge becomes `weak_signal`, never `noise`, so
+"we couldn't check" stays distinguishable from "we checked and found nothing". The same
+discipline runs through the stored fields - an absent `corroboration` key means Stage D
+never ran on that row, while `{"count": 0}` means it ran and the row stands alone. Code
+reading these fields must not collapse the two.
+
+### Stage D: corroboration (`metadata.corroboration`)
+
+Grades how many independent outlets carried the same EVENT. Stage B has already collapsed
+same-event rows: when news-retrieval's title-similarity dedup finds a cluster, the judged
+row absorbs its siblings into `metadata.also_reported_by` (`{outlet, title, url}` each) and
+the sibling rows are deleted in one transaction. Nothing unique is lost - the sibling's
+headline survives on the judged row.
+
+`corroboration` is the INPUT (how well-sourced is this event); `also_reported_by` is the
+OUTPUT (which specific outlets, for display). They are not redundant and both are kept.
+
+### Stage E: story grouping (`metadata.story_development` / `metadata.in_story`)
+
+Stage D asks *who else reported this same event*. Stage E asks a different question -
+*is this the same situation I just read about*. Four Strait of Hormuz items in one morning
+can be four genuinely different events (a mine strike, a blockade, a designation, a
+suspension of raids) and still read as one story to anyone scrolling the feed.
+
+It **marks, never deletes** - the opposite of Stage B's collapse, and deliberately so. The
+six rows of one Hormuz story each reported a different state action; delete five to keep
+one and a reader querying "sanctions actions this week" no longer finds the Treasury
+designation. So the seed row carries `story_development` and the others carry `in_story`
+pointing back at it. One row per story is a **filter the caller applies**:
+
+```sql
+signal_detection = 'signal' AND NOT (metadata ? 'in_story')
+```
+
+That also makes a wrong grouping one field away from undone. Note for any code adding such
+a query: **psycopg2 scans the whole query string for `%` and `?` placeholders**, so inside
+Python use `jsonb_exists(metadata, 'in_story')`, never the bare `?` operator - the literal
+above is SQL-console form only.
+
+Grouping is entity-overlap, no model and no network call: it reuses the entities Stage C
+already verified against the article text. Two rows join when they share at least 2 entity
+keys, at least one of which is *specific*, within a 72-hour window. Four classes of name
+can never carry story identity on their own, each one measured from a real wrong grouping:
+countries (half these articles name the United States), issuing institutions (OFAC signs
+both a horse-racing designation and a Lukoil licence), commodities (crude oil joined a
+Russian sanctions item to a Hormuz incident), and armed forces (the IRGC appeared in a
+Hormuz mine strike and a Houthi palace attack). They are admissible as supporting evidence,
+never as the whole of it.
+
+Seeded, not transitive: a row joins a story by matching that story's SEED, never by matching
+a member that itself only just qualified. Union-find was tried first and chained two
+unrelated stories through one weak edge. The seed is the best-corroborated member, since
+that is the row a reader lands on.
+
+`story_development.members[]` carries 8 keys per member - `id`, `title`, `url`, `published`,
+`channel`, `reason`, `summary`, `shared`. Unlike Stage D's siblings (same event, so an
+outlet and a headline suffice), story members are DIFFERENT events and a reader opening the
+story needs to see what each one was. `summary` is a copy of Stage C's own field, so the
+member row stays the source of truth - a consumer needing current text joins on `id`.
+`shared` records which entity keys put each member there, so a grouping a reader disputes
+can be interrogated rather than guessed at.
+
+Stage E is **idempotent by rewriting, not by skipping**: it clears both keys and regroups
+every time. A row arriving later can change which story an existing row belongs to, and
+skipping already-grouped rows would leave a stale pointer hiding a row from the default
+view permanently.
+
+### `category` is a shared `TEXT[]` column
+
+Both this domain and `news` write the `category` column directly. It replaced
+`metadata.impacted_categories`; filters are `category && ARRAY[%s]::TEXT[]`. Any consumer
+reading a single category string will silently drop every row once this is live - that is
+the bug fixed in signal-herald's `digest.py`, which now handles both shapes.
 
 ## Classification Retention (Postgres)
 

@@ -54,17 +54,23 @@ src/
 │   │                                     not called in v1; re-enable via category_hints
 │   │                                     param in classify_article() if needed
 │   └── taiwan_signal_classifier.py  Deterministic + LLM classifier for
-│                                     taiwan_market_signal - rank_revenue_by_yoy()
-│                                     (mops_revenue, pure ranking, no LLM),
+│                                     taiwan_market_signal - score_revenue_filing()
+│                                     (mops_revenue, MoM + YoY-change vs the company's
+│                                     own 36-month history, no LLM),
 │                                     classify_material_announcements() (mops_material,
 │                                     clause-code lookup table, no LLM),
 │                                     translate_taiwan_articles() (LLM translation via
 │                                     OPENAI_MODEL_V2, per source_category field map),
 │                                     classify_gdelt_articles() (gdelt - the one real LLM
 │                                     HIGH/WEAK classification call),
-│                                     classify_taiwan_signal_batch() (top-level: rank +
+│                                     classify_taiwan_signal_batch() (top-level: score +
 │                                     clause-lookup + translate, called by
 │                                     controllers/run.py's run_taiwan_signal_classification)
+│   ├── taiwan_announcement_classifier.py  taiwan_market_signal mops_material: ROC date
+│   │                                     conversion, fixed-NOISE clauses, SEC_FILING_MODEL
+│   │                                     rating + summary with output checks
+│   ├── taiwan_listed_companies.py  generated TWSE/TPEx table (code, Chinese full/short,
+│   │                                     English short) for the announcement name checks
 │   ├── china_companies.py      The ONE static table for china_market_signal -
 │                                     CHINA_COMPANIES keyed by exchange code, holding
 │                                     each company's native_name, hk_code, signal_roles
@@ -99,6 +105,35 @@ src/
 │                                     every row centrally), classify_china_signal_
 │                                     batch() (top-level, called by controllers/
 │                                     run.py's run_china_signal_classification)
+├── geopolitical_signal_classifier.py  geopolitical_signal Stage A - deterministic
+│                                     keyword/lookup noise removal, no model call
+│                                     anywhere; drops 80-90% of daily volume before
+│                                     Stage B's first paid call. Cross-outlet dedup
+│                                     is NOT here - news-retrieval owns it
+├── geopolitical_signal_layer1.py      geopolitical_signal Stage A - row creation
+├── geopolitical_signal_overrides.py   geopolitical_signal Stage A - source-specific
+│                                     overrides applied over the layer-1 rules
+├── geopolitical_signal_stage_b.py     geopolitical_signal Stage B - the one
+│                                     irreversible verdict: talk vs action ->
+│                                     signal / weak_signal / noise. Fails OPEN
+│                                     (unsure -> weak_signal, never noise) because
+│                                     weak_signal and noise never reach C/D/E
+├── geopolitical_signal_layer2.py      geopolitical_signal Stage C - one model call
+│                                     per HIGH article: channel, assets, category,
+│                                     entities, event_date, generated_summary. Raw
+│                                     urllib, same as Stage B. Fail-open: a parse
+│                                     failure stores HIGH with null tags rather
+│                                     than dropping a real signal
+├── geopolitical_signal_stage_d.py     geopolitical_signal Stage D - corroboration
+│                                     grading, no model call. Absent key = never
+│                                     ran; {"count": 0} = ran and stands alone
+└── geopolitical_signal_stage_e.py     geopolitical_signal Stage E - story grouping,
+│                                     no model and no network call; reuses the
+│                                     entities Stage C verified. build_stories()
+│                                     (seeded, not union-find), story_development()
+│                                     (the field written to the seed row),
+│                                     _entity_keys()/_is_specific()/_linked().
+│                                     MARKS, never deletes - see its docstring
 └── adapters/
     ├── news_client.py   Infrastructure - async HTTP client for news-retrieval:
     │                                     trigger_run(), fetch_latest_run(),
@@ -146,7 +181,7 @@ Not triggered via `POST /run` - runs as a scheduled CLI job (`classify-taiwan-si
 twice daily (14:00 UTC post-Asia-close, 21:00 UTC pre-US-open, Mon-Fri; see
 `infra/modules/ecs_cluster/services.tf`'s `signal_detection_agent_taiwan_signals` rule).
 news-retrieval fetches this domain independently on its own 4-hourly schedule
-(`news_retrieval_taiwan_market_signal`) and stops at fetch/dedup - all ranking,
+(`news_retrieval_taiwan_market_signal`) and stops at fetch/dedup - all revenue scoring,
 clause-code lookup, translation, and LLM classification happen here.
 
 ```
@@ -155,19 +190,81 @@ classify-taiwan-signals [--from-date] [--to-date]   (defaults: today, UTC)
   └─ run_taiwan_signal_classification(job_id, from_date, to_date)
        ├─ list_completed_runs(domain, from_date, to_date)   # ALL runs in window, not just latest
        ├─ get_run_articles(run_id) per run, deduped by url  → pooled article set
-       ├─ classify_taiwan_signal_batch(pooled_articles)     # full set together - ranking needs it
-       │    ├─ rank_revenue_by_yoy()              # mops_revenue: deterministic YoY rank
+       ├─ get_existing_taiwan_source_ids(taiwan_source_id(a))  # drop already-stored FIRST
+       ├─ fetch_taiwan_revenue_history()          # news-retrieval company_financials; None → skip revenue this run
+       ├─ get_taiwan_remark_translations()        # reuse stored translations of identical remarks
+       ├─ classify_taiwan_signal_batch(pending)   # each item judged on its own
+       │    ├─ score_revenue_articles()           # mops_revenue: vs the company's own 36 months
        │    ├─ classify_material_announcements()  # mops_material: clause-code table lookup
        │    ├─ translate_taiwan_articles()        # LLM translation (OPENAI_MODEL_V2), per-field
        │    └─ classify_gdelt_articles()          # gdelt: LLM HIGH/WEAK verdict on translated title
-       ├─ get_existing_taiwan_source_ids(candidate_source_ids)  # dedup vs already-classified
        └─ insert_taiwan_signal_classification() per new item → update_job_status("completed")
 ```
 
 `source_id` is derived deterministically per source_category (ticker+period for
-mops_revenue/mops_material, ticker+timestamp for gdelt) - not from the news-retrieval
+mops_revenue, ticker+timestamp for mops_material, url for gdelt) - not from the news-retrieval
 article row id - so the same underlying fact re-appearing across multiple news-retrieval
 polls is only ever classified/persisted once, even across the two daily runs.
+
+## Geopolitical Signal Pipeline (`geopolitical_signal`)
+
+Not triggered via `POST /run`. The primary trigger is news-retrieval's `--callback-url`
+webhook (`/webhooks/news-retrieval-run-completed`), which fires the moment that day's
+`geopolitical_news` fetch finishes; the 05:00 UTC CloudWatch rule
+(`signal_detection_agent_geopolitical_signal_pipeline_daily`) is a fallback for a lost
+webhook, not the main path. Running twice in a day is harmless - every stage's worklist
+query selects only rows the previous stage has not processed.
+
+```
+run-geopolitical-signal-pipeline [--from-date] [--to-date]   (defaults: today, UTC)
+  └─ Stage A  run_geopolitical_signal_stage_a(job_id, from_date, to_date)
+  │    ├─ list_completed_runs() -> pooled articles across ALL runs in window
+  │    └─ rule-based filter (no model call) -> rows at status 'waiting'
+  └─ Stage B  run_geopolitical_signal_stage_b(job_id)        # acts on A's 'waiting'
+  │    ├─ LLM: talk vs action -> signal | weak_signal | noise   (IRREVERSIBLE)
+  │    └─ collapse_geopolitical_signal_event_group()
+  │         siblings -> metadata.also_reported_by, sibling rows DELETED, one txn
+  └─ Stage C  run_geopolitical_signal_stage_c(job_id)        # acts on B's signals
+  │    └─ LLM: channel, actors, assets, category[], entities, event_date, summary
+  └─ Stage D  run_geopolitical_signal_stage_d(job_id)        # acts on C's tagged rows
+  │    └─ metadata.corroboration, no model call
+  └─ Stage E  run_geopolitical_signal_stage_e(job_id)        # acts on ALL graded signals
+       ├─ get_geopolitical_signal_story_candidates()   # whole set, not a delta
+       ├─ clear_geopolitical_signal_story_fields()     # idempotent by REWRITING
+       ├─ build_stories() -> seeded entity-overlap grouping (no model, no network)
+       └─ apply_geopolitical_signal_story() per story, one txn each
+            seed row -> metadata.story_development ; members -> metadata.in_story
+```
+
+The same five stages, in the same order, run in `routes/webhooks.py`'s
+`_run_geopolitical_signal_pipeline_in_background`. `classify-geopolitical-signals-stage-e`
+also exists as a standalone command for re-grouping without re-running A-D.
+
+**Stage E runs last in both trigger paths.** It is appended to
+`run-geopolitical-signal-pipeline` and to `routes/webhooks.py`'s
+`_run_geopolitical_signal_pipeline_in_background`, so every API read of this domain is
+post-Stage-E. That is required, not cosmetic: the default signals view filters on
+`NOT (metadata ? 'in_story')`, so if E never ran the filter would match every row and the
+reader would see one story under several headlines. Any new trigger path must include it;
+wiring only one of the two leaves the other writing no story fields at all.
+
+Stage E differs from A-D in scope: A-D each act only on the rows the previous stage just
+wrote, but grouping is a property of the whole signal set, so E reads every graded signal
+and regroups from scratch, clearing its own two keys first. Re-running is therefore safe
+and is expected - the webhook and the fallback schedule can both fire in one day. Verified
+against the live 57-signal set: a second run changed 0 of 57 rows, preserved 5 seeds and 8
+members, and left no orphaned `in_story` pointer, no row marked both seed and member, and
+no story field on a non-signal row. Nothing is deleted at this stage - one row per story is
+a filter the caller applies
+(`signal_detection='signal' AND NOT (metadata ? 'in_story')`). In Python that predicate
+must be written `jsonb_exists(metadata, 'in_story')`, since psycopg2 scans the whole query
+string for `?` and `%` placeholders.
+
+Each stage also has its own standalone CLI command (`classify-geopolitical-signals`,
+`...-stage-b`, `-c`, `-d`, `-e`) for re-running one stage in isolation.
+`refresh-geopolitical-category-map` (03:00 UTC, its own schedule) refreshes the
+`geopolitical_signal_companies` cache Stage C reads - company/ticker/category data changes
+rarely, so it is not tied to the news cycle.
 
 ## HTTP API
 
