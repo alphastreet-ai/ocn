@@ -105,6 +105,32 @@ def init_db() -> None:
                 ALTER COLUMN category DROP NOT NULL,
                 ALTER COLUMN materiality DROP NOT NULL
         """)
+        # category TEXT -> TEXT[] (news writes one value, geopolitical_signal
+        # 0-3). This was a manual step in MIGRATION_geopolitical_metadata_cleanup.md
+        # that staging never got, while the list-writing code shipped: psycopg
+        # turned each list into an array LITERAL string ('{"Energy ..."}') in
+        # the TEXT column, signal-herald matched none of them, and sent an empty
+        # digest. Running it here makes the schema follow the code. Guarded on
+        # the current type so it runs once. Rows written in the window before
+        # this hold that literal - cast it back rather than wrapping it again.
+        conn.execute("""
+            DO $$
+            BEGIN
+                IF (SELECT data_type FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'agent_classifications'
+                      AND column_name = 'category') = 'text' THEN
+                    ALTER TABLE agent_classifications
+                        ALTER COLUMN category TYPE TEXT[]
+                        USING CASE
+                            WHEN category IS NULL THEN NULL
+                            WHEN left(category, 1) = '{' AND right(category, 1) = '}'
+                                THEN category::TEXT[]
+                            ELSE ARRAY[category]
+                        END;
+                END IF;
+            END $$
+        """)
         conn.execute("""
             ALTER TABLE agent_classifications
                 ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'news',

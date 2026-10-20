@@ -215,6 +215,20 @@ def test_supplement_is_capped_at_weak_and_subsidiary_dividend_is_noise(monkeypat
     assert own_dividend["metadata"]["announcement_materiality_signal"] == "HIGH"
 
 
+def test_run_log_stored_totals_match_the_stored_labels(monkeypatch, caplog) -> None:
+    # The path line counts the model's own label; a rule can change it (a
+    # supplement capped at weak), so the stored: line must reconcile.
+    monkeypatch.setattr(tac, "_call_model", lambda messages: _answer())
+    body = "交易日期:115/10/14 交易總金額：新台幣 301,200,000 元"
+    supplement = _material("第20款", "(補充公告)本公司董事會決議通過擬取得國內不動產", body)
+    plain = _material("第20款", "公告本公司取得營業用不動產", body)
+    with caplog.at_level("INFO", logger=tac.logger.name):
+        classify_announcements([supplement, plain])
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[TAIWAN_ANNOUNCEMENT]")]
+    assert "[TAIWAN_ANNOUNCEMENT] model_signal=2" in lines
+    assert "[TAIWAN_ANNOUNCEMENT] stored: signal=1 weak_signal=1 noise=0 rule_overrides=1" in lines
+
+
 def test_repair_message_explains_chinese_units(monkeypatch) -> None:
     sent: list[list[dict]] = []
     answers = iter([_answer(summary="The budget is NT$49 billion."), _answer()])

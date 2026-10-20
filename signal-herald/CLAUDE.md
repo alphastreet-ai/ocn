@@ -71,10 +71,15 @@ Raw Materials & Critical Minerals, Energy & Grid Infrastructure, Nuclear & Advan
 4. Fetch all classified results (paginated)
 5. Filter to categories with at least one signal or weak_signal article
 6. Within each category: keep signal + weak_signal only, sort by score desc, cap at 10
-7. Order categories by highest signal_score descending
+7. Order categories by highest signal_score descending. If no category is visible, log a warning and stop — no summaries, no email
 8. Build "Highest Conviction Today" strip: top 10 articles across all categories (signals first, fill with weak_signal)
 9. Generate 3-4 sentence investment summary per category via OpenRouter
 10. Render branded HTML email and dispatch via SMTP
+
+**Pre-send checks** - no email goes out when:
+- any `category` value is not one of the 19 names (step 4). The list is identical to the agent's `ALLOWED_CATEGORIES`, so this is always broken data (e.g. the 2026-10-20 array-literal strings) - raises `DigestNotSentError`, task exits non-zero
+- no category is visible (step 7) - a genuinely quiet day; logged as a warning, task exits 0
+- any visible category's summary came back empty (step 9) - raises `DigestNotSentError`
 
 ## Infra
 - ECS task: `{env}-signal-herald`, CPU 512 / Mem 1024
