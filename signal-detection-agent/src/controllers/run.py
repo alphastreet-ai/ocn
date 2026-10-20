@@ -180,7 +180,28 @@ async def submit_run(
     return job_id, news_run_id, False
 
 
-async def run_taiwan_signal_classification(job_id: int, from_date: str, to_date: str) -> None:
+def _in_taiwan_backfill_scope(
+    article: dict[str, Any], revenue_period: str | None, material_month: str | None,
+) -> bool:
+    """Backfill scope: revenue for exactly `revenue_period` (YYYY-MM) and
+    announcements filed in `material_month` (YYYY-MM); gdelt is excluded.
+    A category whose option is None is excluded too."""
+    meta = article.get("metadata") or {}
+    category = meta.get("source_category")
+    if category == "mops_revenue":
+        return revenue_period is not None and meta.get("period_gregorian") == revenue_period
+    if category == "mops_material":
+        return material_month is not None and (meta.get("statement_date") or "")[:7] == material_month
+    return False
+
+
+async def run_taiwan_signal_classification(
+    job_id: int,
+    from_date: str,
+    to_date: str,
+    revenue_period: str | None = None,
+    material_month: str | None = None,
+) -> None:
     """Classify taiwan_market_signal items across ALL of news-retrieval's
     completed runs in [from_date, to_date] - not just the latest run.
 
@@ -207,6 +228,11 @@ async def run_taiwan_signal_classification(job_id: int, from_date: str, to_date:
     Revenue needs the company history from news-retrieval. If it cannot
     be read, revenue items are skipped for this run (not stored as
     unscorable) and the next run retries them.
+
+    revenue_period / material_month (YYYY-MM) restrict a one-off backfill
+    to that revenue period and that month's announcements, dropping
+    everything else (gdelt included) before classifying. Both None (the
+    scheduled run) means no restriction.
     """
     update_job_status(job_id, "running")
     try:
@@ -227,6 +253,16 @@ async def run_taiwan_signal_classification(job_id: int, from_date: str, to_date:
         )
         update_job_status(job_id, "failed", set_completed_at=True)
         return
+
+    if revenue_period or material_month:
+        pooled = len(all_articles)
+        all_articles = [a for a in all_articles
+                        if _in_taiwan_backfill_scope(a, revenue_period, material_month)]
+        logger.info(
+            "[TAIWAN_SIGNAL] job=%d backfill scope revenue_period=%s material_month=%s:"
+            " kept %d of %d pooled articles",
+            job_id, revenue_period, material_month, len(all_articles), pooled,
+        )
 
     if not all_articles:
         update_job_status(job_id, "completed", article_count=0, set_completed_at=True)
@@ -1897,7 +1933,7 @@ async def run_geopolitical_signal_stage_c(job_id: int) -> None:
     this was a deliberate fix during design review, not the naive
     per-article refetch the original plan implied.
 
-    Daily cap (config.GEOPOLITICAL_SIGNAL_STAGE_C_DAILY_CAP, default 200)
+    Daily cap (config.GEOPOLITICAL_SIGNAL_STAGE_C_DAILY_CAP, default 500)
     is a safety tripwire, same reasoning as Stage B's cap - once hit,
     remaining untagged rows are left untouched for the next run.
     """
