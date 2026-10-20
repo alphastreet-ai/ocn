@@ -1507,8 +1507,22 @@ class TestIndustryCheckpointOnlyOnTheLatestMonth:
                     "published": published, "title": "t",
                     "metadata": {"source_category": "jp_industry",
                                  "period": period, "yoy_pct": 5.0}}
-        recent = to_jp_signal(row("August 2026", "2026-08-01T00:00:00+00:00"))
-        stale = to_jp_signal(row("May 2026", "2026-05-01T00:00:00+00:00"))
+        # Months relative to today, by the code's own rule (from the 20th
+        # the newest released month is one back, before it two back) - a
+        # hard-coded "August 2026" stopped being the newest on 2026-10-20
+        # and failed the deploy's test run.
+        from datetime import date, datetime, timezone
+
+        def months_back(n):
+            t = date.today().replace(day=1)
+            for _ in range(n):
+                t = (t.replace(day=1) - __import__("datetime").timedelta(days=1)).replace(day=1)
+            return t
+        newest = months_back(1 if date.today().day >= 20 else 2)
+        old = months_back(5)
+        now = datetime.now(timezone.utc).isoformat()
+        recent = to_jp_signal(row(newest.strftime("%B %Y"), now))
+        stale = to_jp_signal(row(old.strftime("%B %Y"), now))
         assert recent["nextCheckpoint"] is not None
         assert stale["nextCheckpoint"] is None
 
