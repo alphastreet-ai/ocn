@@ -11,6 +11,12 @@ logger = logging.getLogger(__name__)
 _SIGNAL_TIER_ORDER = {"signal": 0, "weak_signal": 1, "noise": 2}
 
 
+class DigestNotSentError(Exception):
+    """The digest failed a pre-send check, so no email went out. Raised
+    rather than logged so the run exits non-zero and shows as a failed
+    ECS task instead of a quiet success."""
+
+
 def dedupe_by_story(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse near-duplicate articles (same event, different outlet rewrite)
     to the single highest-scoring one, so one story can't flood a category or
@@ -94,6 +100,7 @@ def _build_and_send(job_id: int) -> None:
     # tested on a list, which is always True - every article skipped and
     # an EMPTY DIGEST sent, with no error raised anywhere.
     all_categorised: dict[str, list[dict[str, Any]]] = {}
+    unrecognised: dict[str, int] = {}
     for r in results:
         raw = r.get("category")
         if not raw:
@@ -101,6 +108,20 @@ def _build_and_send(job_id: int) -> None:
         for category in ([raw] if isinstance(raw, str) else raw):
             if category in config.CATEGORIES:
                 all_categorised.setdefault(category, []).append(r)
+            else:
+                unrecognised[str(category)] = unrecognised.get(str(category), 0) + 1
+
+    # config.CATEGORIES is the same 19 names the agent validates every
+    # classification against, so a name outside it is never a real new
+    # category - it is broken data (on 2026-10-20 every row came back as
+    # the array literal '{"..."}' and all 301 were dropped). Even a few
+    # such rows mean articles are silently missing, so refuse to send
+    # rather than mail a partial digest. Checked before any LLM call.
+    if unrecognised:
+        raise DigestNotSentError(
+            f"job_id={job_id}: {sum(unrecognised.values())} category value(s) not in "
+            f"config.CATEGORIES, e.g. {sorted(unrecognised)[:3]} - email not sent"
+        )
 
     # Only keep categories that have at least one signal or weak_signal
     categorised: dict[str, list[dict[str, Any]]] = {
@@ -131,12 +152,32 @@ def _build_and_send(job_id: int) -> None:
         "Visible categories (%d): %s", len(ordered_categories), ordered_categories
     )
 
+    # Nothing survived the category + signal filters (e.g. the agent's
+    # category names drifted from config.CATEGORIES, or the job produced no
+    # signals). Sending would mail every recipient an empty digest, so stop
+    # here - before the per-category LLM summary calls.
+    if not ordered_categories:
+        logger.warning(
+            "No visible articles for job_id=%s (%d rows fetched, %d categorised) - "
+            "skipping email",
+            job_id, len(results), len(all_categorised),
+        )
+        return
+
     # Summarise each visible category (pass all articles incl. noise for richer context)
     summaries: dict[str, str] = {}
     for cat in ordered_categories:
         articles = all_categorised[cat]
         logger.info("Summarising category: %s (%d articles)", cat, len(articles))
         summaries[cat] = llm_client.summarise_category(cat, articles)
+
+    # A model reply with no content comes back as "" rather than an error,
+    # which would render as a category block with a blank summary.
+    blank = [cat for cat in ordered_categories if not summaries[cat]]
+    if blank:
+        raise DigestNotSentError(
+            f"job_id={job_id}: empty summary for {blank} - email not sent"
+        )
 
     # Top 10 highest-scoring across all categories: signals first, fill with weak_signal
     all_visible = [a for articles in visible.values() for a in articles]

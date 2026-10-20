@@ -287,7 +287,7 @@ Tables live in the signal-detection Postgres DB with an `agent_` prefix (mirrors
 |-------|-------------|
 | `agent_job_statuses` | `status TEXT PK` - reference values: pending, running, completed, failed |
 | `agent_jobs` | `id SERIAL PK`, `news_run_id`, `domain`, `status FK`, `article_count`, `created_at`, `completed_at` |
-| `agent_classifications` | `id SERIAL PK`, `job_id FK`, `article_id`, `url`, `title`, `signal_detection`, `signal_score`, `signal_reason`, `materiality`, `category`, `entities_json TEXT`, `entity_names_normalized TEXT[]`, `stored_at`, `base_signal_detection`, `base_signal_score`, `novelty`, `novelty_basis`, `confidence`, `confidence_basis`, `refinement_reason`, `pre_verification_score`, `verification_qa JSONB`, `source_type`, `source_id`, `metadata JSONB` |
+| `agent_classifications` | `id SERIAL PK`, `job_id FK`, `article_id`, `url`, `title`, `signal_detection`, `signal_score`, `signal_reason`, `materiality`, `category TEXT[]`, `entities_json TEXT`, `entity_names_normalized TEXT[]`, `stored_at`, `base_signal_detection`, `base_signal_score`, `novelty`, `novelty_basis`, `confidence`, `confidence_basis`, `refinement_reason`, `pre_verification_score`, `verification_qa JSONB`, `source_type`, `source_id`, `metadata JSONB` |
 
 `url` and `title` are lightweight display references only - full article content stays in news-retrieval.
 Second-pass columns (`base_*`, `novelty*`, `confidence*`, `refinement_reason`, `pre_verification_score`, `verification_qa`) are NULL for noise articles and for rows classified before the two-stage pipeline (backward-compatible).

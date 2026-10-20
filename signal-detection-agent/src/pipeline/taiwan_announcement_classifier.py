@@ -401,6 +401,7 @@ def fixed_noise_reason(meta: dict[str, Any], subject: str, body: str = "") -> st
 # ---------------------------------------------------------------------------
 # Model answer (column vocabulary) -> this pipeline's HIGH/WEAK/NOISE.
 _SIGNAL_DETECTION = {"signal": "HIGH", "weak_signal": "WEAK", "noise": "NOISE"}
+_DETECTION_OF = {v: k for k, v in _SIGNAL_DETECTION.items()}
 # Counted without the bracketed Chinese after names: two "English (原文)"
 # names put a two-sentence reason at 486 characters against the old 400.
 _REASON_MIN, _REASON_MAX = 20, 500
@@ -1399,6 +1400,9 @@ def classify_announcements(articles: list[dict[str, Any]]) -> None:
     filing says and nothing else."""
     pending: list[tuple[dict, dict, str, str, str | None]] = []
     counts: dict[str, int] = {}
+    # Model labels _rating changed - the path counts below carry the model's
+    # own label, so without this the "stored:" totals would not reconcile.
+    overridden: list[str] = []
     for a in articles:
         meta = a.get("metadata") or {}
         if meta.get("source_category") != "mops_material":
@@ -1487,7 +1491,9 @@ def classify_announcements(articles: list[dict[str, Any]]) -> None:
             meta["announcement_materiality_signal"] = _rating(meta, subject, out["signal_detection"], body)
             meta["announcement_materiality_reason"] = out["signal_reason"]
             label = out["signal_detection"]
-            return f"{label}_repaired" if status == "repaired" else label
+            if meta["announcement_materiality_signal"] != _SIGNAL_DETECTION[label]:
+                overridden.append(label)
+            return f"model_{label}_repaired" if status == "repaired" else f"model_{label}"
         # The summary is discarded (translated_body gets the literal
         # translation), but a label and reason that pass the checks on
         # their own still stand - whether the filing is worth reading does
@@ -1496,7 +1502,9 @@ def classify_announcements(articles: list[dict[str, Any]]) -> None:
         if kept:
             meta["announcement_materiality_signal"] = _rating(meta, subject, kept["signal_detection"], body)
             meta["announcement_materiality_reason"] = kept["signal_reason"]
-            return f"{kept['signal_detection']}_label_only"
+            if meta["announcement_materiality_signal"] != _SIGNAL_DETECTION[kept["signal_detection"]]:
+                overridden.append(kept["signal_detection"])
+            return f"model_{kept['signal_detection']}_label_only"
         meta["announcement_materiality_signal"] = "WEAK"
         meta["announcement_materiality_reason"] = _FALLBACK_REASON[status.split(":")[0]]
         return "fallback"
@@ -1514,6 +1522,13 @@ def classify_announcements(articles: list[dict[str, Any]]) -> None:
     for result in results:
         counts[result] = counts.get(result, 0) + 1
     logger.info("[TAIWAN_ANNOUNCEMENT] %s", " ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    # What is stored (signal_detection column), from the final rating itself -
+    # the one line here that always matches the database.
+    stored = {label: 0 for label in _SIGNAL_DETECTION}
+    for _, meta, *_ in pending:
+        stored[_DETECTION_OF[meta["announcement_materiality_signal"]]] += 1
+    logger.info("[TAIWAN_ANNOUNCEMENT] stored: %s rule_overrides=%d",
+                " ".join(f"{k}={v}" for k, v in stored.items()), len(overridden))
     with _usage_lock:
         u = dict(_usage)
         _usage.update(calls=0, prompt=0, cached=0, completion=0, cost=0.0)

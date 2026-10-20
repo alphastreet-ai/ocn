@@ -260,6 +260,12 @@ over ~4,300 historical announcements showed the clause often cannot decide mater
   restates each code check with WRONG/RIGHT examples, so the first answer passes: first
   answers passing went from 71% to 84-88% on fresh 80-filing samples (2026-10-18); every
   retry is logged with its cause (`... retry: <why>`).
+- **Run log:** two count lines per run. The path line (`fixed_noise=6 model_noise=32
+  model_signal_repaired=1 ...`) says how each filing was decided; `model_*` is the
+  model's OWN label, before `_rating`'s rules. The `stored: signal=N weak_signal=N noise=N
+  rule_overrides=N` line is the final label - what the `signal_detection` column holds -
+  and `rule_overrides` is how many model labels `_rating` changed, which is the whole
+  difference between the two lines' model counts.
 - **Cost:** the instructions (~4,600 tokens, ~94% of each call's input) are identical for
   every filing and sent first, so the provider caches them automatically (measured 86-90%
   of input tokens cached; ~$0.004-0.01 per filing). Keep anything per-filing out of the
