@@ -186,6 +186,9 @@ clause-code lookup, translation, and LLM classification happen here.
 
 ```
 classify-taiwan-signals [--from-date] [--to-date]   (defaults: today, UTC)
+                        [--revenue-period YYYY-MM] [--material-month YYYY-MM]
+                        # one-off backfill scope; either set → only that revenue
+                        # period + that month's announcements, gdelt skipped
   └─ create_job(domain=TAIWAN_SIGNAL_DOMAIN)
   └─ run_taiwan_signal_classification(job_id, from_date, to_date)
        ├─ list_completed_runs(domain, from_date, to_date)   # ALL runs in window, not just latest

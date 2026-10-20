@@ -93,7 +93,23 @@ def backfill_filing_tickers_cmd() -> None:
     help="End date (YYYY-MM-DD) of the news-retrieval run window to pool. "
     "Defaults to today (UTC).",
 )
-def classify_taiwan_signals(from_date: str | None, to_date: str | None) -> None:
+@click.option(
+    "--revenue-period",
+    default=None,
+    help="Backfill only: classify revenue for this period (YYYY-MM) only. "
+    "With either backfill option set, gdelt and out-of-scope items are skipped.",
+)
+@click.option(
+    "--material-month",
+    default=None,
+    help="Backfill only: classify material announcements filed in this month (YYYY-MM) only.",
+)
+def classify_taiwan_signals(
+    from_date: str | None,
+    to_date: str | None,
+    revenue_period: str | None,
+    material_month: str | None,
+) -> None:
     """One-shot: pool today's completed taiwan_market_signal news-retrieval
     runs, rank/classify/translate, persist. Entry point for the twice-daily
     CloudWatch-triggered scheduled task (post-Asia-close and pre-US-open) -
@@ -119,7 +135,10 @@ def classify_taiwan_signals(from_date: str | None, to_date: str | None) -> None:
         "Created taiwan_market_signal job_id=%s from_date=%s to_date=%s",
         job_id, from_date, to_date,
     )
-    asyncio.run(run_taiwan_signal_classification(job_id, from_date, to_date))
+    asyncio.run(run_taiwan_signal_classification(
+        job_id, from_date, to_date,
+        revenue_period=revenue_period, material_month=material_month,
+    ))
     logger.info("taiwan_market_signal job_id=%s finished", job_id)
 
 

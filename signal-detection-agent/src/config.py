@@ -70,13 +70,23 @@ GEOPOLITICAL_SIGNAL_STAGE_B_DAILY_CAP: int = int(
 # tripwire after the Stage A allowlist expansion (32 -> 45 domains), which
 # recovers ~126 historical drops and is projected to roughly double the
 # HIGH rate to 3-4/day - still two orders of magnitude below this ceiling.
+#
+# Raised 200 -> 500 on 2026-10-20. The driver is RE-TAGGING, not daily
+# volume: a change to the channel vocabulary (subsidies/regulation added
+# the same day) means re-running Stage C over every stored signal, and
+# the cap counts calls made today, so a re-tag pass and that day's
+# normal run share one budget. Measured at the time: 68 signals stored,
+# 23 calls already made that day - comfortable at 200, but the margin
+# disappears once the pool grows or a re-tag is repeated after a fix.
+# 500 keeps this a tripwire against a runaway loop rather than a limit
+# real work has to plan around.
 GEOPOLITICAL_SIGNAL_STAGE_C_DAILY_CAP: int = int(
-    os.environ.get("GEOPOLITICAL_SIGNAL_STAGE_C_DAILY_CAP", "200")
+    os.environ.get("GEOPOLITICAL_SIGNAL_STAGE_C_DAILY_CAP", "500")
 )
 # Stage B and Stage C (both single-model-call-per-row) share
 # CLASSIFY_CONCURRENCY and the module-level _executor in controllers/run.py -
 # same pool the news domain already uses, no dedicated knob needed since
-# their own daily caps (1000/200) bound total volume anyway.
+# their own daily caps (1000/500) bound total volume anyway.
 
 # Taiwan's translate/gdelt-relevance loops (pipeline/taiwan_signal_classifier.py)
 # - both are single blocking HTTP calls per item, same shape as the other
