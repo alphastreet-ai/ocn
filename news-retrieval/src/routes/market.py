@@ -206,6 +206,26 @@ def taiwan_revenue_history() -> dict:
     return {"rows": get_financials(DOMAIN)}
 
 
+@router.get("/market/middle-east/universe")
+def middle_east_universe() -> dict:
+    """The Middle East company table (seed.MIDDLE_EAST_TICKER_UNIVERSE),
+    unchanged: each company's own listing, aliases and the US
+    `counterparties` its news moves, with `share_price_on_good_news`.
+
+    Served rather than copied onto articles at fetch time, unlike Taiwan's
+    customers: a Taiwan source is scoped to one company, but a Middle East
+    article is a wire or press story that can name a company in passing,
+    so which companies it is ABOUT is the classifier's decision.
+    signal-detection-agent reads this once per run and attaches
+    counterparties only for the companies it has verified the article is
+    about. Read live, so a correction to the table reaches the next run
+    rather than being frozen onto stored articles.
+    """
+    from seed import MIDDLE_EAST_TICKER_UNIVERSE
+
+    return {"companies": MIDDLE_EAST_TICKER_UNIVERSE}
+
+
 @router.get("/market/china/revenue-history")
 def china_revenue_history(
     refresh: bool = False, codes: str | None = None,

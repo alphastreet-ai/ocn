@@ -155,7 +155,7 @@ def init_db() -> None:
         conn.execute("""
             ALTER TABLE agent_classifications
                 ADD CONSTRAINT agent_classifications_source_type_check
-                    CHECK (source_type IN ('news', 'sec_filing', 'company_specific', 'taiwan_market_signal', 'geopolitical_signal', 'korea_market_signal', 'macro_signal', 'japan_market_signal', 'china_market_signal'))
+                    CHECK (source_type IN ('news', 'sec_filing', 'company_specific', 'taiwan_market_signal', 'geopolitical_signal', 'korea_market_signal', 'macro_signal', 'japan_market_signal', 'china_market_signal', 'middle_east_market_signal'))
         """)
         # signal_detection's allowed set is widened (same drop/recreate
         # pattern as source_type above) to add 'waiting' - geopolitical_signal
@@ -285,6 +285,16 @@ def init_db() -> None:
                 idx_agent_classifications_china_source_id
                 ON agent_classifications (source_type, source_id)
                 WHERE source_type = 'china_market_signal'
+        """)
+        # middle_east_market_signal: same as China - source_id is the
+        # article's own url from news-retrieval, globally unique there (a
+        # real url for WAM/SPA/BIS/Substack rows, a synthetic er-me:// /
+        # me-federal-register:// / sec-stake:// key for the rest).
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_agent_classifications_middle_east_source_id
+                ON agent_classifications (source_type, source_id)
+                WHERE source_type = 'middle_east_market_signal'
         """)
         # metadata->>'ticker' filtering (list_all_results/list_results) would
         # otherwise sequential-scan the whole table on every ticker-filtered

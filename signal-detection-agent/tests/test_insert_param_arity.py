@@ -110,3 +110,12 @@ class TestJapanInsertArity:
         from models.jobs import insert_japan_signal_classification
         insert_japan_signal_classification(1, _ARTICLE, _japan_result(entities=[]))
         assert conn.calls[0][1][-1] == []
+
+
+class TestMiddleEastInsertArity:
+    def test_insert_binds_every_placeholder(self, conn):
+        from models.jobs import insert_middle_east_signal_classification
+        insert_middle_east_signal_classification(
+            1, {"url": "er-me://1", "title": "t", "published": None},
+            {"signal": "noise", "reason": "r", "entities": [], "metadata": {}})
+        assert conn.calls, "insert never executed"

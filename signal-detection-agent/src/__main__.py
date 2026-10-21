@@ -481,6 +481,76 @@ def classify_china_signals(from_date: str | None, to_date: str | None) -> None:
     logger.info("china_market_signal job_id=%s finished", job_id)
 
 
+@cli.command("classify-middle-east-signals")
+@click.option("--from-date", default=None,
+              help="Start date (YYYY-MM-DD) of the news-retrieval run window. "
+              "Defaults to YESTERDAY (UTC) - see below.")
+@click.option("--to-date", default=None,
+              help="End date (YYYY-MM-DD) of the run window. Defaults to today (UTC).")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Pool and report what would be classified, per source; "
+              "store nothing and create no job.")
+def classify_middle_east_signals(
+    from_date: str | None, to_date: str | None, dry_run: bool,
+) -> None:
+    """One-shot: pool completed middle_east_market_signal news-retrieval
+    runs, skip articles already judged, classify, store. Runs to
+    completion and exits (not a server).
+
+    The default window is yesterday AND today, not today only. The window
+    selects news-retrieval RUNS by date, so a fetch that finishes after
+    the day's last classify pass would otherwise be left for a pass that
+    only reads the next day - orphaned for good (China lost Saturday
+    filings exactly this way). Two days closes that gap at no cost:
+    articles already judged are skipped before any work is done.
+    """
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    import config
+    from controllers.run import (
+        load_middle_east_company_table,
+        pool_middle_east_articles,
+        run_middle_east_signal_classification,
+    )
+    from models.jobs import create_job
+    from pipeline.middle_east_signal_classifier import describe_pool
+
+    today = datetime.now(timezone.utc).date()
+    from_date = from_date or (today - timedelta(days=1)).isoformat()
+    to_date = to_date or today.isoformat()
+
+    logger.info("Initialising database...")
+    init_db()
+    seed()
+
+    if dry_run:
+        pool = asyncio.run(pool_middle_east_articles(from_date, to_date))
+        logger.info(
+            "[MIDDLE_EAST_SIGNAL] dry run %s..%s: runs=%d pooled=%d"
+            " already_judged=%d new=%d no_url=%d",
+            from_date, to_date, len(pool["run_ids"]), len(pool["pooled"]),
+            pool["already_judged"], len(pool["new"]), pool["no_url"])
+        for name, count in describe_pool(pool["new"]).items():
+            logger.info("[MIDDLE_EAST_SIGNAL]   new from %-32s %d", name, count)
+        companies, problems = asyncio.run(load_middle_east_company_table())
+        logger.info(
+            "[MIDDLE_EAST_SIGNAL] company table: %d companies, %d with"
+            " counterparties, %d counterparty links, %d problems",
+            len(companies), sum(1 for c in companies if c.get("counterparties")),
+            sum(len(c.get("counterparties") or []) for c in companies), len(problems))
+        for problem in problems:
+            logger.error("[MIDDLE_EAST_SIGNAL] company table: %s", problem)
+        return
+
+    job_id = create_job(domain=config.MIDDLE_EAST_SIGNAL_DOMAIN)
+    logger.info(
+        "Created middle_east_market_signal job_id=%s from_date=%s to_date=%s",
+        job_id, from_date, to_date)
+    asyncio.run(run_middle_east_signal_classification(job_id, from_date, to_date))
+    logger.info("middle_east_market_signal job_id=%s finished", job_id)
+
+
 @cli.command("summarize-korea-signals")
 @click.option(
     "--date",

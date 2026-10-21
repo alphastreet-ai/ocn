@@ -95,6 +95,26 @@ async def fetch_taiwan_revenue_history() -> list[dict[str, Any]] | None:
         return None
 
 
+async def fetch_middle_east_universe() -> list[dict[str, Any]] | None:
+    """The Middle East company table from news-retrieval
+    (seed.MIDDLE_EAST_TICKER_UNIVERSE, served unchanged) - each company's
+    own listing, aliases and US counterparties.
+
+    Returns None on failure - distinct from [] - because a row classified
+    without the table would be stored permanently without its read-through;
+    the caller fails the run instead and the next pass retries.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(
+                f"{config.NEWS_RETRIEVAL_URL}/market/middle-east/universe")
+            resp.raise_for_status()
+            return resp.json().get("companies") or []
+    except Exception:
+        logger.exception("Failed to fetch the Middle East company table")
+        return None
+
+
 async def trigger_run(domain: str, days_back: int = 7) -> int:
     """POST /run to news-retrieval; return run_id.
 

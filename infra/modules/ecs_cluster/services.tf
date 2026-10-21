@@ -373,7 +373,7 @@ resource "aws_cloudwatch_event_target" "news_retrieval_geopolitical_news_daily" 
         # fetch actually finishes, so its geopolitical_signal pipeline
         # starts immediately rather than waiting on a fixed-offset guess
         # (signal_detection_agent_geopolitical_signal_pipeline_daily below
-        # still runs on its own 05:00 UTC schedule too, as a fallback for
+        # still runs on its own 04:00 UTC schedule too, as a fallback for
         # if this webhook delivery is ever missed - see that rule's own
         # comment and routes/webhooks.py in signal-detection-agent).
         #
@@ -1018,6 +1018,55 @@ resource "aws_cloudwatch_event_target" "news_retrieval_china_market_signal_month
         # (max(4, days_back//30 + 3)). 35 keeps that at the floor of 4
         # months while clearing the 30-day gate.
         command = ["python", "__main__.py", "trigger", "--domain", "china_market_signal", "--days-back", "35"]
+      }
+    ]
+  })
+}
+
+resource "aws_cloudwatch_event_rule" "news_retrieval_middle_east_market_signal" {
+  # DISABLED for now (2026-10-21): the fetch runs, but nothing classifies
+  # this domain yet - signal-detection-agent's classifier is still being
+  # built - so scheduled fetches would only accumulate unjudged articles
+  # and spend newsapi.ai tokens. Set to "ENABLED" together with the
+  # classify schedule once the classifier is live.
+  state = "DISABLED"
+  name  = "${var.env}-news-retrieval-middle-east-market-signal"
+  # Twice daily, every day: 05:00 UTC (09:00 Gulf) picks up the overnight
+  # war and shipping news and the Gulf morning's announcements; 13:00 UTC
+  # (17:00 Gulf) closes the Gulf business day and lands before the US open
+  # (13:30 UTC). Every day, not Mon-Fri - the Gulf week runs Sun-Thu and the
+  # war does not stop at weekends.
+  #
+  # Two runs, not four: each run costs ~6 newsapi.ai tokens (shipping
+  # takes 2 pages), and the domain shares a 2,000-token plan with
+  # geopolitical_news.
+  schedule_expression = "cron(0 5,13 * * ? *)"
+}
+
+resource "aws_cloudwatch_event_target" "news_retrieval_middle_east_market_signal" {
+  rule     = aws_cloudwatch_event_rule.news_retrieval_middle_east_market_signal.name
+  arn      = aws_ecs_cluster.main.arn
+  role_arn = aws_iam_role.ecs_events.arn
+
+  ecs_target {
+    task_definition_arn = "arn:aws:ecs:${var.aws_region}:${var.aws_account_id}:task-definition/${aws_ecs_task_definition.news_retrieval.family}"
+    launch_type         = "FARGATE"
+    network_configuration {
+      subnets          = var.public_subnet_ids
+      security_groups  = [var.news_sg_id]
+      assign_public_ip = true
+    }
+  }
+
+  input = jsonencode({
+    containerOverrides = [
+      {
+        name = "news-retrieval"
+        # --days-back 1 with 12 hours between runs: each window overlaps
+        # the previous run's, and the global url dedup stores nothing
+        # twice. The pipeline also drops rows published more than
+        # days_back + 1 days ago (Event Registry selects on crawl date).
+        command = ["python", "__main__.py", "trigger", "--domain", "middle_east_market_signal", "--days-back", "1"]
       }
     ]
   })
@@ -2015,15 +2064,20 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_news_expire_weekl
 # keys first. That makes a second run in the same day safe - which this
 # rule relies on, since it is the fallback for the webhook and both can
 # fire. Measured on the live 57-signal set: a re-run changed 0 of 57 rows.
-#   03:00 - company/category cache refresh (research-universe -> cache
+#   01:00 - company/category cache refresh (research-universe -> cache
 #            table). Kept on its own schedule, independent of the news
 #            cycle - company/ticker/category data changes rarely, so it
-#            doesn't need to run every time the pipeline does. Runs
-#            before the 05:00 UTC pipeline slot so Stage C's cache read
-#            is never more than ~2 hours stale, and before a first-ever
-#            deploy's first pipeline run so the cache starts populated.
-#   05:00 - Stage A -> B -> C -> D -> E, in sequence, in one
-#            task. This is a FALLBACK, not the primary trigger: the
+#            doesn't need to run every time the pipeline does. It runs
+#            BEFORE the 02:00 fetch so that the PRIMARY path - the
+#            webhook pipeline, which starts the moment that fetch
+#            finishes - reads a cache about an hour old. Refreshing
+#            after the fetch instead left the primary run on a
+#            ~23-hour-old cache and gave the fresh one only to the
+#            fallback, which is the run that matters least. Also
+#            guarantees the cache is populated before a first-ever
+#            deploy's first pipeline run.
+#   03:00 - Stage A -> B -> C -> D -> E, in sequence, in one task.
+#            This is a FALLBACK, not the primary trigger: the
 #            primary path is news-retrieval's own --callback-url webhook
 #            (news_retrieval_geopolitical_news_daily above passes
 #            /webhooks/news-retrieval-run-completed as its callback),
@@ -2038,10 +2092,18 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_news_expire_weekl
 #            running the pipeline twice in one day is harmless, since
 #            every stage's worklist query only selects rows the previous
 #            stage hasn't processed yet.
+#            HEADROOM: 03:00 leaves ~48 minutes after the 02:00 fetch
+#            starts. Measured fetch durations are 4.9-11.4 minutes, so
+#            that is ample today, but the margin is the thing to check
+#            first if this rule ever fires while a fetch is still
+#            writing - Stage A would then pool a partial article list.
+#            news-retrieval's vc_commentary and adverse_media fetches
+#            also run at 03:00; different containers, so no conflict,
+#            but they share the cluster.
 resource "aws_cloudwatch_event_rule" "signal_detection_agent_geopolitical_signal_cache_refresh_daily" {
   name                = "${var.env}-signal-detection-agent-geo-signal-cache-refresh-daily"
   description         = "Refresh geopolitical_signal_companies cache (ticker/name/category) from research-universe"
-  schedule_expression = "cron(0 3 * * ? *)"
+  schedule_expression = "cron(0 1 * * ? *)"
   state               = "ENABLED"
 }
 
@@ -2070,7 +2132,7 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_geopolitical_sign
 resource "aws_cloudwatch_event_rule" "signal_detection_agent_geopolitical_signal_pipeline_daily" {
   name                = "${var.env}-signal-detection-agent-geo-signal-pipeline-daily"
   description         = "geopolitical_signal Stage A -> B -> C -> D -> E, run sequentially in one task"
-  schedule_expression = "cron(0 5 * * ? *)"
+  schedule_expression = "cron(0 3 * * ? *)"
   state               = "ENABLED"
 }
 

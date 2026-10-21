@@ -20,6 +20,7 @@ from adapters.news_client import (
     trigger_macro_fetch,
     trigger_run,
     fetch_china_revenue_history,
+    fetch_middle_east_universe,
     fetch_taiwan_revenue_history,
 )
 from models.geopolitical_signal_companies import get_companies_for_name_matching
@@ -33,6 +34,7 @@ from models.jobs import (
     get_existing_china_signal_source_ids,
     get_existing_korea_signal_source_ids,
     get_existing_macro_signal_source_ids,
+    get_existing_middle_east_signal_source_ids,
     get_existing_taiwan_source_ids,
     get_taiwan_recent_remarks,
     get_taiwan_remark_translations,
@@ -45,6 +47,7 @@ from models.jobs import (
     insert_china_signal_classification,
     insert_korea_signal_classification,
     insert_macro_signal_event,
+    insert_middle_east_signal_classification,
     insert_taiwan_signal_classification,
     list_all_results,
     list_macro_signal_events_for_confirmation_recheck,
@@ -92,6 +95,11 @@ from pipeline.china_signal_classifier import (
     compute_c3_baselines, compute_c5_baselines, filing_authority,
     filing_period)
 from models.market_baselines import load_baselines, upsert_baselines
+from pipeline.middle_east_signal_classifier import (
+    classify_middle_east_signal_batch,
+    company_table_problems,
+    describe_pool,
+)
 from pipeline.korea_signal_classifier import classify_korea_signal_batch
 from pipeline.korea_signal_summary import generate_korea_signal_summary
 from pipeline.korea_ticker_universe import KOREA_TICKER_UNIVERSE
@@ -1251,6 +1259,129 @@ async def run_china_signal_classification(job_id: int, from_date: str, to_date: 
         job_id, len(run_ids), len(all_articles), len(classified),
         len(already_done), inserted,
     )
+    update_job_status(job_id, "completed", article_count=inserted, set_completed_at=True)
+
+
+async def pool_middle_east_articles(
+    from_date: str, to_date: str,
+) -> dict[str, Any]:
+    """Step 1: every article from news-retrieval's completed
+    middle_east_market_signal runs in [from_date, to_date], deduped by
+    url, split into already-judged and new.
+
+    Pooled across ALL completed runs in the window, not the latest one:
+    news-retrieval fetches twice a day, and reading only the latest run
+    would silently drop the other.
+
+    The already-judged filter runs BEFORE any classification - the
+    source_id is the article url, known without classifying - so a re-run
+    costs nothing (the China finding: filtering afterwards re-paid for
+    3,694 model calls to insert nothing).
+
+    An article with no url cannot be deduped or stored; it is counted in
+    `no_url` and left out rather than guessed at (news-retrieval
+    guarantees one, so a non-zero count means something upstream broke).
+
+    Raises NewsRetrievalError when news-retrieval cannot be read - the
+    caller decides whether that fails a job.
+    """
+    run_ids = await list_completed_runs(
+        config.MIDDLE_EAST_SIGNAL_DOMAIN, from_date, to_date)
+    pooled: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    no_url = 0
+    for run_id in run_ids:
+        for article in await get_run_articles(run_id):
+            url = article.get("url")
+            if not url:
+                no_url += 1
+                continue
+            if url not in seen_urls:
+                seen_urls.add(url)
+                pooled.append(article)
+    already_judged = get_existing_middle_east_signal_source_ids(
+        [a["url"] for a in pooled])
+    new = [a for a in pooled if a["url"] not in already_judged]
+    return {
+        "run_ids": run_ids,
+        "pooled": pooled,
+        "new": new,
+        "already_judged": len(already_judged),
+        "no_url": no_url,
+    }
+
+
+async def load_middle_east_company_table() -> tuple[list[dict[str, Any]], list[str]]:
+    """Step 2: the company table from news-retrieval, checked.
+
+    Returns (companies, problems). Unreachable is a problem like any
+    other - the caller treats any problem as "do not classify this run".
+    """
+    companies = await fetch_middle_east_universe()
+    if companies is None:
+        return [], ["news-retrieval did not serve /market/middle-east/universe"]
+    return companies, company_table_problems(companies)
+
+
+async def run_middle_east_signal_classification(
+    job_id: int, from_date: str, to_date: str,
+) -> None:
+    """Pool -> skip already judged -> classify -> re-check -> insert.
+
+    The re-check before insert exists because the two scheduled passes
+    can overlap: rows the other pass stored while this one classified are
+    dropped here (and the partial unique index would refuse them anyway).
+    """
+    update_job_status(job_id, "running")
+    try:
+        pool = await pool_middle_east_articles(from_date, to_date)
+    except NewsRetrievalError:
+        logger.exception(
+            "Failed to fetch middle_east_market_signal articles for job %d", job_id)
+        update_job_status(job_id, "failed", set_completed_at=True)
+        return
+
+    logger.info(
+        "[MIDDLE_EAST_SIGNAL] job=%d runs=%d pooled=%d already_judged=%d"
+        " new=%d no_url=%d by_source=%s",
+        job_id, len(pool["run_ids"]), len(pool["pooled"]),
+        pool["already_judged"], len(pool["new"]), pool["no_url"],
+        describe_pool(pool["new"]))
+    if not pool["new"]:
+        update_job_status(job_id, "completed", article_count=0, set_completed_at=True)
+        return
+
+    companies, problems = await load_middle_east_company_table()
+    if problems:
+        # Rows are written once and never revised: judging without a
+        # sound table would store them permanently without (or with
+        # wrong) read-through. Nothing is stored; the next pass retries
+        # the same articles (the default window is two days).
+        for problem in problems:
+            logger.error("[MIDDLE_EAST_SIGNAL] company table: %s", problem)
+        update_job_status(job_id, "failed", set_completed_at=True)
+        return
+
+    classified = classify_middle_east_signal_batch(pool["new"], companies)
+    stored_meanwhile = get_existing_middle_east_signal_source_ids(
+        [c["article"]["url"] for c in classified])
+    to_insert = [c for c in classified if c["article"]["url"] not in stored_meanwhile]
+
+    inserted = 0
+    for c in to_insert:
+        try:
+            insert_middle_east_signal_classification(job_id, c["article"], c["result"])
+            inserted += 1
+        except Exception:
+            logger.exception(
+                "Failed to insert middle_east_market_signal classification for"
+                " url=%s (job %d)", c["article"].get("url"), job_id)
+
+    logger.info(
+        "[MIDDLE_EAST_SIGNAL] job=%d classified=%d stored_meanwhile=%d"
+        " inserted=%d unjudged=%d",
+        job_id, len(classified), len(stored_meanwhile), inserted,
+        len(pool["new"]) - len(classified))
     update_job_status(job_id, "completed", article_count=inserted, set_completed_at=True)
 
 

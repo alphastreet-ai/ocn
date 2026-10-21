@@ -3281,85 +3281,181 @@ CHINA_PRESS_ENGLISH_CHECK_SOURCE: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Middle East market signal
 # ---------------------------------------------------------------------------
-# The spec's 24 tracked companies and funds (section 4), hardcoded like
-# China rather than read from research-universe: most are unlisted (G42,
-# Humain, MGX, QatarEnergy) or listed only on Gulf exchanges, and
-# research-universe's US-ticker filter is what the poller keys on. The US
-# names these move are tracked by ticker through /market/* instead.
+# The spec's companies and funds (section 4), hardcoded like Taiwan's
+# TAIWAN_TICKER_UNIVERSE pending research-universe, which holds neither the
+# unlisted Gulf names (G42, Humain, MGX, the funds, QatarEnergy) nor their US
+# counterparties yet. Source: "Middle East Market Signals for the AI Economy"
+# (Ayushi Shah, 2026-10-15) - every counterparty and direction below is the
+# spec's, cited by section; nothing is added from elsewhere.
 #
-# `listing` is None for unlisted entities - everything about them is
-# "indirect" (government announcements, partners' filings, press).
-# `aliases` carries the other written forms press actually uses; a name
-# that is also a common word ("Elm", "Nova") is only ever matched in its
-# longer form, or every tree and every supernova would match.
-#
-# `us_rise_on_good_news` / `us_fall_on_good_news`: the spec's "good news
-# here means" column - which US tickers move which way when this company
-# has good news. Carried for the classifier; nothing here reads it.
-MIDDLE_EAST_UNIVERSE: list[dict[str, Any]] = [
-    # --- Gulf AI companies and data-centre builders (spec 4.1) ------------
-    {"company": "G42", "country": "UAE", "listing": None,
+# ticker / exchange: the company's OWN listing on its home exchange (same
+#   meaning as Taiwan's). None = not listed; the spec marks everything about
+#   an unlisted company "indirect" (it is seen only through others).
+# aliases: other written forms press uses, for matching (same name as
+#   research-universe's universe_companies.aliases). A company whose name is a
+#   common word is stored under its full name ("Elm Company", "Nova Ltd") so
+#   matching never fires on a tree or Nova Scotia.
+# counterparties: the US companies the spec says this company's news moves.
+#   counterparty_name / counterparty_ticker: the US company and its ticker.
+#   relationship: one plain sentence, role then why, with the spec section.
+#   share_price_on_good_news: the spec's arrow - "rise" or "fall" - for GOOD
+#   news from this company; bad news has the reverse effect. The spec's
+#   hypothesis, not yet tested against prices.
+#   [] = the spec names a group but no US company (its wording is kept in a
+#   comment); no ticker is invented for it.
+def _counterparties(names: dict[str, str], relationship: str,
+                    share_price_on_good_news: str) -> list[dict[str, str]]:
+    """{ticker: name} -> counterparty rows sharing one relationship."""
+    return [{"counterparty_name": name, "counterparty_ticker": ticker,
+             "relationship": relationship,
+             "share_price_on_good_news": share_price_on_good_news}
+            for ticker, name in names.items()]
+
+
+MIDDLE_EAST_TICKER_UNIVERSE: list[dict[str, Any]] = [
+    # --- 4.1 Gulf AI companies and data-centre builders --------------------
+    {"ticker": None, "company": "G42", "exchange": None, "country": "UAE",
      "aliases": ["Core42", "Khazna", "Stargate UAE"],
-     "us_rise_on_good_news": ["NVDA", "AMD", "CSCO", "ORCL", "MSFT", "CBRS"]},
-    {"company": "Humain", "country": "Saudi Arabia", "listing": None,
-     "aliases": [], "us_rise_on_good_news": ["NVDA", "AMD", "QCOM", "AMZN", "CSCO"]},
-    {"company": "Presight AI", "country": "UAE", "listing": "ADX:PRESIGHT",
-     "aliases": ["Presight"], "us_rise_on_good_news": ["PLTR"]},
-    {"company": "Space42", "country": "UAE", "listing": "ADX:SPACE42",
-     "aliases": [], "us_rise_on_good_news": []},
-    {"company": "e&", "country": "UAE", "listing": "ADX:EAND",
-     "aliases": ["Etisalat", "Emirates Telecommunications"],
-     "us_rise_on_good_news": ["CSCO", "ORCL", "MSFT"]},
-    {"company": "stc", "country": "Saudi Arabia", "listing": "Tadawul:7010",
+     "counterparties": [
+         *_counterparties({"NVDA": "Nvidia", "CSCO": "Cisco", "ORCL": "Oracle"},
+                          "Partner: building G42's 5-gigawatt AI campus in Abu Dhabi (spec 2.1)", "rise"),
+         *_counterparties({"AMD": "AMD"},
+                          "Supplier: sells into the Gulf AI data-centre projects (spec 2.1)", "rise"),
+         *_counterparties({"MSFT": "Microsoft"},
+                          "Investor: owns a stake in G42 (spec 4.1)", "rise"),
+         *_counterparties({"CBRS": "Cerebras"},
+                          "Supplier: named by the spec as affected by G42's news (spec 4.1)", "rise"),
+     ]},
+    {"ticker": None, "company": "Humain", "exchange": None, "country": "Saudi Arabia",
+     "aliases": [],
+     "counterparties": [
+         *_counterparties({"NVDA": "Nvidia", "AMD": "AMD", "AMZN": "Amazon", "QCOM": "Qualcomm"},
+                          "Supplier: signed part of Humain's ~$23 billion of agreements (spec 2.1)", "rise"),
+         *_counterparties({"CSCO": "Cisco"},
+                          "Supplier: sells into the Gulf AI data-centre projects (spec 2.1)", "rise"),
+     ]},
+    {"ticker": "PRESIGHT", "company": "Presight AI", "exchange": "ADX", "country": "UAE",
+     "aliases": ["Presight"],
+     "counterparties": _counterparties(
+         {"PLTR": "Palantir"},
+         "Peer: a US AI software company; Presight is G42's listed AI software arm (spec 4.1)", "rise")},
+    # Spec 4.1: "US satellite and connectivity companies" - no company named.
+    {"ticker": "SPACE42", "company": "Space42", "exchange": "ADX", "country": "UAE",
+     "aliases": [], "counterparties": []},
+    {"ticker": "EAND", "company": "e&", "exchange": "ADX", "country": "UAE",
+     "aliases": ["Etisalat", "Emirates Telecommunications Group"],
+     "counterparties": _counterparties(
+         {"CSCO": "Cisco", "ORCL": "Oracle", "MSFT": "Microsoft"},
+         "Supplier: sells into e&'s data centres and cloud services (spec 4.1)", "rise")},
+    {"ticker": "7010", "company": "stc", "exchange": "Tadawul", "country": "Saudi Arabia",
      "aliases": ["Saudi Telecom", "center3"],
-     "us_rise_on_good_news": ["NVDA", "CSCO", "ORCL", "MSFT"]},
-    {"company": "Elm Company", "country": "Saudi Arabia", "listing": "Tadawul:7203",
-     "aliases": [], "us_rise_on_good_news": []},
-    {"company": "Ooredoo", "country": "Qatar", "listing": "QSE:ORDS",
-     "aliases": [], "us_rise_on_good_news": ["NVDA"]},
-    # --- Gulf government investment funds (spec 4.2) ----------------------
-    {"company": "MGX", "country": "UAE", "listing": None,
-     "aliases": [], "us_rise_on_good_news": ["NVDA", "MSFT"]},
-    {"company": "Mubadala", "country": "UAE", "listing": None,
-     "aliases": [], "us_rise_on_good_news": ["GFS"]},
-    {"company": "Abu Dhabi Investment Authority", "country": "UAE", "listing": None,
-     "aliases": ["ADIA"], "us_rise_on_good_news": []},
-    {"company": "ADQ", "country": "UAE", "listing": None,
-     "aliases": [], "us_rise_on_good_news": []},
-    {"company": "Public Investment Fund", "country": "Saudi Arabia", "listing": None,
-     "aliases": ["PIF"], "us_rise_on_good_news": ["NVDA", "AMD", "QCOM"]},
-    {"company": "Qatar Investment Authority", "country": "Qatar", "listing": None,
-     "aliases": ["QIA"], "us_rise_on_good_news": []},
-    # --- Energy, power and helium (spec 4.3) -------------------------------
-    # QatarEnergy is the one row whose good news splits: a Ras Laffan
-    # restart lifts the helium buyers and lowers the helium sellers.
-    {"company": "QatarEnergy", "country": "Qatar", "listing": None,
+     "counterparties": _counterparties(
+         {"NVDA": "Nvidia", "CSCO": "Cisco", "ORCL": "Oracle", "MSFT": "Microsoft"},
+         "Supplier: sells into stc's center3 data centres (spec 4.1)", "rise")},
+    # Spec 4.1: "US business software and cloud companies" - no company named.
+    {"ticker": "7203", "company": "Elm Company", "exchange": "Tadawul", "country": "Saudi Arabia",
+     "aliases": [], "counterparties": []},
+    {"ticker": "ORDS", "company": "Ooredoo", "exchange": "QSE", "country": "Qatar",
+     "aliases": [],
+     "counterparties": _counterparties(
+         {"NVDA": "Nvidia"},
+         "Supplier: its GPUs are the computing Ooredoo rents out (spec 4.1)", "rise")},
+    # --- 4.2 Gulf government investment funds -------------------------------
+    {"ticker": None, "company": "MGX", "exchange": None, "country": "UAE",
+     "aliases": [],
+     "counterparties": _counterparties(
+         {"NVDA": "Nvidia", "MSFT": "Microsoft"},
+         "Supplier to the AI labs and data-centre companies MGX invests in (spec 4.2)", "rise")},
+    {"ticker": None, "company": "Mubadala", "exchange": None, "country": "UAE",
+     "aliases": ["Mubadala Investment Company"],
+     "counterparties": _counterparties(
+         {"GFS": "GlobalFoundries"},
+         "Investee: Mubadala is its majority owner (spec 4.2)", "rise")},
+    # Spec 4.2: "Data-centre and infrastructure funds" - no company named.
+    {"ticker": None, "company": "Abu Dhabi Investment Authority", "exchange": None, "country": "UAE",
+     "aliases": ["ADIA"], "counterparties": []},
+    {"ticker": None, "company": "ADQ", "exchange": None, "country": "UAE",
+     "aliases": [], "counterparties": []},
+    {"ticker": None, "company": "Public Investment Fund", "exchange": None, "country": "Saudi Arabia",
+     "aliases": ["PIF"],
+     "counterparties": _counterparties(
+         {"NVDA": "Nvidia", "AMD": "AMD", "QCOM": "Qualcomm"},
+         "Supplier to Humain, which PIF owns (spec 2.1, 4.2)", "rise")},
+    # Spec 4.2: "US AI labs and infrastructure companies" - no company named.
+    {"ticker": None, "company": "Qatar Investment Authority", "exchange": None, "country": "Qatar",
+     "aliases": ["QIA"], "counterparties": []},
+    # --- 4.3 Energy, power and helium ---------------------------------------
+    # QatarEnergy's good news splits: a Ras Laffan restart lifts the helium
+    # buyers and lowers the helium sellers.
+    {"ticker": None, "company": "QatarEnergy", "exchange": None, "country": "Qatar",
      "aliases": ["Qatar Energy", "Ras Laffan"],
-     "us_rise_on_good_news": ["MU", "INTC"],
-     "us_fall_on_good_news": ["XOM", "LIN", "APD"]},
-    {"company": "Saudi Aramco", "country": "Saudi Arabia", "listing": "Tadawul:2222",
-     "aliases": ["Aramco"], "us_rise_on_good_news": []},
-    {"company": "ACWA Power", "country": "Saudi Arabia", "listing": "Tadawul:2082",
-     "aliases": [], "us_rise_on_good_news": ["GEV", "VRT", "ETN"]},
-    {"company": "TAQA", "country": "UAE", "listing": "ADX:TAQA",
-     "aliases": ["Abu Dhabi National Energy"], "us_rise_on_good_news": ["GEV", "VRT"]},
-    {"company": "ADNOC Gas", "country": "UAE", "listing": "ADX:ADNOCGAS",
-     "aliases": ["ADNOC"], "us_rise_on_good_news": ["GEV", "VRT", "ETN"]},
-    {"company": "ICL Group", "country": "Israel", "listing": "NYSE:ICL",
-     "aliases": [], "us_rise_on_good_news": ["ICL"]},
-    # --- Israel: chip design, factories and equipment (spec 4.4) ----------
-    {"company": "Tower Semiconductor", "country": "Israel", "listing": "Nasdaq:TSEM",
-     "aliases": [], "us_rise_on_good_news": ["TSEM", "COHR", "LITE"],
-     "us_fall_on_good_news": ["GFS"]},
-    {"company": "Nova Ltd", "country": "Israel", "listing": "Nasdaq:NVMI",
-     "aliases": ["Nova Measuring"], "us_rise_on_good_news": ["NVMI", "KLAC", "ONTO"]},
-    {"company": "Camtek", "country": "Israel", "listing": "Nasdaq:CAMT",
-     "aliases": [], "us_rise_on_good_news": ["CAMT", "KLAC", "ONTO", "MU"]},
-    {"company": "Mobileye", "country": "Israel", "listing": "Nasdaq:MBLY",
-     "aliases": [], "us_rise_on_good_news": ["MBLY", "INTC"]},
-    {"company": "Nvidia Israel", "country": "Israel", "listing": None,
-     "aliases": ["Intel Kiryat Gat", "Kiryat Gat"],
-     "us_rise_on_good_news": ["NVDA", "INTC"]},
+     "counterparties": [
+         *_counterparties({"MU": "Micron", "INTC": "Intel"},
+                          "Helium buyer: its chip factories need the helium Ras Laffan produces (spec 2.4, 4.3)", "rise"),
+         *_counterparties({"XOM": "ExxonMobil"},
+                          "Helium seller: the largest US helium source; earns more while Ras Laffan is offline (spec 4.3)", "fall"),
+         *_counterparties({"LIN": "Linde", "APD": "Air Products"},
+                          "Helium seller: charges more while helium is scarce (spec 2.4, 4.3)", "fall"),
+     ]},
+    # Spec 4.3: "US chipmakers and data-centre operators, through energy
+    # costs" - no company named.
+    {"ticker": "2222", "company": "Saudi Aramco", "exchange": "Tadawul", "country": "Saudi Arabia",
+     "aliases": ["Aramco"], "counterparties": []},
+    {"ticker": "2082", "company": "ACWA Power", "exchange": "Tadawul", "country": "Saudi Arabia",
+     "aliases": [],
+     "counterparties": _counterparties(
+         {"GEV": "GE Vernova", "VRT": "Vertiv", "ETN": "Eaton"},
+         "Supplier: sells power equipment for ACWA's plants, including for data centres (spec 4.3)", "rise")},
+    {"ticker": "TAQA", "company": "TAQA", "exchange": "ADX", "country": "UAE",
+     "aliases": ["Abu Dhabi National Energy"],
+     "counterparties": _counterparties(
+         {"GEV": "GE Vernova", "VRT": "Vertiv"},
+         "Supplier: sells power and cooling equipment to TAQA (spec 4.3)", "rise")},
+    {"ticker": "ADNOCGAS", "company": "ADNOC Gas", "exchange": "ADX", "country": "UAE",
+     "aliases": [],
+     "counterparties": _counterparties(
+         {"GEV": "GE Vernova", "VRT": "Vertiv", "ETN": "Eaton"},
+         "Supplier: sells equipment for the UAE power stations ADNOC Gas supplies (spec 4.3)", "rise")},
+    # Spec 4.3: "US chipmakers, through etch-gas supply" - no company named.
+    {"ticker": "ICL", "company": "ICL Group", "exchange": "NYSE", "country": "Israel",
+     "aliases": [], "counterparties": []},
+    # --- 4.4 Israel: chip design, factories and equipment -------------------
+    {"ticker": "TSEM", "company": "Tower Semiconductor", "exchange": "Nasdaq", "country": "Israel",
+     "aliases": [],
+     "counterparties": [
+         *_counterparties({"COHR": "Coherent", "LITE": "Lumentum"},
+                          "Customer: US optical networking company using the optical chips Tower makes for AI data centres (spec 4.4)", "rise"),
+         *_counterparties({"GFS": "GlobalFoundries"},
+                          "Competitor: also makes specialty chips (spec 4.4)", "fall"),
+     ]},
+    {"ticker": "NVMI", "company": "Nova Ltd", "exchange": "Nasdaq", "country": "Israel",
+     "aliases": ["Nova Measuring Instruments"],
+     "counterparties": _counterparties(
+         {"KLAC": "KLA", "ONTO": "Onto Innovation"},
+         "Peer: strong orders at Nova mean chip factories are spending (spec 4.4)", "rise")},
+    {"ticker": "CAMT", "company": "Camtek", "exchange": "Nasdaq", "country": "Israel",
+     "aliases": [],
+     "counterparties": [
+         *_counterparties({"KLAC": "KLA", "ONTO": "Onto Innovation"},
+                          "Peer: chip inspection and measurement equipment (spec 4.4)", "rise"),
+         *_counterparties({"MU": "Micron"},
+                          "AI memory (HBM) maker: Camtek's tools are used heavily for HBM (spec 4.4)", "rise"),
+     ]},
+    {"ticker": "MBLY", "company": "Mobileye", "exchange": "Nasdaq", "country": "Israel",
+     "aliases": [],
+     "counterparties": _counterparties(
+         {"INTC": "Intel"},
+         "Parent: Intel majority-owns Mobileye (spec 4.4)", "rise")},
+    # Spec states the bad-news side (fall when these sites are disrupted);
+    # good news is its reverse, per the spec's own convention.
+    {"ticker": None, "company": "Nvidia Israel and Intel Kiryat Gat", "exchange": None, "country": "Israel",
+     "aliases": ["Nvidia Israel", "Intel Israel", "Kiryat Gat"],
+     "counterparties": [
+         *_counterparties({"NVDA": "Nvidia"},
+                          "Owner: its networking products are designed in Israel (spec 2.4, 4.4)", "rise"),
+         *_counterparties({"INTC": "Intel"},
+                          "Owner: makes chips at its Kiryat Gat factory (spec 2.4, 4.4)", "rise"),
+     ]},
 ]
 
 # Terms a WAM, SPA or BIS item must contain (title, or WAM's own lead) to
@@ -3385,11 +3481,11 @@ _ME_TOPIC_TERMS: list[str] = [
     "shipping", "helium", "LNG", "force majeure",
 ]
 
-_ME_MATCH_TERMS: list[str] = sorted({
-    term
-    for c in MIDDLE_EAST_UNIVERSE
-    for term in [c["company"], *c["aliases"]]
-} | set(_ME_TOPIC_TERMS))
+_ME_COMPANY_NAMES: set[str] = {
+    name for c in MIDDLE_EAST_TICKER_UNIVERSE for name in [c["company"], *c["aliases"]]
+}
+
+_ME_MATCH_TERMS: list[str] = sorted(_ME_COMPANY_NAMES | set(_ME_TOPIC_TERMS))
 
 # The four Gulf funds that file with the SEC. 13F holdings are not
 # fetched: they arrive up to 45 days after quarter end, and the latest
@@ -3495,10 +3591,8 @@ MIDDLE_EAST_SOURCES: list[dict[str, Any]] = [
         "config": {
             "source_outlet_type": "official",
             "countries": ["United Arab Emirates", "Saudi Arabia", "Qatar", "Israel"],
-            "match_terms": sorted({
-                term for c in MIDDLE_EAST_UNIVERSE
-                for term in [c["company"], *c["aliases"]]
-            } | {"Gulf", "Middle East", "UAE", "Emirati", "Saudi", "Qatar", "Israel"}),
+            "match_terms": sorted(_ME_COMPANY_NAMES | {
+                "Gulf", "Middle East", "UAE", "Emirati", "Saudi", "Qatar", "Israel"}),
         },
     },
     {

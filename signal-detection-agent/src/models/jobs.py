@@ -485,6 +485,68 @@ def get_existing_china_signal_source_ids(source_ids: list[str]) -> set[str]:
     return {r["source_id"] for r in rows}
 
 
+def insert_middle_east_signal_classification(
+    job_id: int, article: dict[str, Any], result: dict[str, Any],
+) -> None:
+    """Insert one agent_classifications row for a middle_east_market_signal
+    article. Same shape as insert_china_signal_classification.
+
+    `source_id` is the article's own url (globally unique in
+    news-retrieval), so a re-run or an overlapping scheduled pass hits the
+    partial unique index and inserts nothing twice. `signal_score` stays
+    NULL: labels here come from the spec's rules applied to extracted
+    facts, not from a model's confidence, and inventing a score would
+    misstate what decided the row. Entities go in `entities_json` - the
+    companies the article is verified to be ABOUT, not every name in it.
+    """
+    entities = result.get("entities") or []
+    entity_names_normalized = [
+        e["name"].lower() for e in entities if e.get("name")
+    ]
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_classifications (
+                job_id, source_type, source_id, url, title,
+                signal_detection, signal_score, signal_reason,
+                published, entities_json, entity_names_normalized, metadata
+            ) VALUES (%s, 'middle_east_market_signal', %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                job_id,
+                article.get("url"),
+                article.get("url"),
+                article.get("title"),
+                result["signal"],
+                result.get("signal_score"),
+                result.get("reason"),
+                article.get("published"),
+                json.dumps(entities, ensure_ascii=False),
+                entity_names_normalized,
+                json.dumps(result.get("metadata") or {}, ensure_ascii=False),
+            ),
+        )
+
+
+def get_existing_middle_east_signal_source_ids(source_ids: list[str]) -> set[str]:
+    """The subset of source_ids already stored as middle_east_market_signal,
+    across ALL prior jobs - what lets the classifier skip an article it has
+    already judged before paying for a model call on it."""
+    if not source_ids:
+        return set()
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT source_id FROM agent_classifications
+            WHERE source_type = 'middle_east_market_signal' AND source_id = ANY(%s)
+            """,
+            (source_ids,),
+        ).fetchall()
+    return {r["source_id"] for r in rows}
+
+
 def insert_macro_signal_event(
     job_id: int, event: dict[str, Any], interpretation: dict[str, Any] | None,
 ) -> None:
@@ -911,6 +973,10 @@ def get_taiwan_remark_translations(texts: list[str]) -> dict[str, str]:
 # honestly say about a row it rejected without reading.
 _GEOPOLITICAL_STAGE_A_REASON = {
     "non_english": "Dropped - the article is not in English.",
+    "too_old": (
+        "Dropped - published more than 14 days before this run, so it is "
+        "an archive page the source surfaced rather than news."
+    ),
     "signal": (
         "Federal Register notice whose title names a trade, sanctions or "
         "supply measure - treated as an action without a model call."
@@ -1245,8 +1311,8 @@ def collapse_geopolitical_signal_event_group(
     judged_row_id: int, siblings: list[dict[str, Any]],
 ) -> int:
     """Fold an event group into its judged row: record each other
-    member as coverage, then DELETE those rows. Returns how many were
-    deleted.
+    member as coverage, then TOMBSTONE those rows. Returns how many
+    were tombstoned.
 
     Stage B groups articles by metadata.event_uri and judges one - the
     fullest text in the group. The rest used to be kept, each carrying a
@@ -1262,9 +1328,12 @@ def collapse_geopolitical_signal_event_group(
     Strait of Hormuz" and "US says container ship hit by projectile"
     are one event described two ways.
 
-    THIS DISCARDS DATA AND CANNOT BE UNDONE. The deleted row's body,
-    its own classification and its article_id are gone; only outlet,
-    title and url survive. The grouping is Event Registry's, not ours,
+    The folded row is kept as a tombstone rather than deleted - see the
+    note on the UPDATE below for why - so its body and article_id
+    survive, and the fold is reversible by hand. What is still lost is
+    the row's own place in the feed: the judged row's text is what a
+    reader sees, so an event the judged row does not name is not
+    surfaced anywhere. The grouping is Event Registry's, not ours,
     and ER's "event" is looser than "story" - a live-updates page
     covering two events carries one event_uri, so an event the judged
     row does not name is lost with it. Measured over 13 real clusters
@@ -1272,9 +1341,9 @@ def collapse_geopolitical_signal_event_group(
     live-updates page whose other subject (a strike on a presidential
     palace) existed in no other row.
 
-    Append and delete run in ONE transaction. A half-applied collapse
-    would either drop rows that were never recorded as coverage, or
-    record coverage for rows still present and counted twice.
+    Append and tombstone run in ONE transaction. A half-applied
+    collapse would either hide rows that were never recorded as
+    coverage, or record coverage for rows still live and counted twice.
     """
     entries = [
         {
@@ -1302,8 +1371,46 @@ def collapse_geopolitical_signal_event_group(
             """,
             (json.dumps(entries, ensure_ascii=False), judged_row_id),
         )
+        # TOMBSTONED, not deleted. The row keeps its article_id, which
+        # is the key Stage A's "already classified: skip" check reads
+        # (get_existing_geopolitical_signal_article_ids). Deleting it
+        # destroyed the only record that this article_id had been seen,
+        # so the next Stage A run found no row, called it new, and
+        # re-inserted the very duplicate this function had just folded
+        # away. Measured on two consecutive days of real runs: the
+        # fallback pass resurrected 10 rows on one and 14 on the next,
+        # and 24 articles ended up BOTH listed as a sibling on the
+        # judged row AND present again as standalone rows - three of
+        # them as `signal`, two of those visible in the default feed.
+        #
+        # The tombstone closes that loop without a new lookup: the
+        # article_id check already in Stage A starts working again.
+        # `noise` is also the terminal verdict every later stage
+        # filters on - Stage C, D and E all select signal_detection =
+        # 'signal' - so a tombstoned row reaches no stage and no
+        # reader, which is the same outcome deletion intended.
+        #
+        # What this costs: ~19 rows a day are retained rather than
+        # removed. What it buys, beyond the fix, is that the fold is
+        # now auditable - collapsed_into names the row that absorbed
+        # this one, where before the row simply vanished.
         cur = conn.execute(
-            "DELETE FROM agent_classifications WHERE id = ANY(%s)", (ids,),
+            """
+            UPDATE agent_classifications
+            SET signal_detection = 'noise',
+                signal_reason = %s,
+                metadata = metadata || jsonb_build_object(
+                    'collapsed_into', %s::int,
+                    'collapsed_at', to_jsonb(NOW()))
+            WHERE id = ANY(%s)
+            """,
+            (
+                "Folded into row %d as same-event coverage; its outlet,"
+                " headline and URL are recorded there in"
+                " also_reported_by." % judged_row_id,
+                judged_row_id,
+                ids,
+            ),
         )
     return cur.rowcount if cur.rowcount is not None else len(ids)
 
@@ -2270,10 +2377,11 @@ def get_results_summary(
     (news-retrieval), not queried here - the caller (routes/jobs.py)
     fills this in, since this module has no news-retrieval access.
 
-    "last_run_at": latest completed agent_jobs.completed_at for
-    domain='macro_signal' - NOT scoped to the date window (the window
-    is about which OBSERVATIONS to count, not which job ran them; a run
-    can classify events spanning several days in one job).
+    "last_run_at": latest completed agent_jobs.completed_at for the
+    RETRIEVAL DOMAIN behind this source_type (see the mapping beside
+    that query) - NOT scoped to the date window (the window is about
+    which OBSERVATIONS to count, not which job ran them; a run can
+    classify events spanning several days in one job).
     """
     date_conditions = ["source_type = %s"]
     date_params: list[Any] = [source_type]
@@ -2325,13 +2433,33 @@ def get_results_summary(
             date_params + date_params,
         ).fetchone()
 
+        # agent_jobs.domain is the RETRIEVAL domain; source_type is what
+        # the resulting rows are stored as. They are the same string for
+        # most domains, and deliberately different for two: the
+        # ai_news domain stores source_type='news', and the
+        # geopolitical_news domain stores
+        # source_type='geopolitical_signal'. Only those two need an
+        # entry here; anything absent falls through to source_type
+        # itself, which is correct for the rest and stays correct for a
+        # domain added later under the matching-name convention.
+        #
+        # This was hardcoded to 'macro_signal', so every caller got
+        # macro_signal's last run whatever they asked for - confirmed
+        # live: geopolitical_signal, macro_signal and sec_filing all
+        # returned 2026-10-20T23:00:53, while geopolitical's own latest
+        # job had completed 13 hours later. The counts above were always
+        # filtered correctly; this one field was not.
+        job_domain = {
+            "news": "ai_news",
+            "geopolitical_signal": "geopolitical_news",
+        }.get(source_type, source_type)
         last_run_row = conn.execute(
             """
             SELECT completed_at FROM agent_jobs
             WHERE domain = %s AND status = 'completed'
             ORDER BY completed_at DESC LIMIT 1
             """,
-            ("macro_signal",),
+            (job_domain,),
         ).fetchone()
 
     observations = {"total": 0, "high": 0, "weak": 0, "noise": 0, "suppressed": 0}

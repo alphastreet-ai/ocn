@@ -29,6 +29,20 @@ def _iso(hours_ago: float, tz: str = "+04:00") -> str:
     return when.astimezone(timezone(timedelta(hours=4))).isoformat()
 
 
+# --- company table endpoint --------------------------------------------------
+
+async def test_middle_east_universe_serves_the_seed_table(client) -> None:
+    import seed
+    resp = await client.get("/market/middle-east/universe")
+    assert resp.status_code == 200
+    companies = resp.json()["companies"]
+    assert companies == seed.MIDDLE_EAST_TICKER_UNIVERSE
+    qe = next(c for c in companies if c["company"] == "QatarEnergy")
+    assert qe["ticker"] is None
+    assert {(x["counterparty_ticker"], x["share_price_on_good_news"]) for x in qe["counterparties"]} >= {
+        ("MU", "rise"), ("XOM", "fall")}
+
+
 # --- match filter ------------------------------------------------------------
 
 def _source(terms):

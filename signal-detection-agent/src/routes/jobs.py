@@ -12,8 +12,22 @@ from auth import require_auth
 from controllers.run import generate_korea_signal_summary_for_date
 from models.jobs import get_job, get_results_summary, list_all_results, list_jobs, list_results, list_taiwan_periods
 from pipeline.china_companies import china_company_universe
+from pipeline.geopolitical_signal_layer2 import _VALID_CHANNELS
 from pipeline.japan_companies import company_for, valuation_for
 from pipeline.japan_signal_view import to_jp_signal
+
+# Built from the validator rather than typed out, so the documented
+# vocabulary cannot drift from the one Stage C actually accepts. A
+# consumer that builds its filter UI from this schema sees every
+# channel the pipeline can emit; one that is told fewer silently hides
+# the rows carrying the rest, which are still returned and still
+# counted in an unfiltered query.
+_CHANNEL_QUERY_DESCRIPTION = (
+    "Filter by metadata.channel: "
+    + ", ".join(f"'{c}'" for c in sorted(_VALID_CHANNELS))
+    + " (geopolitical_signal rows only; null when the article names no"
+    " instrument from this list)"
+)
 from pipeline.japan_companies import japan_ticker_universe
 
 router = APIRouter()
@@ -31,7 +45,7 @@ async def get_all_results(
     source_category: str | None = Query(default=None, description="Filter by metadata.source_category, e.g. 'mops_revenue', 'mops_material', 'gdelt' (only populated for taiwan_market_signal rows)"),
     impacted_category: str | None = Query(default=None, description="Filter to rows whose metadata.impacted_categories includes this exact category name, e.g. 'Semiconductor Manufacturing' (only populated for geopolitical_signal rows Stage C has tagged)"),
     impacted_ticker: str | None = Query(default=None, description="Filter to rows whose entities_json includes this ticker, e.g. 'NVDA' - the companies the article itself names, each stored with the reason the text gives (only populated for geopolitical_signal rows Stage C has tagged; case-insensitive)"),
-    channel: str | None = Query(default=None, description="Filter by metadata.channel: 'energy', 'trade', 'sanctions', 'shipping', 'conflict', 'subsidies', 'regulation' or 'diplomacy' (geopolitical_signal rows only; null when the article is not geopolitical)"),
+    channel: str | None = Query(default=None, description=_CHANNEL_QUERY_DESCRIPTION),
     grade: str | None = Query(default=None, deprecated=True, include_in_schema=False, description="REMOVED. Stage D no longer grades rows - its three checks had all collapsed against the real two-source pool (see pipeline/geopolitical_signal_stage_d.py). Passing this returns 400 rather than silently ignoring it, because an ignored filter returns EVERY row and reads as a successful broad query."),
     corroborated: bool | None = Query(default=None, description="Filter by whether other outlets reported the same event (Stage D's metadata.corroboration.count > 0); true = at least one sibling outlet, false = the story stands alone"),
     event_location: str | None = Query(default=None, description="Filter by metadata.event_location, case-insensitive substring - 'Hormuz' matches 'Strait of Hormuz'. Null on legal instruments (a sanctions designation happens in no place), so this excludes most sanctions rows"),
@@ -310,7 +324,7 @@ async def get_job_results(
     source_category: str | None = Query(default=None, description="Filter by metadata.source_category, e.g. 'mops_revenue', 'mops_material', 'gdelt' (only populated for taiwan_market_signal rows)"),
     impacted_category: str | None = Query(default=None, description="Filter to rows whose metadata.impacted_categories includes this exact category name, e.g. 'Semiconductor Manufacturing' (only populated for geopolitical_signal rows Stage C has tagged)"),
     impacted_ticker: str | None = Query(default=None, description="Filter to rows whose entities_json includes this ticker, e.g. 'NVDA' - the companies the article itself names, each stored with the reason the text gives (only populated for geopolitical_signal rows Stage C has tagged; case-insensitive)"),
-    channel: str | None = Query(default=None, description="Filter by metadata.channel: 'energy', 'trade', 'sanctions', 'shipping', 'conflict', 'subsidies', 'regulation' or 'diplomacy' (geopolitical_signal rows only; null when the article is not geopolitical)"),
+    channel: str | None = Query(default=None, description=_CHANNEL_QUERY_DESCRIPTION),
     grade: str | None = Query(default=None, deprecated=True, include_in_schema=False, description="REMOVED. Stage D no longer grades rows - its three checks had all collapsed against the real two-source pool (see pipeline/geopolitical_signal_stage_d.py). Passing this returns 400 rather than silently ignoring it, because an ignored filter returns EVERY row and reads as a successful broad query."),
     corroborated: bool | None = Query(default=None, description="Filter by whether other outlets reported the same event (Stage D's metadata.corroboration.count > 0); true = at least one sibling outlet, false = the story stands alone"),
     event_location: str | None = Query(default=None, description="Filter by metadata.event_location, case-insensitive substring - 'Hormuz' matches 'Strait of Hormuz'. Null on legal instruments (a sanctions designation happens in no place), so this excludes most sanctions rows"),
