@@ -129,4 +129,10 @@ resource "aws_db_instance" "platform" {
 
   performance_insights_enabled          = true
   performance_insights_retention_period = 7 # free tier
+
+  # staging was created as `platform` and renamed in SQL (ALTER DATABASE ... RENAME). RDS keeps
+  # reporting the initial name, and db_name forces replacement, so never diff on it.
+  lifecycle {
+    ignore_changes = [db_name]
+  }
 }
