@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs roles.sql on the platform DB through the bastion (SSM port forward) and stores svc_app's
+# Runs roles.sql on the alphastreet DB through the bastion (SSM port forward) and stores svc_app's
 # DATABASE_URL in Secrets Manager for alphaStreet-api. Passwords never touch the terminal or
 # history, nor any process's argv. Rerunnable: it rotates svc_app's password and the secret together (restart the API after).
 # Needs: AWS_PROFILE, session-manager-plugin, psql, and the bastion in client_sg_ids.
@@ -38,15 +38,15 @@ export PGPASSWORD
 SVC_APP_PASSWORD=$(openssl rand -hex 24)
 export SVC_APP_PASSWORD # roles.sql reads it with \getenv
 
-psql "hostaddr=127.0.0.1 host=$HOST port=$LOCAL_PORT dbname=platform user=master sslmode=verify-full sslrootcert=$TMP/rds-ca.pem" \
+psql "hostaddr=127.0.0.1 host=$HOST port=$LOCAL_PORT dbname=alphastreet user=master sslmode=verify-full sslrootcert=$TMP/rds-ca.pem" \
   -v ON_ERROR_STOP=1 -q -f roles.sql
 
-printf '%s' "postgresql://svc_app:${SVC_APP_PASSWORD}@${HOST}:5432/platform?sslmode=require" >"$TMP/url"
+printf '%s' "postgresql://svc_app:${SVC_APP_PASSWORD}@${HOST}:5432/alphastreet?sslmode=require" >"$TMP/url"
 if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" >/dev/null 2>&1; then
   aws secretsmanager put-secret-value --secret-id "$SECRET_NAME" --secret-string "file://$TMP/url" >/dev/null
 else
   aws secretsmanager create-secret --name "$SECRET_NAME" --secret-string "file://$TMP/url" \
-    --description "alphaStreet-api DATABASE_URL (svc_app on the platform DB)" >/dev/null
+    --description "alphaStreet-api DATABASE_URL (svc_app on the alphastreet DB)" >/dev/null
 fi
 
 echo "roles.sql applied; DATABASE_URL stored in $SECRET_NAME:"

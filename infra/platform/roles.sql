@@ -1,12 +1,12 @@
 -- Roles and schemas on the shared platform database (alphaStreet-api docs/PLATFORM_ARCHITECTURE.md
--- §4.2). Idempotent: rerun after every edit. Run as master against database `platform`:
---   SVC_APP_PASSWORD=... psql "host=... dbname=platform user=master sslmode=verify-full" \
+-- §4.2). Idempotent: rerun after every edit. Run as master against database `alphastreet`:
+--   SVC_APP_PASSWORD=... psql "host=... dbname=alphastreet user=master sslmode=verify-full" \
 --     -v ON_ERROR_STOP=1 -f roles.sql
 -- (bootstrap-app.sh does this; the password comes from the environment, never argv.)
 -- Today: schema app only. Each OCN service adds its schema + svc_<name> here when it moves in.
 
 -- Nobody connects or creates in public by default; each role is granted what it needs.
-REVOKE ALL ON DATABASE platform FROM PUBLIC;
+REVOKE ALL ON DATABASE alphastreet FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 -- Extensions live in public (search_path = <schema>, public). Created here so no service role
@@ -28,7 +28,7 @@ ALTER ROLE svc_app SET search_path = app, public;
 ALTER ROLE svc_app SET statement_timeout = '5min';
 ALTER ROLE svc_app SET idle_in_transaction_session_timeout = '60s';
 
-GRANT CONNECT ON DATABASE platform TO svc_app;
+GRANT CONNECT ON DATABASE alphastreet TO svc_app;
 GRANT USAGE ON SCHEMA public TO svc_app;
 -- RDS master isn't a superuser: PG16 needs SET ROLE on svc_app to hand it a schema.
 GRANT svc_app TO CURRENT_USER;
