@@ -1,5 +1,5 @@
 # The shared platform database (alphaStreet-api docs/PLATFORM_ARCHITECTURE.md §4): one instance,
-# one database `platform`, one schema per service. Own state, separate from staging/, so an OCN
+# one database `alphastreet`, one schema per service. Own state, separate from staging/, so an OCN
 # apply never touches it. alphaStreet-api moves in first (schema app); OCN services follow one
 # database at a time. Roles and schemas are SQL (roles.sql), not Terraform: RDS is private.
 
@@ -109,7 +109,7 @@ resource "aws_db_instance" "platform" {
   storage_encrypted     = true
   parameter_group_name  = aws_db_parameter_group.platform.name
 
-  db_name  = "platform"
+  db_name  = "alphastreet"
   username = "master"
   # RDS generates and rotates the password in its own secret: never in tfvars or state.
   # Admin only (roles.sql); services connect as their svc_* role.
