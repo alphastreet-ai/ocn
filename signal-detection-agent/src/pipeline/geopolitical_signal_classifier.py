@@ -19,7 +19,40 @@ module ever runs (see get_existing_geopolitical_signal_article_ids).
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from urllib.parse import urlparse
+
+# How far back an article's own publication date may be before Stage A
+# treats it as an archive page rather than news. See the check in
+# classify_geopolitical_signal_stage_a for how this figure was chosen.
+_MAX_ARTICLE_AGE_DAYS = 14
+
+
+def _age_in_days(published: object) -> float | None:
+    """Days between ``published`` and now, or None if unreadable.
+
+    news-retrieval sends an ISO-8601 string; a datetime is accepted too
+    so a caller holding a parsed row needs no conversion. Returns None
+    rather than raising on anything else, because an unparseable date
+    must not decide a verdict - the caller treats None as "no opinion"
+    and lets the article through.
+
+    A future date also yields a negative number, which is below any
+    positive cutoff, so a clock skew or a publisher post-dating an
+    article cannot drop it.
+    """
+    if isinstance(published, datetime):
+        dt = published
+    elif isinstance(published, str) and published.strip():
+        try:
+            dt = datetime.fromisoformat(published.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
 
 # Wire services and papers of record, plus official US government domains.
 # Geopolitics is the worst news category for junk/propaganda outlets - this
@@ -351,6 +384,30 @@ def classify_geopolitical_signal_stage_a(article: dict) -> dict:
     language = (meta.get("lang") or meta.get("language") or "").strip().lower()
     if language and language not in _ENGLISH_LANGUAGE_VALUES:
         return {"outcome": "noise", "drop_reason": "non_english"}
+
+    # An article far older than the fetch window is an archive page the
+    # source surfaced, not news. The fetch runs --days-back 1, so
+    # nothing legitimate should be weeks old: measured over 690 stored
+    # rows, 676 were under 3.4 days, 8 at ~6.5 days, and the handful
+    # beyond that were a 2017 Tesla feature, three 2018-19 renewable
+    # round-ups and a "Top 5 Uranium Stocks" listicle 82 days old. NOT
+    # ONE of them was a signal.
+    #
+    # The cutoff is 14 days, not 7, because the age being measured is
+    # the article's own publication date and a legitimate item can lag:
+    # a Federal Register notice records a measure taken earlier, and
+    # the fetch itself can pool several runs. 14 days clears every real
+    # row observed by a factor of two while still catching the archive
+    # pages, which miss it by years.
+    #
+    # An ABSENT date is not a rejection - same fail-open rule as the
+    # language check above. "We don't know when this was published"
+    # must never read as "it is old".
+    published = article.get("published")
+    if published is not None:
+        age_days = _age_in_days(published)
+        if age_days is not None and age_days > _MAX_ARTICLE_AGE_DAYS:
+            return {"outcome": "noise", "drop_reason": "too_old"}
 
     # No domain filter. There was one here - every article from an
     # outlet outside ALLOWED_DOMAINS was dropped as

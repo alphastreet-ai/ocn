@@ -122,6 +122,7 @@ DynamoDB access for the poller is granted via an IAM role policy (`aws_iam_role_
 | `GET /market/status` | current_status, local_open, local_close | no data |
 | `GET /market/macro` | fed_funds_rate, cpi, treasury_yield_10y, unemployment, nonfarm_payroll, real_gdp, retail_sales, durables — each with date, value, unit; plus top_movers (top_gainers/top_losers/most_actively_traded lists) | no data |
 | `GET /market/sec-filings/{ticker}` | recent 8-K/10-Q/10-K filings: form_type, filed_at, accession_number, primary_doc_url, cik, accepted_at, period_of_report, item_codes, filer_category | no data |
+| `GET /market/middle-east/universe` | The Middle East company table (`MIDDLE_EAST_TICKER_UNIVERSE`) unchanged - listing, aliases, US `counterparties` with `share_price_on_good_news`. Read by signal-detection-agent once per classify run | never - static |
 | `GET /market/china/revenue-history` | China universe revenue YoY per company and reporting period, from `company_financials` (Postgres, not DynamoDB). `?refresh=true` re-fetches upstream first; `?codes=a,b` narrows that re-fetch | never - returns `[]` |
 
 ### SEC Filings
@@ -942,12 +943,24 @@ source choice: **data comes from an API or structured JSON, never PDF extraction
 **every stored row has a body** - a row whose text cannot be reached is dropped, not
 stored headline-only.
 
-Company universe: `MIDDLE_EAST_UNIVERSE` in `src/seed.py` - the spec's 24 companies and
-funds, hardcoded like China (most are unlisted or Gulf-listed, so research-universe's US
-ticker filter does not fit). Each row carries the spec's "good news here means" column as
-`us_rise_on_good_news` / `us_fall_on_good_news` for the classifier. The US names they move
-(NVDA, MU, XOM, BNO for the oil price, ...) are read by ticker from `/market/*`, not fetched
-here.
+Company universe: `MIDDLE_EAST_TICKER_UNIVERSE` in `src/seed.py`, the spec's section-4
+companies and funds (25 rows - ADIA and ADQ are separate funds), stored in the same shape
+as Taiwan's `TAIWAN_TICKER_UNIVERSE` pending research-universe, which holds neither the
+unlisted Gulf names nor their US counterparties yet. Fields: `ticker` / `exchange` (the
+company's OWN listing; `None` = unlisted), `company`, `country`, `aliases` (matching; a
+common-word name is stored in full - "Elm Company", "Nova Ltd"), and `counterparties` - the
+US companies the spec says its news moves, each `counterparty_name`, `counterparty_ticker`,
+`relationship` (one sentence, role then why, citing the spec section) and
+`share_price_on_good_news` (`rise` / `fall`, the spec's arrow - untested against prices).
+`[]` means the spec names a group but no US company; no ticker is invented. 50 links over
+18 companies. It supplies the WAM/SPA/BIS match terms, and is served unchanged at
+`GET /market/middle-east/universe`. **Counterparties are NOT copied onto articles at fetch
+time** (unlike Taiwan's `metadata.customers`): a Taiwan source is scoped to one company, but
+a Middle East row is a wire or press story that can name a company in passing, so which
+companies it is about is the classifier's decision. signal-detection-agent reads the table
+once per run and attaches counterparties only for companies it verified the article is
+about - and reads it live, so a corrected link is never frozen onto stored rows. The US
+names' prices are read by ticker from `/market/*`.
 
 | Source | `source_type` | Route | Body |
 |--------|---------------|-------|------|

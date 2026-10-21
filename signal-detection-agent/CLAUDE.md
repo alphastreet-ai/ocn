@@ -628,7 +628,7 @@ Stage E  no model     story grouping                            geopolitical_sig
 Each stage only ever acts on rows the previous stage wrote, so they are inherently
 sequential, not independent jobs - `run-geopolitical-signal-pipeline` runs A→B→C→D→E in one
 process for exactly that reason (separate cron rules risked B firing before A had
-finished). The primary trigger is news-retrieval's run-completed webhook; the 05:00 UTC
+finished). The primary trigger is news-retrieval's run-completed webhook; the 03:00 UTC
 CloudWatch rule is a fallback for a lost delivery.
 
 **Stage E runs last in both paths, and is not optional.** Every API read of this domain is
@@ -660,8 +660,14 @@ reading these fields must not collapse the two.
 Grades how many independent outlets carried the same EVENT. Stage B has already collapsed
 same-event rows: when news-retrieval's title-similarity dedup finds a cluster, the judged
 row absorbs its siblings into `metadata.also_reported_by` (`{outlet, title, url}` each) and
-the sibling rows are deleted in one transaction. Nothing unique is lost - the sibling's
-headline survives on the judged row.
+the sibling rows are TOMBSTONED in the same transaction - set to `noise` and marked
+`metadata.collapsed_into`, not deleted. Nothing unique is lost: the sibling's headline
+survives on the judged row, and the tombstone keeps its `article_id` resolvable.
+
+The row is kept rather than removed because Stage A's "already classified: skip" check
+reads `article_id`. Deleting destroyed the only record that the article had been seen, so
+the next Stage A pass called it new and re-inserted the duplicate the collapse had just
+folded away - measured at 10 and 14 resurrected rows on two consecutive days.
 
 `corroboration` is the INPUT (how well-sourced is this event); `also_reported_by` is the
 OUTPUT (which specific outlets, for display). They are not redundant and both are kept.

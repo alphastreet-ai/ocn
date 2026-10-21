@@ -36,6 +36,8 @@ TAIWAN_SIGNAL_DOMAIN: str = os.environ.get("TAIWAN_SIGNAL_DOMAIN", "taiwan_marke
 KOREA_SIGNAL_DOMAIN: str = os.environ.get("KOREA_SIGNAL_DOMAIN", "korea_market_signal")
 JAPAN_SIGNAL_DOMAIN: str = os.environ.get("JAPAN_SIGNAL_DOMAIN", "japan_market_signal")
 CHINA_SIGNAL_DOMAIN: str = os.environ.get("CHINA_SIGNAL_DOMAIN", "china_market_signal")
+MIDDLE_EAST_SIGNAL_DOMAIN: str = os.environ.get(
+    "MIDDLE_EAST_SIGNAL_DOMAIN", "middle_east_market_signal")
 NEWS_DOMAIN: str = os.environ.get("NEWS_DOMAIN", "ai_news")
 GEOPOLITICAL_SIGNAL_DOMAIN: str = os.environ.get("GEOPOLITICAL_SIGNAL_DOMAIN", "geopolitical_news")
 # Stage B is a forced one-word HIGH/WEAK call, but it is also the stage

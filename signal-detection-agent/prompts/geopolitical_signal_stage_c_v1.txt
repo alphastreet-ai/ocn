@@ -406,8 +406,33 @@ industries named. Return ONLY a JSON object with exactly these keys:
                                  entity, the Council of the
                                  European Union and the European
                                  Commission are "government".
-                  "government"   a ministry, agency, official body,
-                                 or an institution of a bloc
+                                 A COUNTRY IS ALWAYS WRITTEN AS THE
+                                 BARE STATE NAME. "Government of
+                                 Sudan", "the Sudanese government",
+                                 "Khartoum" meaning the state - all
+                                 of these are the country "Sudan",
+                                 type "country". Strip the wrapper
+                                 and keep the state: "Russia", not
+                                 "the Russian government";
+                                 "Canada", not "Government of
+                                 Canada". This holds however the
+                                 text phrases it, and whether the
+                                 state is acting or being acted
+                                 upon - a measure aimed at a
+                                 country's government is aimed at
+                                 that country.
+                                 "government" is for a NAMED BODY
+                                 WITHIN a state, never for the
+                                 state itself: a ministry, an
+                                 agency, a central bank, a court -
+                                 "the Treasury", "OFAC", "the
+                                 Ministry of Commerce".
+                  "government"   a NAMED BODY within a state or
+                                 bloc - a ministry, agency, central
+                                 bank, court or official
+                                 institution. Never a whole state:
+                                 "Government of X" is the country
+                                 X, type "country"
                   "company"      a named firm, listed or not
                   "organisation" anything else institutional
                   "person"       a named individual

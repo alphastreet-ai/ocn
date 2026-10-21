@@ -22,7 +22,7 @@
 | `src/models/articles.py` | Article queries: pagination, dedup helpers, `expire_articles_for_domain(domain, days)` - deletes articles for one domain published more than `days` days ago (NULL `published` rows are never deleted); `get_recent_gdelt_articles_for_ticker()` - recent same-ticker GDELT rows (by `created_at`, not `published`) for the Taiwan title-similarity dedup window |
 | `src/models/` | Pydantic request models + SQL query functions per entity |
 | `src/routes/` | FastAPI `APIRouter` definitions, one file per resource |
-| `src/routes/market.py` | Market data read endpoints: 6 `GET` routes reading from DynamoDB, served at `/market/*`; plus `/market/china/revenue-history` and `/market/taiwan/revenue-history`, read from Postgres `company_financials` |
+| `src/routes/market.py` | Market data read endpoints: 6 `GET` routes reading from DynamoDB, served at `/market/*`; plus `/market/china/revenue-history` and `/market/taiwan/revenue-history`, read from Postgres `company_financials`, and `/market/middle-east/universe`, the Middle East company table from `seed.py` |
 | `src/taiwan_financials.py` | Taiwan monthly revenue history for `company_financials`: MOPS per-month CSV parse/fetch (`backfill-taiwan-revenue`) and rows from the daily OpenAPI articles - see CLAUDE.md's Taiwan section |
 
 ## Market Signal domains
@@ -42,7 +42,7 @@ See `CLAUDE.md` for each domain's full source table, sourcing decisions, and sch
 | `korea_market_signal` | `KOREA_TICKER_UNIVERSE` | `dart_filing`, `kr_customs_export`, `gdelt` (+ RSS sources) |
 | `japan_market_signal` | `JAPAN_TICKER_UNIVERSE` | `irbank_financials`, `irbank_buyback`, `irbank_company_reference`, `kabutan_tdnet_mirror`, `kabutan_buyback`, `edinet_filing`, `edinet_buyback_status`, `edinet_extraordinary_report`, `seaj_billings`, `monoist_capex`, `press_jp`, `press_jp_english_check` |
 | `china_market_signal` | `CHINA_TICKER_UNIVERSE` | `mofcom_policy`, `miit_policy`, `samr_action`, `cac_review`, `cn_state_press`, `hkex_filing`, `cninfo_filing`, `press_cn`, `press_cn_english_check` |
-| `middle_east_market_signal` | `MIDDLE_EAST_UNIVERSE` | `wam_wire`, `spa_wire`, `bis_press`, `sec_fund_stake`, `federal_register` (own url scheme), `eventregistry` (5 queries, own url scheme), `substack_post` (Middle East AI News) |
+| `middle_east_market_signal` | `MIDDLE_EAST_TICKER_UNIVERSE` | `wam_wire`, `spa_wire`, `bis_press`, `sec_fund_stake`, `federal_register` (own url scheme), `eventregistry` (5 queries, own url scheme), `substack_post` (Middle East AI News) |
 
 Japan reads its universe live from research-universe (`get_tracked_company_universe`) with
 seeded `config.companies` as fallback. China is hardcoded - research-universe's `country`

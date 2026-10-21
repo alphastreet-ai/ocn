@@ -342,11 +342,11 @@ Nothing further to run. In place already:
 |---|---|---|
 | 02:00 UTC | fetch `geopolitical_news`, `--days-back 1` | `news_retrieval_geopolitical_news_daily` |
 | on fetch completion | Stage A→B→C→D→E via webhook | `/webhooks/news-retrieval-run-completed` |
-| 05:00 UTC | same five stages — fallback for a lost webhook | `..._geopolitical_signal_pipeline_daily` |
-| 03:00 UTC | refresh the company/category cache Stage C reads | `..._geo_signal_cache_refresh_daily` |
+| 03:00 UTC | same five stages — fallback for a lost webhook | `..._geopolitical_signal_pipeline_daily` |
+| 01:00 UTC | refresh the company/category cache Stage C reads | `..._geo_signal_cache_refresh_daily` |
 | Sunday 04:00 UTC | expire `geopolitical_news` articles older than 7 days | `..._geopolitical_news_expire_weekly` |
 
-The webhook is the primary trigger; 05:00 is the safety net, because delivery is
+The webhook is the primary trigger; 03:00 is the safety net, because delivery is
 fire-and-forget with no retry on news-retrieval's side.
 
 Worth knowing: `agent_classifications` has **no expiry for
