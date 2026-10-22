@@ -206,14 +206,39 @@ def taiwan_revenue_history() -> dict:
     return {"rows": get_financials(DOMAIN)}
 
 
+@router.get("/market/taiwan/universe")
+def taiwan_universe() -> dict:
+    """The Taiwan company table (seed.TAIWAN_TICKER_UNIVERSE): each
+    company's ticker, Chinese name, English name and verified customers
+    ({name, relationship}; [] = checked, none verified).
+
+    Served rather than copied onto articles: a copy is frozen at fetch
+    time, so rows fetched before a customer was verified (or corrected)
+    never showed it. signal-detection-agent serves this at
+    GET /taiwan-signals/universe and a consumer joins it on
+    metadata.ticker. Field names match the Taiwan article metadata
+    (company_name = Chinese, translated_company_name = English).
+    """
+    from seed import TAIWAN_TICKER_UNIVERSE
+
+    return {"companies": [
+        {
+            "ticker": t["ticker"],
+            "company_name": t["native_name"],
+            "translated_company_name": t["company"],
+            "customers": t["customers"],
+        }
+        for t in TAIWAN_TICKER_UNIVERSE
+    ]}
+
+
 @router.get("/market/middle-east/universe")
 def middle_east_universe() -> dict:
     """The Middle East company table (seed.MIDDLE_EAST_TICKER_UNIVERSE),
     unchanged: each company's own listing, aliases and the US
     `counterparties` its news moves, with `share_price_on_good_news`.
 
-    Served rather than copied onto articles at fetch time, unlike Taiwan's
-    customers: a Taiwan source is scoped to one company, but a Middle East
+    Served rather than copied onto articles at fetch time: a Middle East
     article is a wire or press story that can name a company in passing,
     so which companies it is ABOUT is the classifier's decision.
     signal-detection-agent reads this once per run and attaches

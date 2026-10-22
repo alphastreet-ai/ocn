@@ -530,6 +530,134 @@ def insert_middle_east_signal_classification(
         )
 
 
+def get_middle_east_event_members(event_uris: list[str]) -> dict[str, list[dict[str, Any]]]:
+    """{event_uri: [stored rows]} - the rows already stored for this batch's
+    newsapi.ai event clusters, in ONE query. Every label counts: a noise
+    row about the same event is still another outlet covering it."""
+    if not event_uris:
+        return {}
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT source_id, url, title, metadata
+            FROM agent_classifications
+            WHERE source_type = 'middle_east_market_signal'
+              AND metadata->'source'->>'event_uri' = ANY(%s)
+            """,
+            (event_uris,),
+        ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        row = dict(row)
+        metadata = row["metadata"] if isinstance(row["metadata"], dict) else json.loads(row["metadata"] or "{}")
+        row["metadata"] = metadata
+        grouped.setdefault(metadata["source"]["event_uri"], []).append(row)
+    return grouped
+
+
+def get_middle_east_story_candidates() -> list[dict[str, Any]]:
+    """Every signal and weak_signal row of this domain - the story
+    grouping's whole input (grouping is a property of the set, so it is
+    regrouped from scratch, like geopolitical Stage E)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, title, url, published, signal_detection, signal_reason,
+                   entities_json, metadata
+            FROM agent_classifications
+            WHERE source_type = 'middle_east_market_signal'
+              AND signal_detection IN ('signal', 'weak_signal')
+            ORDER BY published
+            """,
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["entities"] = json.loads(d.get("entities_json") or "[]")
+        except (ValueError, TypeError):
+            d["entities"] = []
+        if not isinstance(d.get("metadata"), dict):
+            d["metadata"] = json.loads(d.get("metadata") or "{}")
+        out.append(d)
+    return out
+
+
+def clear_middle_east_story_fields() -> int:
+    """Remove the story keys from every row of this domain before
+    regrouping, so a row that left a story is never hidden by a stale
+    in_story pointer."""
+    with get_db() as conn:
+        cur = conn.execute(
+            """
+            UPDATE agent_classifications
+            SET metadata = metadata - 'story_development' - 'in_story'
+            WHERE source_type = 'middle_east_market_signal'
+              AND (jsonb_exists(metadata, 'story_development')
+                   OR jsonb_exists(metadata, 'in_story'))
+            """,
+        )
+    return cur.rowcount if cur.rowcount is not None else 0
+
+
+def apply_middle_east_story(seed_row_id: int, *, development: dict[str, Any],
+                            member_ids: list[int]) -> None:
+    """Write one story in ONE transaction: story_development on the seed,
+    in_story = seed id on each member. Nothing is deleted - each member is
+    a different event with its own label and reason."""
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE agent_classifications
+            SET metadata = metadata || jsonb_build_object('story_development', %s::jsonb)
+            WHERE id = %s
+            """,
+            (json.dumps(development, ensure_ascii=False), seed_row_id),
+        )
+        conn.execute(
+            """
+            UPDATE agent_classifications
+            SET metadata = metadata || jsonb_build_object('in_story', %s::int)
+            WHERE id = ANY(%s)
+            """,
+            (seed_row_id, member_ids),
+        )
+
+
+def collapse_middle_east_same_event(kept_row_id: int, corroboration: dict[str, Any],
+                                    duplicate_ids: list[int]) -> int:
+    """Fold same-event duplicates into one row, in ONE transaction: the kept
+    row's corroboration gains each duplicate's outlet, headline and link,
+    and the duplicates are TOMBSTONED - noise, metadata.collapsed_into =
+    kept row id - never deleted (geopolitical Stage B's pattern: the
+    already-judged skip reads their source_id, and a wrong fold stays
+    reversible). Returns how many rows were tombstoned."""
+    if not duplicate_ids:
+        return 0
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE agent_classifications
+            SET metadata = metadata || jsonb_build_object('corroboration', %s::jsonb)
+            WHERE id = %s
+            """,
+            (json.dumps(corroboration, ensure_ascii=False), kept_row_id),
+        )
+        cur = conn.execute(
+            """
+            UPDATE agent_classifications
+            SET signal_detection = 'noise',
+                signal_reason = %s,
+                metadata = (metadata - 'story_development' - 'in_story')
+                    || jsonb_build_object('collapsed_into', %s::int)
+            WHERE id = ANY(%s)
+            """,
+            ("Another report of the same event, folded into row %d; its outlet, headline"
+             " and link are listed there." % kept_row_id, kept_row_id, duplicate_ids),
+        )
+    return cur.rowcount if cur.rowcount is not None else len(duplicate_ids)
+
+
 def get_existing_middle_east_signal_source_ids(source_ids: list[str]) -> set[str]:
     """The subset of source_ids already stored as middle_east_market_signal,
     across ALL prior jobs - what lets the classifier skip an article it has
@@ -2012,6 +2140,21 @@ def list_jobs(
 # gap, confirmed live, only ~61% of `news` rows have it - falling back
 # again to stored_at (never null) so every row always sorts by SOME real
 # timestamp, never silently by id.
+# The "events" view of /results and /results/summary: one row per event or
+# story. A report folded into another row as the same event
+# (metadata.collapsed_into - geopolitical Stage B, middle_east_market_signal)
+# and an event listed inside a story's lead row (metadata.in_story) are left
+# out; both travel inside the row a reader sees (corroboration.siblings,
+# story_development.members). COALESCE because rows of some domains have
+# NULL metadata, and jsonb_exists(NULL, ...) is NULL - which would drop them.
+# Keys absent in every other domain, so for those the view changes nothing.
+RESULT_VIEWS = ("events", "rows")
+_EVENTS_VIEW_CONDITION = (
+    "NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'in_story')"
+    " AND NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'collapsed_into')"
+)
+
+
 _EFFECTIVE_DATE_EXPR = (
     "COALESCE((metadata->>'filing_filed_at')::timestamptz, published, stored_at)"
 )
@@ -2037,6 +2180,7 @@ def list_all_results(
     macro_series: str | None = None,
     macro_suspect: bool | None = None,
     macro_interpreted_only: bool | None = None,
+    view: str = "events",
 ) -> dict[str, Any]:
     """Return cursor-paginated agent_classifications across all jobs, ordered
     by effective date (see _EFFECTIVE_DATE_EXPR), newest first - NOT by id,
@@ -2202,6 +2346,8 @@ def list_all_results(
     """
     params: list[Any] = []
     conditions = []
+    if view == "events":
+        conditions.append(_EVENTS_VIEW_CONDITION)
     if signal_detection:
         conditions.append("signal_detection = %s")
         params.append(signal_detection)
@@ -2323,6 +2469,7 @@ def list_all_results(
 
 def get_results_summary(
     source_type: str, published_from: str | None = None, published_to: str | None = None,
+    view: str = "events",
 ) -> dict[str, Any]:
     """Real ask (frontend ticket, 2026-09-25): count HIGH/WEAK/NOISE/
     suppressed observations and events for a date window, without the
@@ -2385,6 +2532,9 @@ def get_results_summary(
     """
     date_conditions = ["source_type = %s"]
     date_params: list[Any] = [source_type]
+    # Same view as /results, so the counts match the rows a reader sees.
+    if view == "events":
+        date_conditions.append(_EVENTS_VIEW_CONDITION)
     if published_from:
         date_conditions.append("published >= %s")
         date_params.append(published_from)

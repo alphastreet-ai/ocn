@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import config
+from adapters.research_universe_client import ResearchUniverseError, fetch_us_listed_companies
 from adapters.news_client import (
     NewsRetrievalError,
     fetch_latest_run,
@@ -35,6 +36,11 @@ from models.jobs import (
     get_existing_korea_signal_source_ids,
     get_existing_macro_signal_source_ids,
     get_existing_middle_east_signal_source_ids,
+    get_middle_east_event_members,
+    get_middle_east_story_candidates,
+    clear_middle_east_story_fields,
+    apply_middle_east_story,
+    collapse_middle_east_same_event,
     get_existing_taiwan_source_ids,
     get_taiwan_recent_remarks,
     get_taiwan_remark_translations,
@@ -96,9 +102,17 @@ from pipeline.china_signal_classifier import (
     filing_period)
 from models.market_baselines import load_baselines, upsert_baselines
 from pipeline.middle_east_signal_classifier import (
+    build_middle_east_stories,
     classify_middle_east_signal_batch,
+    find_same_event_groups,
+    folded_corroboration,
     company_table_problems,
     describe_pool,
+    source_name,
+    stored_member,
+)
+from pipeline.middle_east_signal_classifier import (
+    story_development as middle_east_story_development,
 )
 from pipeline.korea_signal_classifier import classify_korea_signal_batch
 from pipeline.korea_signal_summary import generate_korea_signal_summary
@@ -1362,7 +1376,27 @@ async def run_middle_east_signal_classification(
         update_job_status(job_id, "failed", set_completed_at=True)
         return
 
-    classified = classify_middle_east_signal_batch(pool["new"], companies)
+    # 13D/G filings are labelled against research-universe's US companies
+    # (is the issuer a US AI company?). Loaded only when a filing is in the
+    # batch; if it cannot be read those filings wait for the next run rather
+    # than being stored with a wrong label.
+    us_universe = None
+    if any(source_name(a) == "sec_fund_stake" for a in pool["new"]):
+        try:
+            us_universe = await fetch_us_listed_companies()
+        except ResearchUniverseError:
+            logger.exception("[MIDDLE_EAST_SIGNAL] research-universe unavailable;"
+                             " 13D/G filings wait for the next run")
+    # Rows already stored for this batch's newsapi.ai event clusters: the
+    # other outlets that covered the same event in an earlier run.
+    event_uris = sorted({(a.get("metadata") or {}).get("event_uri") for a in pool["new"]}
+                        - {None, "", "None"})
+    stored_event_members = {
+        uri: [stored_member(r) for r in rows]
+        for uri, rows in get_middle_east_event_members(event_uris).items()}
+    classified = await asyncio.to_thread(
+        classify_middle_east_signal_batch, pool["new"], companies, us_universe,
+        stored_event_members)
     stored_meanwhile = get_existing_middle_east_signal_source_ids(
         [c["article"]["url"] for c in classified])
     to_insert = [c for c in classified if c["article"]["url"] not in stored_meanwhile]
@@ -1382,7 +1416,46 @@ async def run_middle_east_signal_classification(
         " inserted=%d unjudged=%d",
         job_id, len(classified), len(stored_meanwhile), inserted,
         len(pool["new"]) - len(classified))
+    if inserted:
+        regroup_middle_east_stories(job_id)
     update_job_status(job_id, "completed", article_count=inserted, set_completed_at=True)
+
+
+def regroup_middle_east_stories(job_id: int) -> None:
+    """After each insert: fold same-event duplicates into one row
+    (tombstones), then regroup the remaining signal/weak_signal rows into
+    stories, from scratch - a later arrival can change which story an
+    earlier row belongs to. Nothing is deleted; see
+    pipeline/middle_east_signal_classifier.py."""
+    folded = 0
+    for group in find_same_event_groups(get_middle_east_story_candidates()):
+        try:
+            folded += collapse_middle_east_same_event(
+                group["kept"]["id"],
+                folded_corroboration(group["kept"], group["duplicates"]),
+                [d["id"] for d in group["duplicates"]])
+        except Exception:
+            logger.exception("[MIDDLE_EAST_SIGNAL] failed to fold duplicates into row %s (job %d)",
+                             group["kept"]["id"], job_id)
+    logger.info("[MIDDLE_EAST_SIGNAL] same-event duplicates folded: job=%d rows=%d", job_id, folded)
+
+    rows = get_middle_east_story_candidates()
+    cleared = clear_middle_east_story_fields()
+    stories = build_middle_east_stories(rows)
+    absorbed = 0
+    for story in stories:
+        member_ids = [m["row"]["id"] for m in story["members"]]
+        try:
+            apply_middle_east_story(story["seed"]["id"],
+                                    development=middle_east_story_development(story),
+                                    member_ids=member_ids)
+            absorbed += len(member_ids)
+        except Exception:
+            logger.exception("[MIDDLE_EAST_SIGNAL] failed to apply story seed=%s (job %d)",
+                             story["seed"]["id"], job_id)
+    logger.info("[MIDDLE_EAST_SIGNAL] stories: job=%d rows=%d cleared=%d stories=%d"
+                " absorbed=%d visible=%d", job_id, len(rows), cleared, len(stories),
+                absorbed, len(rows) - absorbed)
 
 
 async def run_japan_signal_classification(job_id: int, from_date: str, to_date: str) -> None:

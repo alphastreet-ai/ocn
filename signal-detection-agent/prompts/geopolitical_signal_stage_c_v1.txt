@@ -536,6 +536,16 @@ industries named. Return ONLY a JSON object with exactly these keys:
          standard recital language that would appear in any action
          under the same authority ("intended to address threats to
          national security, foreign policy and the economy").
+    NEVER REPORT WHAT THE TEXT DOES NOT SAY. Where a fact above is
+    absent, leave it out silently and write the summary without it.
+    Do not write "the text does not specify the effective date",
+    "no further details are provided", "the article does not
+    mention the value", or any sentence whose content is an
+    absence. A reader opening this summary wants what IS known; a
+    catalogue of what is missing tells them nothing they can act
+    on, and spends a sentence doing it. The four items above are
+    the order to use for the facts that exist, not a checklist to
+    acknowledge.
     Name things rather than gesturing at them. "sanctions 77
     individuals involved in elections in occupied Donetsk, Luhansk
     and Crimea" is the summary; "sanctions certain individuals" is

@@ -248,16 +248,3 @@ def test_revenue_reason_noise_and_not_scored() -> None:
 def test_revenue_reason_possessive_for_names_ending_in_s() -> None:
     meta = {**_KING_SLIDE, "translated_company_name": "Delta Electronics", "revenue_deviation": 0.1}
     assert revenue_reason(meta, "NOISE", "scored").endswith("That is within Delta Electronics' usual range.")
-
-
-def test_customers_from_news_retrieval_are_stored_unchanged(monkeypatch) -> None:
-    # metadata.customers is set by news-retrieval from TAIWAN_TICKER_UNIVERSE
-    # (the one source of truth); the agent stores it as received.
-    monkeypatch.setattr(tsc, "translate_taiwan_articles", lambda *a, **k: None)
-    monkeypatch.setattr(tsc, "classify_gdelt_articles", lambda articles, model=None: [])
-    customers = [{"name": "NVIDIA", "relationship": "US test capacity reserved for NVIDIA"}]
-    rev = {"url": "twse-revenue://2449/2026-09", "metadata": {
-        "source_category": "mops_revenue", "ticker": "2449", "period_gregorian": "2026-09",
-        "revenue_current_month": 100, "revenue_prior_year_month": 90, "customers": customers}}
-    results = tsc.classify_taiwan_signal_batch([rev], model="m", revenue_history={})
-    assert results[0]["result"]["metadata"]["customers"] == customers

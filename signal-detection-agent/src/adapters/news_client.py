@@ -95,6 +95,25 @@ async def fetch_taiwan_revenue_history() -> list[dict[str, Any]] | None:
         return None
 
 
+async def fetch_taiwan_universe() -> list[dict[str, Any]] | None:
+    """The Taiwan company table from news-retrieval
+    (seed.TAIWAN_TICKER_UNIVERSE): ticker, company_name, translated_company_name
+    and verified customers per company.
+
+    Returns None on failure - distinct from [] - so the route can answer 503
+    rather than an empty universe that reads as "no companies".
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{config.NEWS_RETRIEVAL_URL}/market/taiwan/universe")
+            resp.raise_for_status()
+            return resp.json().get("companies") or []
+    except Exception:
+        logger.exception("Failed to fetch the Taiwan company table")
+        return None
+
+
 async def fetch_middle_east_universe() -> list[dict[str, Any]] | None:
     """The Middle East company table from news-retrieval
     (seed.MIDDLE_EAST_TICKER_UNIVERSE, served unchanged) - each company's

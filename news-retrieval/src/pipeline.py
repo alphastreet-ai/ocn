@@ -3093,7 +3093,6 @@ def _dedup_by_title_similarity(
             article["metadata"]["ticker"] = ticker
             article["metadata"]["source_type"] = "gdelt"
             article["metadata"]["source_category"] = "gdelt"
-            article["metadata"]["customers"] = _taiwan_customers(ticker)
             kept.append(article)
             continue
 
@@ -3169,7 +3168,6 @@ def _dedup_by_title_similarity(
         article["metadata"]["ticker"] = ticker
         article["metadata"]["source_type"] = "gdelt"
         article["metadata"]["source_category"] = "gdelt"
-        article["metadata"]["customers"] = _taiwan_customers(ticker)
         article["metadata"]["title_embedding"] = embedding
         kept.append(article)
         kept_this_batch.setdefault(ticker, []).append(article)
@@ -3979,19 +3977,6 @@ def _to_int(value: str) -> int | None:
         return None
 
 
-def _taiwan_customers(ticker: str | None) -> list[dict[str, str]] | None:
-    """The company's verified customers ({name, relationship}) from
-    seed.TAIWAN_TICKER_UNIVERSE - the one source of truth - read from code at
-    fetch time, not from the seeded sources.config, so editing the list takes
-    effect on the next run without a DB update. None for a ticker outside the
-    universe; [] means checked and none verified."""
-    from seed import TAIWAN_TICKER_UNIVERSE  # lazy: seed imports db
-    for t in TAIWAN_TICKER_UNIVERSE:
-        if t["ticker"] == str(ticker or ""):
-            return [{"name": c["name"], "relationship": c["relationship"]} for c in t.get("customers", [])]
-    return None
-
-
 def _fetch_one_revenue_dump(
     url: str, exchange: str, tickers: list[str], ticker_names: dict[str, str] | None = None,
 ) -> list[dict]:
@@ -4094,7 +4079,6 @@ def _fetch_one_revenue_dump(
                 "is_stale": not is_fresh,
                 "source_category": "mops_revenue",
                 "translated_company_name": ticker_names.get(ticker),
-                "customers": _taiwan_customers(ticker),
             },
         })
     logger.info(
@@ -4233,7 +4217,6 @@ def _fetch_one_material_dump(
                 "is_stale": not is_fresh,
                 "source_category": "mops_material",
                 "translated_company_name": ticker_names.get(ticker),
-                "customers": _taiwan_customers(ticker),
             },
         })
     logger.info(

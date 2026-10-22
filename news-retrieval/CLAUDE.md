@@ -169,10 +169,11 @@ when a primary source names it (the company's own annual report / MOPS filing / 
 the customer's own SEC 10-K or Apple's official supplier list, or an official MOPS announcement
 naming the counterparty); press and analyst claims, partners, investors and code-only customers
 (客戶A) are left out; `[]` means checked and none verified (researched 2026-10-19, 68 customers
-across 12 of the 20 companies). `pipeline._taiwan_customers` copies the list onto every Taiwan
-revenue, material-announcement and GDELT article as `metadata.customers`, reading it from code at
-fetch time - not from the seeded `sources.config` like `ticker_names` - so an edit takes effect on
-the next run without a DB update. signal-detection-agent stores it unchanged.
+across 12 of the 20 companies). Served at `GET /market/taiwan/universe` (`ticker`, `company_name`,
+`translated_company_name`, `customers`) and never copied onto articles - a copy is frozen at fetch
+time, so rows fetched before a customer was verified never showed it. signal-detection-agent serves
+it as `GET /taiwan-signals/universe`; a consumer joins on `metadata.ticker`. Older articles may
+still carry a `metadata.customers` copy; nothing reads it.
 
 | Source | `source_type` | `source_category` (metadata) | What it fetches |
 |--------|---------------|-------------------------------|------------------|
