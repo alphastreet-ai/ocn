@@ -1,9 +1,9 @@
 -- Roles and schemas on the shared platform database (alphaStreet-api docs/PLATFORM_ARCHITECTURE.md
 -- §4.2). Idempotent: rerun after every edit. Run as master against database `alphastreet`:
---   SVC_APP_PASSWORD=... psql "host=... dbname=alphastreet user=master sslmode=verify-full" \
+--   SVC_APP_PASSWORD=... SVC_SIM_PASSWORD=... psql "host=... dbname=alphastreet user=master sslmode=verify-full" \
 --     -v ON_ERROR_STOP=1 -f roles.sql
 -- (bootstrap-app.sh does this; the password comes from the environment, never argv.)
--- Today: schema app only. Each OCN service adds its schema + svc_<name> here when it moves in.
+-- Schemas: app (alphaStreet-api), sim (alphastreet-simulation). Each OCN service adds its schema + svc_<name> here when it moves in.
 
 -- Nobody connects or creates in public by default; each role is granted what it needs.
 REVOKE ALL ON DATABASE alphastreet FROM PUBLIC;
@@ -34,3 +34,29 @@ GRANT USAGE ON SCHEMA public TO svc_app;
 GRANT svc_app TO CURRENT_USER;
 CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION svc_app;
 ALTER SCHEMA app OWNER TO svc_app;
+
+
+-- --- sim: alphastreet-simulation (engine + regional pollers) ---
+-- svc_sim owns sim and creates its tables there (alphastreet-simulation db/sim/*.sql, run by its
+-- migrate task). Readers get SELECT on exactly what they need (PLATFORM_ARCHITECTURE §4.2).
+
+\getenv svc_sim_password SVC_SIM_PASSWORD
+SELECT 'CREATE ROLE svc_sim LOGIN'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'svc_sim') \gexec
+
+ALTER ROLE svc_sim WITH LOGIN PASSWORD :'svc_sim_password' CONNECTION LIMIT 20;
+ALTER ROLE svc_sim SET search_path = sim, public;
+ALTER ROLE svc_sim SET statement_timeout = '5min';
+ALTER ROLE svc_sim SET idle_in_transaction_session_timeout = '60s';
+
+GRANT CONNECT ON DATABASE alphastreet TO svc_sim;
+GRANT USAGE ON SCHEMA public TO svc_sim;
+GRANT svc_sim TO CURRENT_USER;
+CREATE SCHEMA IF NOT EXISTS sim AUTHORIZATION svc_sim;
+ALTER SCHEMA sim OWNER TO svc_sim;
+
+-- alphaStreet-api polls sim.runs for ready runs (RUN_SOURCE=sim_runs). The table is created by the
+-- sim migrate task, so this grant applies on the first rerun after that.
+GRANT USAGE ON SCHEMA sim TO svc_app;
+SELECT 'GRANT SELECT ON sim.runs TO svc_app'
+WHERE to_regclass('sim.runs') IS NOT NULL \gexec
