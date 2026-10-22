@@ -35,6 +35,7 @@ signal-detection-agent/
 │   ├── ai_universe_signal_classifier_v1.txt
 │   ├── ai_universe_signal_classifier_v2_refine.txt
 │   ├── geopolitical_signal_stage_b_v1.txt   (talk vs action; the irreversible verdict)
+│   ├── middle_east_signal_extract_v1.txt   (facts only - code decides the label)
 │   └── geopolitical_signal_stage_c_v1.txt   (channel definitions + precedence, assets, category)
 ├── src/
 │   ├── __main__.py
@@ -62,6 +63,7 @@ signal-detection-agent/
 │   │   ├── japan_signal_view.py      (japan_market_signal: row -> card shaping)
 │   │   ├── china_companies.py        (china_market_signal: the one static company table - signal_roles + read-through)
 │   │   ├── china_signal_classifier.py   (china_market_signal: Gate 1 + C1-C7, read-through, confirmation, translate)
+│   │   ├── middle_east_signal_classifier.py   (middle_east_market_signal: M1-M8 extraction, spec label rules, read-through, corroboration, stories)
 │   │   ├── geopolitical_signal_classifier.py  (geopolitical_signal Stage A: rule-based noise removal, no model call)
 │   │   ├── geopolitical_signal_layer1.py      (geopolitical_signal Stage A: rule-based row creation)
 │   │   ├── geopolitical_signal_overrides.py   (geopolitical_signal Stage A: source-specific overrides)
@@ -155,12 +157,15 @@ from news-retrieval's `GET /market/taiwan/revenue-history`; if it cannot be read
 skipped for that run rather than stored as unscorable. Each distinct company remark is
 translated once (stored translations reused; identical texts in a batch share one call).
 
-### Customers (`metadata.customers`, every Taiwan row)
+### Customers (`GET /taiwan-signals/universe`)
 
-The company's verified customers, `[{name, relationship}]`, set by news-retrieval from
-`TAIWAN_TICKER_UNIVERSE` (`news-retrieval/src/seed.py` - the one source of truth; see that
-service's CLAUDE.md for what counts as verified) and stored here unchanged. `[]` means checked and
-none verified. This service keeps no copy of the list.
+The company's verified customers, `[{name, relationship}]`, are served per company by
+`GET /taiwan-signals/universe` (`ticker`, `company_name`, `translated_company_name`, `customers`),
+read live from news-retrieval's `GET /market/taiwan/universe` (`TAIWAN_TICKER_UNIVERSE` in
+`news-retrieval/src/seed.py` - the one source of truth). `[]` means checked and none verified; 503
+if news-retrieval is unreachable. A consumer joins on `metadata.ticker`. Customers are not stored on
+rows and no classification step reads them; rows classified before 2026-10-22 may still carry a
+`metadata.customers` copy, which nothing reads.
 
 ### Material announcements (`mops_material`): clause meaning
 
@@ -610,6 +615,141 @@ trade remedy or export control, false of a statistics bulletin, an industry plan
 exhibition notice. Gated on C1's own `binding` verdict rather than a new judgment: 11 of 13
 stored C1 rows are `checkpoint_source: not_applicable`.
 
+## Middle East Signal Pipeline
+
+`middle_east_market_signal`, from "Middle East Market Signals for the AI Economy" (Ayushi Shah,
+2026-10-15), **classification only** (no trader cards or daily summary yet). Code:
+`pipeline/middle_east_signal_classifier.py`; flow in [STRUCTURE.md](STRUCTURE.md). Labels are
+used directly: `signal` = the spec's Alert, `weak_signal` = Store, `noise` = Ignore - and noise
+IS stored, with its reason, like every domain.
+
+**The model extracts, code decides.** One `MIDDLE_EAST_SIGNAL_MODEL` call per article (falls
+back to `SEC_FILING_MODEL`), the WHOLE body read once (60k-char safety cap,
+`metadata.body_truncated`), prompt `prompts/middle_east_signal_extract_v1.txt`. A 50-article test
+(2026-10-21) showed 700/1,500/3,000-character cuts changed 5/4/2 answers vs the full body, and a
+yes/no relevance screen dropped items the spec stores - so there is no keyword gate and no
+second call. The model returns facts; `decide_label` turns them into a label with one branch per
+spec section 7 row, and `metadata.rule` names the branch.
+
+- **No model:** SEC 13D/G (`judge_sec_stake`: issuer must be a US company in research-universe;
+  new filing -> signal rise, amendment below 5% -> signal fall, other amendment -> weak - the old
+  holding is not in the filing); market wraps and the newsletter's weekly digest (headline rules).
+  Federal Register and BIS ARE read by the model - free text, and the Federal Register filter
+  also matches notices about non-Gulf companies (a Russian airline's denial order).
+- **Checks, never repairs:** every company, amount, capacity, date, place and confirmer must appear
+  in the text, and every number in the summary and reason by value ("300MW" is refused when the
+  text only has "GB300"); a failing item is removed, so a check can only LOWER a label. Bad enum
+  -> weakest value (`unnamed`, `mixed`). Unnamed-only sources cap the deal level at 3 (spec 9.1).
+  Not JSON / unknown event code -> weak_signal `model_output_unusable`. Retries only on transport
+  errors; a failed call stores nothing and the next run retries it.
+- **Code guards added from the live test** (the model got these wrong): M8 needs a company based
+  in a Gulf country; a QatarEnergy force majeure alert needs Qatar/QatarEnergy/Ras Laffan in the
+  headline (it is often background); a claim by one side of the war is `named_source`, never
+  `official`.
+- **Two deliberate departures from the spec (user decision 2026-10-22)**, after an audit of every
+  weak_signal and noise row found exactly these two real events held back:
+  - Hormuz / Red Sea closure or reopening: spec 7.5 wants ship-count confirmation within 72h and
+    there is no ship-count feed. Now `signal` when the side that controls the waterway (Iran /
+    IRGC, the Houthis) declares it (`m4_waterway_declared_by_controlling_party`, reason says
+    traffic has not confirmed it), or when the article quotes a named tracker's ship counts
+    (`m4_waterway_confirmed_by_ship_counts`). Other statements (the US saying it is open) stay weak.
+  - Incident at a listed chip company's Israeli site (Intel Kiryat Gat fab explosion): spec 7.8
+    wants the company to announce a stop; Intel never did. Now `signal` when officials (police,
+    fire, ambulance) confirm it (`m7_site_incident_confirmed`).
+  Also from that audit: "Why X stock fell" headlines are no longer skipped as market wraps (one
+  carried the Intel blast); `m4_interception` (nothing hit) is noise; analysis, roundups and
+  reaction statements are `m4_commentary`; a reaction headline (condemns / welcomes) is capped
+  at weak_signal. Result on the 403 local articles: 11 signal rows = 4 alerts after story
+  grouping (Qatar extends force majeure; Intel fab blast; Hormuz declared closed; Intel
+  hazardous-materials leak a week later), 48 weak_signal, 344 noise.
+
+**Storage - each field once, in its own column; related values grouped into one object.**
+- `signal_detection` - the label (code decides it).
+- `signal_reason` - shown to readers, plain language, no spec terms/levels/codes: the model's
+  one-sentence `reason_facts` (what happened, with names and figures) + the deciding rule's
+  plain "why" from `decide_label` ("The order is signed, but the capacity is not built or
+  running yet."). For `noise` with no event the model's sentence says, for that article, why it
+  changes nothing (a fixed sentence contradicted articles about Gulf data centres or helium).
+- `entities_json` - companies the article is about (`role: subject`, ticker, country) and the
+  read-through (`role: affected`, `share_price` rise/fall, `relationship` with "(spec ...)"
+  citations stripped).
+- `metadata`, nothing stored as null, one object per kind of information:
+  `source {name, url, outlet, event_uri}` (url/outlet/event_uri newsapi.ai only - the row url is
+  the synthetic `er-me://` id); `event {type, code, place, effective_date, lasts_over_24_hours}`
+  (what happened, where, when it takes effect, how long a restriction lasts); `deal {level,
+  amount, up_to, capacity}` (how firm and how big - deals only; `amount` is the deal's own
+  value, never losses or market sizes); `confirmation {level, by}`; `new_development`;
+  `news_effect` (good/bad/mixed for the companies - sets the read-through direction); `summary`
+  (WHAT happened, usually 2-4 sentences, never comments on relevance); `rule` (internal branch
+  name, never shown); `extracted_by {model, prompt}`; `body_truncated` (only when cut);
+  `corroboration`; `story_development` / `in_story`. The model returns the same names.
+  A rule change can re-label stored rows from these without a model call.
+- **Confirmation checks:** `by` must be in the article body; anonymous wording ("two people
+  aware", "sources familiar") -> `unnamed`; the publishing outlet (TokenPost, WAM) is never
+  `official`. A level above `unnamed` with no valid `by` falls to `unnamed`.
+- **SEC 13D/G rows** carry `event`, a code-built `summary` from the filing's fields, and both the
+  fund and the issuer in `entities_json`.
+
+**Read-through** (`read_through`): each tracked company's `counterparties` from news-retrieval's
+table (`share_price_on_good_news`, reversed on bad news), then the spec "At a glance" row(s) for
+the event CODE (`_ROWS_BY_CODE`) - a construction contract, a software deal, a ship incident or a
+threat moves no row (a copied template had put "more AI hardware is sold" on a construction
+contract). A helium restart reverses the helium rows with matching wording (spec card 8.1).
+Mixed news gets no direction. M3 skips company counterparties (Mubadala -> GlobalFoundries is
+what it owns, not what a new investment moves).
+
+**Four-reviewer test (2026-10-22):** trader, analyst, technical and lay-reader personas on 30
+articles (mostly unseen). Labels: trader 26/30, analyst 27/30 before fixes. Fixed from it:
+anonymous/outlet confirmers, event code must be the HEADLINE's news (not background), Qatar
+force majeure needs QatarEnergy itself, software partnerships are not data-centre deals (code
+guard `m2_not_hardware`), number check by value ("AED 2.5 million" = "AED2.5M"), rows without a
+published time never join a story, plain-language reasons. Re-run: all reviewer label
+disagreements resolved; one summary of six still ended with a relevance remark.
+
+**Full local run (2026-10-22, job 1498, all 403 articles, $2.64):** 8 signal / 63 weak / 332
+noise at first. Reading the rows found 5 wrong signals, fixed in code and re-labelled from the
+stored fields with no model call: the Qatar alert now needs QatarEnergy's own declare / extend /
+lift / end / restart in the HEADLINE (`_qatar_announcement_headline` - four "exports plunge" /
+"Pakistan ... amid Qatar force majeure" headlines had passed a bare "names Qatar" check); a Gulf
+rule must concern AI, data or chips (`m6_not_ai_or_data` - Saudi boat-chartering rules). Story
+keys: places are matched on the place name without direction words (`place_key`; initials of
+"eastern Strait of Hormuz" had made the key "esh"), and Gulf countries and the Saudi-led
+coalition never make a story alone. After: 3 signal / 67 weak / 333 noise, 6 stories.
+
+**Corroboration** (`metadata.corroboration`, geopolitical Stage D's `build_corroboration`):
+other outlets on the same event, from news-retrieval's `also_reported_by` and newsapi.ai's
+`event_uri` cluster (this batch + stored rows). On every signal/weak_signal press row; `count: 0`
+means looked and found none. Shown, never used to raise a label.
+
+**Same-event duplicates - one row per event** (`metadata.collapsed_into`, geopolitical Stage B's
+tombstone): after each insert, signal/weak_signal rows reporting the SAME event are folded into
+the best one (signal before weak, then best-confirmed, most corroborated, earliest); each
+duplicate's outlet, headline and link join that row's `corroboration.siblings` (`via:
+same_event`), and the duplicate is set to noise with `collapsed_into` - never deleted (the
+already-judged skip reads its source_id; a wrong fold stays auditable). "Same event" = same
+event code, within 48h, and a shared subject company, or the same place for place-bound codes
+(closures, site incidents, strikes on a site, force majeure); ship attacks and statements need a
+shared ship / company / speaker. NOT newsapi.ai's event_uri: one held 15 different events on the
+403 run. Duplicates cannot be skipped BEFORE the model call (as geopolitical does): measured on
+that run, headline-embedding similarity was 0.34-0.74 for same-event pairs and up to 0.82 for
+different tanker hits - no threshold separates them, and only 19 of 370 calls (~5%) were
+duplicates. Run 1498: 18 reports folded; 4 signal rows remain, one per event.
+
+**Stories** (`metadata.story_development` on the seed, `in_story` on members - geopolitical
+Stage E's pattern): same event type, within 72h, sharing a specific name (a subject company or
+the place); countries, armed forces, agencies, commodities and read-through companies never count.
+Seed = signal before weak, then most corroborated, then earliest. Nothing deleted; regrouped from
+scratch after every insert. One row per story: `NOT (metadata ? 'in_story')`.
+
+**Reading the rows.** `GET /results` and `GET /results/summary` return one row per event or
+story by default (`view=events`, see "Results views" below): story members (`in_story`) and
+folded duplicates (`collapsed_into`) are left out and travel inside the lead row's
+`story_development` and `corroboration`. `view=rows` returns every stored row.
+
+**Cost** (live, 2026-10-22): ~$0.007/article (~2,900 input + ~200 output tokens, `gpt-4.1`);
+prompt cache hit 0-7% so far even with a warm-up call. Each run logs
+`[MIDDLE_EAST_SIGNAL] paths:` and `spend:`.
+
 ## Geopolitical Signal Pipeline
 
 `geopolitical_signal` is a five-stage funnel over the `geopolitical_news` domain, which
@@ -683,7 +823,9 @@ It **marks, never deletes** - the opposite of Stage B's collapse, and deliberate
 six rows of one Hormuz story each reported a different state action; delete five to keep
 one and a reader querying "sanctions actions this week" no longer finds the Treasury
 designation. So the seed row carries `story_development` and the others carry `in_story`
-pointing back at it. One row per story is a **filter the caller applies**:
+pointing back at it. One row per story is applied **by the API** (`GET /results` and
+`/results/summary`, `view=events` - the default since 2026-10-22; it used to be a filter each
+caller applied, and the frontend did):
 
 ```sql
 signal_detection = 'signal' AND NOT (metadata ? 'in_story')
@@ -728,6 +870,18 @@ Both this domain and `news` write the `category` column directly. It replaced
 `metadata.impacted_categories`; filters are `category && ARRAY[%s]::TEXT[]`. Any consumer
 reading a single category string will silently drop every row once this is live - that is
 the bug fixed in signal-herald's `digest.py`, which now handles both shapes.
+
+## Results views (`GET /results`, `GET /results/summary`)
+
+`view=events` (default) returns one row per event or story: rows carrying
+`metadata.in_story` (an event listed inside a story's lead row) or `metadata.collapsed_into`
+(a report folded into another row as the same event) are left out - both written by
+geopolitical_signal (Stage E / Stage B) and middle_east_market_signal. Pages and summary counts
+follow the same view, so `limit=50` is 50 visible rows and the counts match the feed.
+`view=rows` returns every stored row (audits, re-labelling). The condition is
+`_EVENTS_VIEW_CONDITION` in models/jobs.py; it COALESCEs NULL metadata (some domains store
+none), so every other domain is unaffected. `/jobs/{job_id}/results` (signal-herald's read)
+is NOT filtered: it returns one job's rows exactly as stored.
 
 ## Classification Retention (Postgres)
 

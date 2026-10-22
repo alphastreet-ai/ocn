@@ -38,6 +38,13 @@ JAPAN_SIGNAL_DOMAIN: str = os.environ.get("JAPAN_SIGNAL_DOMAIN", "japan_market_s
 CHINA_SIGNAL_DOMAIN: str = os.environ.get("CHINA_SIGNAL_DOMAIN", "china_market_signal")
 MIDDLE_EAST_SIGNAL_DOMAIN: str = os.environ.get(
     "MIDDLE_EAST_SIGNAL_DOMAIN", "middle_east_market_signal")
+# One extraction call per article (facts only - code decides the label).
+# SEC_FILING_MODEL by default: it is the model the 50-article body-length
+# experiment (2026-10-21) was run with.
+MIDDLE_EAST_SIGNAL_MODEL: str = os.environ.get("MIDDLE_EAST_SIGNAL_MODEL") or SEC_FILING_MODEL
+MIDDLE_EAST_SIGNAL_PROMPT: Path = (
+    Path(__file__).parent.parent / "prompts" / "middle_east_signal_extract_v1.txt")
+MIDDLE_EAST_CLASSIFY_CONCURRENCY: int = int(os.environ.get("MIDDLE_EAST_CLASSIFY_CONCURRENCY", "5"))
 NEWS_DOMAIN: str = os.environ.get("NEWS_DOMAIN", "ai_news")
 GEOPOLITICAL_SIGNAL_DOMAIN: str = os.environ.get("GEOPOLITICAL_SIGNAL_DOMAIN", "geopolitical_news")
 # Stage B is a forced one-word HIGH/WEAK call, but it is also the stage

@@ -160,10 +160,9 @@ DOMAINS: list[dict[str, Any]] = [
 # native_name is the Chinese company name used for GDELT queries (native-
 # language press generally refers to companies by this name, not the English
 # one) — sourced from spec Section 14.1.
-# customers: verified customers only, as {name, relationship} - copied onto every
-# Taiwan article's metadata.customers (pipeline._taiwan_customers, read from
-# here at fetch time, never from the seeded sources.config, so an edit takes
-# effect without a DB update). A customer is listed ONLY when a primary source
+# customers: verified customers only, as {name, relationship} - served at
+# GET /market/taiwan/universe (routes/market.py), never copied onto articles,
+# so an edit reaches every row, old or new, on the next read. A customer is listed ONLY when a primary source
 # names it: the company's own disclosure (annual report 年報, MOPS filing,
 # press release), the customer's own disclosure (its SEC 10-K, Apple's
 # official supplier list), or an official MOPS announcement naming the

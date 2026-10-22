@@ -10,6 +10,7 @@
 | `pyproject.toml` | pytest configuration (`asyncio_mode=auto`) |
 | `prompts/ai_universe_signal_classifier_v1.txt` | Base-pass LLM system prompt - 11 AI-universe categories + "none" (noise only), signal/weak_signal/noise scoring bands, tie-breaker rules, 15 labelled examples |
 | `prompts/ai_universe_signal_classifier_v2_refine.txt` | Second-pass (STORM-style) LLM system prompt - refinement rules, novelty/confidence definitions with score bands, 3 labelled examples |
+| `prompts/middle_east_signal_extract_v1.txt` | middle_east_market_signal extraction prompt - FACTS ONLY (event code M1-M8, companies, deal level 1-6, amount, capacity, effective date, place, confirmation, good/bad news, quotes, 2-3 sentence summary); code decides the label |
 
 ## App Layers
 
@@ -81,6 +82,12 @@ src/
 │                                     beside it - three parallel structures used to
 │                                     hold these facts and a missed edit failed
 │                                     silently
+│   ├── middle_east_signal_classifier.py  middle_east_market_signal: source naming,
+│                                     the spec's events table, company-table check,
+│                                     headline rules, SEC 13D/G rule, one extraction
+│                                     call per article, fact checks, label rules
+│                                     (decide_label, spec section 7), read-through,
+│                                     corroboration and story grouping
 │   └── china_signal_classifier.py  Deterministic + LLM classifier for
 │                                     china_market_signal - gate_filings() (Gate 1
 │                                     triage, pure regex, discards ~93% before any
@@ -209,6 +216,27 @@ mops_revenue, ticker+timestamp for mops_material, url for gdelt) - not from the 
 article row id - so the same underlying fact re-appearing across multiple news-retrieval
 polls is only ever classified/persisted once, even across the two daily runs.
 
+## Middle East Signal Pipeline (`middle_east_market_signal`)
+
+CLI only: `classify-middle-east-signals [--from-date --to-date --dry-run]` (default window
+yesterday-today). `controllers/run.py:run_middle_east_signal_classification`:
+
+```
+pool runs in window, dedup by url, drop already-judged      (no model)
+company table  <- news-retrieval GET /market/middle-east/universe (job fails if bad)
+US companies   <- research-universe GET /companies  (only when a 13D/G is in the batch)
+stored event clusters <- get_middle_east_event_members(event_uris)
+classify_middle_east_signal_batch:
+  sec_fund_stake      -> judge_sec_stake (code)
+  market wrap/digest  -> noise by headline (code)
+  everything else     -> ONE model call, full body -> check_extraction -> decide_label
+                         -> read_through -> corroboration_for
+insert (ON CONFLICT DO NOTHING) -> regroup_middle_east_stories (whole set, rewrite)
+```
+
+A failed model call stores nothing (retried next run); an unreadable answer is stored as
+weak_signal (`rule = model_output_unusable`).
+
 ## Geopolitical Signal Pipeline (`geopolitical_signal`)
 
 Not triggered via `POST /run`. The primary trigger is news-retrieval's `--callback-url`
@@ -277,7 +305,9 @@ rarely, so it is not tied to the news cycle.
 | `POST` | `/run` | x-ocn-caller | Trigger pipeline; body: `{domain, run_id?, limit?, days_back?, use_latest_run?, force?}`; 202 `{job_id, cached:false}` or 200 `{job_id, cached:true}` if already completed |
 | `GET` | `/jobs` | x-ocn-caller | Jobs, newest-first; cursor-paginated (`limit`, `cursor`) |
 | `GET` | `/jobs/{id}` | x-ocn-caller | Single job status + stats |
-| `GET` | `/jobs/{id}/results` | x-ocn-caller | Paginated `agent_classifications` for a job |
+| `GET` | `/jobs/{id}/results` | x-ocn-caller | Paginated `agent_classifications` for a job, every row as stored |
+| `GET` | `/results` | x-ocn-caller | Results across jobs, filterable (`source_type`, `signal_detection`, dates, ...). `view=events` (default) = one row per event or story (drops `in_story` / `collapsed_into` rows); `view=rows` = every stored row |
+| `GET` | `/results/summary` | x-ocn-caller | Counts for a date window, same filters and same `view` as `/results` |
 
 ## Database
 

@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 import config
-from adapters.news_client import fetch_macro_series_total
+from adapters.news_client import fetch_macro_series_total, fetch_taiwan_universe
 from auth import require_auth
 from controllers.run import generate_korea_signal_summary_for_date
 from models.jobs import get_job, get_results_summary, list_all_results, list_jobs, list_results, list_taiwan_periods
@@ -54,6 +54,7 @@ async def get_all_results(
     published_to: str | None = Query(default=None, description="Filter to rows with published <= this date (YYYY-MM-DD), inclusive"),
     macro_series: str | None = Query(default=None, description="Filter to macro_signal rows involving this series_id, e.g. 'DGS10' - matches either an interpreted event's member_series or a suppressed/audit row's own series_id"),
     macro_suspect: bool | None = Query(default=None, description="Filter by metadata.suspect (only populated for source_type='macro_signal' interpreted-event rows - the model's calendar-mechanics override flag from Appendix A)"),
+    view: str = Query(default="events", pattern="^(events|rows)$", description="events (default): one row per event or story - a report folded into another row as the same event (metadata.collapsed_into) and an event listed inside a story's lead row (metadata.in_story) are left out; both appear inside the row that is returned (corroboration.siblings, story_development.members). Pages follow the same view. rows: every stored row, for audits."),
     macro_interpreted_only: bool | None = Query(default=None, description="true: only macro_signal rows that reached and passed INTERPRET (a real LLM call, real channel/entry_point/assets/transmission fields) - excludes suppressed/NOISE audit rows kept only for the 'nothing is ever deleted' audit trail, which otherwise mix in with real signal_detection='signal'/'weak_signal' results. false: only the suppressed/audit rows. Use plain signal_detection ('signal'/'weak_signal'/'noise') for macro_signal's HIGH/WEAK/NOISE tier - same convention as every other domain, no separate macro-specific tier filter."),
     caller: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
@@ -72,7 +73,7 @@ async def get_all_results(
                 " metadata.corroboration.count directly."
             ),
         )
-    return list_all_results(limit=limit, cursor=cursor, signal_detection=signal_detection, source_type=source_type, ticker=ticker, code=code, period=period, source_category=source_category, impacted_category=impacted_category, impacted_ticker=impacted_ticker, channel=channel, corroborated=corroborated, event_location=event_location, coverage=coverage, published_from=published_from, published_to=published_to, macro_series=macro_series, macro_suspect=macro_suspect, macro_interpreted_only=macro_interpreted_only)
+    return list_all_results(limit=limit, cursor=cursor, signal_detection=signal_detection, source_type=source_type, ticker=ticker, code=code, period=period, source_category=source_category, impacted_category=impacted_category, impacted_ticker=impacted_ticker, channel=channel, corroborated=corroborated, event_location=event_location, coverage=coverage, published_from=published_from, published_to=published_to, macro_series=macro_series, macro_suspect=macro_suspect, macro_interpreted_only=macro_interpreted_only, view=view)
 
 
 @router.get("/korea-signals/summary")
@@ -182,6 +183,27 @@ async def get_china_signal_universe(
     return {"companies": china_company_universe()}
 
 
+@router.get("/taiwan-signals/universe")
+async def get_taiwan_signal_universe(
+    caller: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    """Return the 20-company taiwan_market_signal universe - ticker,
+    company_name (Chinese), translated_company_name (English) and the
+    company's verified customers ([{name, relationship}], [] = checked and
+    none verified). Same role as /japan-signals/universe: fetch once and
+    join on metadata.ticker against GET /results rows.
+
+    Read live from news-retrieval (GET /market/taiwan/universe), which owns
+    the table; this service keeps no copy. Customers are no longer stored
+    on rows, so a corrected or newly verified customer shows on every row,
+    old ones included.
+    """
+    companies = await fetch_taiwan_universe()
+    if companies is None:
+        raise HTTPException(status_code=503, detail="Taiwan company table unavailable")
+    return {"companies": companies}
+
+
 @router.get("/japan-signals/results")
 async def get_japan_signal_results(
     limit: int = Query(default=50, ge=1, le=500),
@@ -266,6 +288,7 @@ async def get_results_summary_route(
     source_type: str = Query(..., description="Required. e.g. 'macro_signal' - counted over exactly this source_type's rows"),
     published_from: str | None = Query(default=None, description="Filter to rows with published >= this date (YYYY-MM-DD), inclusive - same field as /results' own published_from"),
     published_to: str | None = Query(default=None, description="Filter to rows with published <= this date (YYYY-MM-DD), inclusive - same field as /results' own published_to"),
+    view: str = Query(default="events", pattern="^(events|rows)$", description="Same as /results' view: events (default) counts one row per event or story, so the counts match the rows /results returns; rows counts every stored row."),
     caller: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Real ask (frontend ticket, 2026-09-25): counts for a date window,
@@ -284,7 +307,7 @@ async def get_results_summary_route(
     every other source_type.
     """
     summary = get_results_summary(
-        source_type=source_type, published_from=published_from, published_to=published_to,
+        source_type=source_type, published_from=published_from, published_to=published_to, view=view,
     )
     summary["series_total"] = await fetch_macro_series_total() if source_type == "macro_signal" else None
     return summary
