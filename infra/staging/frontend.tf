@@ -103,6 +103,16 @@ resource "aws_cloudfront_distribution" "frontend" {
     origin_request_policy_id = local.origin_request_policy_all_no_host
   }
 
+  ordered_cache_behavior {
+    path_pattern             = "/universe/*"
+    target_origin_id         = "alb-staging-api"
+    viewer_protocol_policy   = "https-only"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = local.cache_policy_disabled
+    origin_request_policy_id = local.origin_request_policy_all_no_host
+  }
+
   # Default behavior - serves the SPA from S3
   default_cache_behavior {
     target_origin_id       = "s3-ocn-staging-frontend"

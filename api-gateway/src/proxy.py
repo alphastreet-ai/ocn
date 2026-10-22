@@ -53,7 +53,7 @@ async def forward_request(
     headers = {
         k: v
         for k, v in request.headers.items()
-        if k.lower() not in _HOP_BY_HOP
+        if k.lower() not in _HOP_BY_HOP and k.lower() != "x-ocn-caller"
     }
     if caller:
         payload = json.dumps({
