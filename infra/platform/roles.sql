@@ -55,8 +55,14 @@ GRANT svc_sim TO CURRENT_USER;
 CREATE SCHEMA IF NOT EXISTS sim AUTHORIZATION svc_sim;
 ALTER SCHEMA sim OWNER TO svc_sim;
 
--- alphaStreet-api polls sim.runs for ready runs (RUN_SOURCE=sim_runs). The table is created by the
--- sim migrate task, so this grant applies on the first rerun after that.
+-- alphaStreet-api polls sim.runs for ready runs (RUN_SOURCE=sim_runs) and reads the B7 result tables
+-- sim.company_results + sim.forecasts (RUN_DATA=db). SELECT only, granted per table (no ALTER DEFAULT
+-- PRIVILEGES), so engine-internal tables like sim.regional_signals stay private. The sim migrate task
+-- creates them, so each grant applies on the first bootstrap-app.sh run after it (migrate, then bootstrap).
 GRANT USAGE ON SCHEMA sim TO svc_app;
 SELECT 'GRANT SELECT ON sim.runs TO svc_app'
 WHERE to_regclass('sim.runs') IS NOT NULL \gexec
+SELECT 'GRANT SELECT ON sim.company_results TO svc_app'
+WHERE to_regclass('sim.company_results') IS NOT NULL \gexec
+SELECT 'GRANT SELECT ON sim.forecasts TO svc_app'
+WHERE to_regclass('sim.forecasts') IS NOT NULL \gexec
