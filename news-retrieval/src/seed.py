@@ -160,119 +160,191 @@ DOMAINS: list[dict[str, Any]] = [
 # native_name is the Chinese company name used for GDELT queries (native-
 # language press generally refers to companies by this name, not the English
 # one) — sourced from spec Section 14.1.
-# customers: verified customers only, as {name, relationship} - served at
-# GET /market/taiwan/universe (routes/market.py), never copied onto articles,
-# so an edit reaches every row, old or new, on the next read. A customer is listed ONLY when a primary source
-# names it: the company's own disclosure (annual report 年報, MOPS filing,
-# press release), the customer's own disclosure (its SEC 10-K, Apple's
-# official supplier list), or an official MOPS announcement naming the
-# counterparty. Researched 2026-10-19. Not listed: analyst and press claims
-# however often repeated (Meta/AWS/Google for the server makers), partners and
-# investors (Amazon's 2026 placement in Gold Circuit, Sony-TSMC, Chenbro-NVIDIA
-# MGX), and customers a company reports only as codes (客戶A, 甲客戶) - no name
-# is guessed. [] means checked and none verified. Apple entries come from
-# Apple's fiscal-2023 list (published 2024-04), the latest Apple has issued.
+# segment: the company's place in the AI-server supply chain, for grouping and
+# peer comparison.
+# customers: served at GET /market/taiwan/universe (routes/market.py), never
+# copied onto articles, so an edit reaches every row on the next read. Each
+# customer carries its evidence, checked live against the source (2026-10-22):
+#   status       verified   - a primary source itself states the relationship:
+#                             the customer's SEC filing or supplier list, a press
+#                             release by either party, the company's own filing,
+#                             annual report, website or earnings call, or code /
+#                             a datasheet written by the customer
+#                partial    - indirect primary evidence (customs records, a company
+#                             comment reported by the press, an unnamed customer)
+#                unverified - press or analyst reports only
+#   source_type  sec_filing | supplier_list | press_release | company_filing |
+#                annual_report | earnings_call | code_commit | product_datasheet |
+#                company_website | company_statement | customs_record | news | none
+#   source, source_date, source_url - where to check it, and how old it is
+# All statuses are served; a consumer shows verified by default and never
+# presents partial/unverified as confirmed. [] means checked and none found.
 TAIWAN_TICKER_UNIVERSE: list[dict[str, Any]] = [
-    {"ticker": "2330", "company": "TSMC", "native_name": "台積電", "exchange": "TWSE", "customers": [
-        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
-        {"name": "NVIDIA", "relationship": "Customer: buys its semiconductor wafers from the company as its foundry"},
-        {"name": "AMD", "relationship": "Customer: buys wafers for its HPC, FPGA and adaptive SoC products"},
-        {"name": "Broadcom", "relationship": "Customer: outsources part of its front-end wafer manufacturing to the company"},
-        {"name": "Qualcomm", "relationship": "Customer: uses the company as a primary foundry for its integrated circuits"},
-        {"name": "Intel", "relationship": "Customer: buys key tiles for its products from the company as a foundry"},
-        {"name": "Analog Devices", "relationship": "Customer: sources part of its wafers from the company"},
-        {"name": "Lattice Semiconductor", "relationship": "Customer: has its 16nm FPGA products developed and manufactured by the company"},
-        {"name": "Astera Labs", "relationship": "Customer: has all of its ICs fabricated by the company"},
-        {"name": "Credo", "relationship": "Customer: bought all of its wafers from the company in fiscal 2026"},
-        {"name": "Silicon Labs", "relationship": "Customer: buys most of its wafers from the company as a primary foundry"},
-        {"name": "Cirrus Logic", "relationship": "Customer: has most of its wafers manufactured by the company"},
-        {"name": "SiTime", "relationship": "Customer: uses the company as a primary foundry for its analog circuits"},
-        {"name": "Allegro MicroSystems", "relationship": "Customer: uses the company as one of its primary fabs"},
-        {"name": "Navitas Semiconductor", "relationship": "Customer: buys its GaN wafers from the company, which it reports has announced it will stop GaN production"},
-        {"name": "Impinj", "relationship": "Customer: buys its endpoint IC wafers from the company (supplier since 2003)"},
-        {"name": "MaxLinear", "relationship": "Customer: uses the company as a key foundry"},
-        {"name": "indie Semiconductor", "relationship": "Customer: uses the company as a primary foundry"},
-        {"name": "Ambiq Micro", "relationship": "Customer: buys wafers for its SoC products (180nm to 12nm)"},
+    {"ticker": "2330", "company": "TSMC", "native_name": "台積電", "exchange": "TWSE", "segment": "Foundry", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list", "status": "verified", "source_type": "supplier_list", "source": "Apple Supplier List (FY2023, published 2024-04)", "source_date": "2024-04", "source_url": "https://s203.q4cdn.com/367071867/files/doc_downloads/2024/04/Apple-Supplier-List.pdf"},
+        {"name": "NVIDIA", "relationship": "Customer: buys its semiconductor wafers from the company as its foundry", "status": "verified", "source_type": "sec_filing", "source": "NVIDIA 10-K FY2026", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm"},
+        {"name": "AMD", "relationship": "Customer: buys wafers for its CPU, GPU, FPGA and adaptive SoC products", "status": "verified", "source_type": "sec_filing", "source": "AMD 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm"},
+        {"name": "Broadcom", "relationship": "Customer: outsources part of its front-end wafer manufacturing to the company", "status": "verified", "source_type": "sec_filing", "source": "Broadcom 10-K FY2025", "source_date": "2025-12", "source_url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm"},
+        {"name": "Qualcomm", "relationship": "Customer: uses the company as a primary foundry for its integrated circuits", "status": "verified", "source_type": "sec_filing", "source": "Qualcomm 10-K FY2025", "source_date": "2025-11", "source_url": "https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm"},
+        {"name": "Intel", "relationship": "Customer: buys key tiles for its products from the company as a foundry", "status": "verified", "source_type": "sec_filing", "source": "Intel 10-K FY2025", "source_date": "2026-01", "source_url": "https://www.intc.com/filings-reports/all-sec-filings/content/0000050863-26-000011/intc-20251227.htm"},
+        {"name": "Analog Devices", "relationship": "Customer: sources part of its wafers from the company", "status": "verified", "source_type": "sec_filing", "source": "Analog Devices 10-K FY2025", "source_date": "2025-11", "source_url": "https://www.sec.gov/Archives/edgar/data/6281/000000628125000153/adi-20251101.htm"},
+        {"name": "Lattice Semiconductor", "relationship": "Customer: has its 16nm FPGA products developed and manufactured by the company", "status": "verified", "source_type": "sec_filing", "source": "Lattice 10-K FY2025 (filed 2026-02-13)", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/855658/000143774926004100/lscc20260103_10k.htm"},
+        {"name": "Astera Labs", "relationship": "Customer: has all of its ICs fabricated by the company", "status": "verified", "source_type": "sec_filing", "source": "Astera Labs 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1736297/000173629726000010/alab-20251231.htm"},
+        {"name": "Credo", "relationship": "Customer: bought all of its wafers from the company in fiscal 2026", "status": "verified", "source_type": "sec_filing", "source": "Credo 10-K FY2026", "source_date": "2026-06", "source_url": "https://www.sec.gov/Archives/edgar/data/0001807794/000162828026043303/crdo-20260502.htm"},
+        {"name": "Silicon Labs", "relationship": "Customer: uses the company as a primary foundry (with SMIC) for the majority of its wafers", "status": "verified", "source_type": "sec_filing", "source": "Silicon Labs 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1038074/000103807426000005/slab-20260103.htm"},
+        {"name": "Cirrus Logic", "relationship": "Customer: uses the company as one of its two primary wafer foundries (with GlobalFoundries), manufacturing in Taiwan", "status": "verified", "source_type": "sec_filing", "source": "Cirrus Logic 10-K FY2026", "source_date": "2026-05", "source_url": "https://www.sec.gov/Archives/edgar/data/0000772406/000077240626000018/crus-20260328.htm"},
+        {"name": "SiTime", "relationship": "Customer: uses the company as a primary foundry for its analog circuits", "status": "verified", "source_type": "sec_filing", "source": "SiTime 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1451809/000145180926000012/sitm-20251231.htm"},
+        {"name": "Allegro MicroSystems", "relationship": "Customer: uses the company as one of its primary third-party fabs", "status": "verified", "source_type": "sec_filing", "source": "Allegro 10-K FY2026", "source_date": "2026-05", "source_url": "https://www.sec.gov/Archives/edgar/data/0000866291/000119312526233537/algm-20260327.htm"},
+        {"name": "Navitas Semiconductor", "relationship": "Customer: buys its GaN wafers from the company, which will stop GaN production in July 2027", "status": "verified", "source_type": "sec_filing", "source": "Navitas 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1821769/000182176926000007/nvts-20251231.htm"},
+        {"name": "Impinj", "relationship": "Customer: buys its endpoint IC wafers from the company (supplier since 2003)", "status": "verified", "source_type": "sec_filing", "source": "Impinj 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1114995/000119312526042813/pi-20251231.htm"},
+        {"name": "MaxLinear", "relationship": "Customer: uses the company as a key foundry", "status": "verified", "source_type": "sec_filing", "source": "MaxLinear 10-K FY2025", "source_date": "2026-01", "source_url": "https://www.sec.gov/Archives/edgar/data/1288469/000128846926000011/mxl-20251231.htm"},
+        {"name": "indie Semiconductor", "relationship": "Customer: uses the company as a primary foundry", "status": "verified", "source_type": "sec_filing", "source": "indie Semiconductor 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1841925/000119312526082535/indi-20251231.htm"},
+        {"name": "Ambiq Micro", "relationship": "Customer: buys wafers for its SoC products", "status": "verified", "source_type": "sec_filing", "source": "Ambiq Micro 10-K FY2025", "source_date": "2026-03", "source_url": "https://www.sec.gov/Archives/edgar/data/1500412/000119312526094004/ambq-20251231.htm"},
+        {"name": "Cisco", "relationship": "Customer: lists the company on its supplier list (top ~80% of spend)", "status": "verified", "source_type": "supplier_list", "source": "Cisco Supplier List FY2025", "source_date": "2026-04", "source_url": "https://www.cisco.com/c/dam/en_us/about/supply-chain/cisco-supplier-list.pdf"},
     ]},
-    {"ticker": "2317", "company": "Hon Hai / Foxconn", "native_name": "鴻海", "exchange": "TWSE", "customers": [
-        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
-        {"name": "NVIDIA", "relationship": "Customer: uses the company as a contract manufacturer to assemble, test and package its final products"},
-        {"name": "Arista Networks", "relationship": "Customer: uses the company as a primary contract manufacturer"},
-        {"name": "NETGEAR", "relationship": "Customer: uses the company as a primary manufacturer of its products"},
+    {"ticker": "2317", "company": "Hon Hai / Foxconn", "native_name": "鴻海", "exchange": "TWSE", "segment": "Server ODM / EMS", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list", "status": "verified", "source_type": "supplier_list", "source": "Apple Supplier List (FY2023, published 2024-04)", "source_date": "2024-04", "source_url": "https://s203.q4cdn.com/367071867/files/doc_downloads/2024/04/Apple-Supplier-List.pdf"},
+        {"name": "NVIDIA", "relationship": "Customer: uses the company as a contract manufacturer to assemble, test and package its final products", "status": "verified", "source_type": "sec_filing", "source": "NVIDIA 10-K FY2026", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm"},
+        {"name": "Arista Networks", "relationship": "Customer: uses the company as a primary contract manufacturer", "status": "verified", "source_type": "sec_filing", "source": "Arista 10-K FY2022", "source_date": "2023-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1596532/000159653223000016/anet-20221231.htm"},
+        {"name": "NETGEAR", "relationship": "Customer: uses the company (Cloud Network Technology) as a primary manufacturer", "status": "verified", "source_type": "sec_filing", "source": "NETGEAR 10-K FY2023", "source_date": "2024-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1122904/000095017024016525/ntgr-20231231.htm"},
+        {"name": "Inseego", "relationship": "Customer: uses the company as a primary contract manufacturer", "status": "verified", "source_type": "sec_filing", "source": "Inseego 10-K FY2024", "source_date": "2025-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1022652/000102265225000005/insg-20241231.htm"},
+        {"name": "Dell", "relationship": "Customer: lists the company as a direct supplier on its public supplier list", "status": "verified", "source_type": "supplier_list", "source": "Dell Public Supplier List (published 2025-12)", "source_date": "2025-12", "source_url": "https://www.delltechnologies.com/asset/en-rs/solutions/business-solutions/briefs-summaries/dell-public-supplier-list.pdf"},
+        {"name": "Cisco", "relationship": "Customer: lists the company on its supplier list (top ~80% of spend)", "status": "verified", "source_type": "supplier_list", "source": "Cisco Supplier List FY2025", "source_date": "2026-04", "source_url": "https://www.cisco.com/c/dam/en_us/about/supply-chain/cisco-supplier-list.pdf"},
     ]},
-    {"ticker": "2382", "company": "Quanta", "native_name": "廣達", "exchange": "TWSE", "customers": [
-        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
-        {"name": "Extreme Networks", "relationship": "Customer: uses the company to manufacture its products"},
+    {"ticker": "2382", "company": "Quanta", "native_name": "廣達", "exchange": "TWSE", "segment": "Server ODM / EMS", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list", "status": "verified", "source_type": "supplier_list", "source": "Apple Supplier List (FY2023, published 2024-04)", "source_date": "2024-04", "source_url": "https://s203.q4cdn.com/367071867/files/doc_downloads/2024/04/Apple-Supplier-List.pdf"},
+        {"name": "Extreme Networks", "relationship": "Customer: uses the company as an ODM to manufacture its products", "status": "verified", "source_type": "sec_filing", "source": "Extreme Networks 10-K FY2025", "source_date": "2025-08", "source_url": "https://www.sec.gov/Archives/edgar/data/1078271/000095017025109742/extr-20250630.htm"},
     ]},
-    {"ticker": "3231", "company": "Wistron", "native_name": "緯創", "exchange": "TWSE", "customers": [
-        {"name": "NVIDIA", "relationship": "Customer: uses the company as a contract manufacturer to assemble, test and package its final products"},
-        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
+    {"ticker": "3231", "company": "Wistron", "native_name": "緯創", "exchange": "TWSE", "segment": "Server ODM / EMS", "customers": [
+        {"name": "NVIDIA", "relationship": "Customer: uses the company as a contract manufacturer to assemble, test and package its final products", "status": "verified", "source_type": "sec_filing", "source": "NVIDIA 10-K FY2026", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm"},
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list", "status": "verified", "source_type": "supplier_list", "source": "Apple Supplier List (FY2023, published 2024-04)", "source_date": "2024-04", "source_url": "https://s203.q4cdn.com/367071867/files/doc_downloads/2024/04/Apple-Supplier-List.pdf"},
+        {"name": "Damon", "relationship": "Customer: buys components for its electric motorcycles", "status": "verified", "source_type": "sec_filing", "source": "Damon Inc. SEC filing, Ex. 99.6", "source_date": "2024-11-18", "source_url": "https://www.sec.gov/Archives/edgar/data/2000640/000121390024099365/ea022140801ex99-6_damon.htm"},
+        {"name": "Dell", "relationship": "Customer: lists the company as a direct supplier on its public supplier list", "status": "verified", "source_type": "supplier_list", "source": "Dell Public Supplier List (published 2025-12)", "source_date": "2025-12", "source_url": "https://www.delltechnologies.com/asset/en-rs/solutions/business-solutions/briefs-summaries/dell-public-supplier-list.pdf"},
+        {"name": "Cisco", "relationship": "Customer: lists the company on its supplier list (top ~80% of spend)", "status": "verified", "source_type": "supplier_list", "source": "Cisco Supplier List FY2025", "source_date": "2026-04", "source_url": "https://www.cisco.com/c/dam/en_us/about/supply-chain/cisco-supplier-list.pdf"},
     ]},
-    {"ticker": "6669", "company": "Wiwynn", "native_name": "緯穎", "exchange": "TWSE", "customers": [
-        {"name": "Microsoft", "relationship": "Customer: buys cloud server components and system integration from the company (Microsoft supplier award release, 2019-05)"},
+    {"ticker": "6669", "company": "Wiwynn", "native_name": "緯穎", "exchange": "TWSE", "segment": "Server ODM / EMS", "customers": [
+        {"name": "Microsoft", "relationship": "Customer: named the company a 2019 Supplier of the Year co-winner (cloud servers)", "status": "verified", "source_type": "press_release", "source": "Microsoft News Center", "source_date": "2019-05-22", "source_url": "https://news.microsoft.com/source/?p=19037"},
     ]},
-    {"ticker": "2356", "company": "Inventec", "native_name": "英業達", "exchange": "TWSE", "customers": [
-        {"name": "HP", "relationship": "Customer: buys HP-brand notebooks built by the company (sales contract since 1998)"},
-        {"name": "Hewlett Packard Enterprise", "relationship": "Customer: buys HP-brand servers built by the company (sales contract since 2000)"},
-        {"name": "Inseego", "relationship": "Customer: uses the company's subsidiary Inventec Appliances as a primary contract manufacturer"},
-        {"name": "Damon", "relationship": "Customer: buys components for its electric motorcycles"},
+    {"ticker": "2356", "company": "Inventec", "native_name": "英業達", "exchange": "TWSE", "segment": "Server ODM / EMS", "customers": [
+        {"name": "HP", "relationship": "Customer: ranked the company first in HP's 2018 Best Supplier Evaluation", "status": "verified", "source_type": "annual_report", "source": "Inventec 2021 Annual Report", "source_date": "2022-05-16", "source_url": "https://esg.inventec.com/uploads/files/shares/annualreport/2021AnnualReport.pdf"},
+        {"name": "Hewlett Packard Enterprise", "relationship": "Customer: gave the company its 2023 HPE Services Supplier Award", "status": "verified", "source_type": "press_release", "source": "HPE 2023 Supplier Award winners (newsroom)", "source_date": "2023-08", "source_url": "https://www.hpe.com/us/en/newsroom/blog-post/2023/08/hpe-celebrates-2023-supplier-award-winners.html"},
+        {"name": "Inseego", "relationship": "Customer: uses the company's subsidiary Inventec Appliances as a primary contract manufacturer", "status": "verified", "source_type": "sec_filing", "source": "Inseego 10-K FY2024", "source_date": "2025-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1022652/000102265225000005/insg-20241231.htm"},
+        {"name": "Damon", "relationship": "Customer: buys components for its electric motorcycles", "status": "verified", "source_type": "sec_filing", "source": "Damon Inc. SEC filing, Ex. 99.6", "source_date": "2024-11-18", "source_url": "https://www.sec.gov/Archives/edgar/data/2000640/000121390024099365/ea022140801ex99-6_damon.htm"},
+        {"name": "Dell", "relationship": "Customer: lists the company as a direct supplier on its public supplier list", "status": "verified", "source_type": "supplier_list", "source": "Dell Public Supplier List (published 2025-12)", "source_date": "2025-12", "source_url": "https://www.delltechnologies.com/asset/en-rs/solutions/business-solutions/briefs-summaries/dell-public-supplier-list.pdf"},
     ]},
-    {"ticker": "3017", "company": "Asia Vital Components", "native_name": "奇鋐", "exchange": "TWSE", "customers": []},
-    {"ticker": "3324", "company": "Auras Technology", "native_name": "雙鴻", "exchange": "TPEx", "customers": []},
-    {"ticker": "2308", "company": "Delta Electronics", "native_name": "台達電", "exchange": "TWSE", "customers": [
-        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
-        {"name": "EVgo", "relationship": "Customer: buys EV chargers under a supply agreement"},
-        {"name": "NETGEAR", "relationship": "Customer: uses the company as a primary manufacturer of its products"},
-        {"name": "Hushan Industrial Co., Ltd. (虎山實業股份有限公司)", "relationship": "Customer: contracted the company to install 989.48 kWp of solar at its Ruifang plant"},
+    {"ticker": "3017", "company": "Asia Vital Components", "native_name": "奇鋐", "exchange": "TWSE", "segment": "Thermal", "customers": [
+        {"name": "NVIDIA", "relationship": "Customer: the company's management called NVIDIA an important customer on its August 2026 earnings call", "status": "verified", "source_type": "earnings_call", "source": "AVC Q2 2026 earnings call transcript (Investing.com)", "source_date": "2026-08-12", "source_url": "https://www.investing.com/news/transcripts/earnings-call-transcript-asia-vital-q2-2026-profit-surge-lifts-shares-54-93CH-4855587"},
+        {"name": "Google", "relationship": "Reported: TPU liquid-cooling supplier, volume shipments from Q4 2026 (analysts)", "status": "unverified", "source_type": "news", "source": "Economic Daily News", "source_date": "2026-10-01", "source_url": "https://money.udn.com/money/story/5607/9788094"},
+        {"name": "AWS", "relationship": "Reported: Trainium 3 double-sided cold plates (analysts)", "status": "unverified", "source_type": "news", "source": "Economic Daily News", "source_date": "2026-10-01", "source_url": "https://money.udn.com/money/story/5607/9788094"},
+        {"name": "AMD", "relationship": "Reported: MI-series cold plates (analysts)", "status": "unverified", "source_type": "news", "source": "Economic Daily News", "source_date": "2026-10-01", "source_url": "https://money.udn.com/money/story/5607/9788094"},
     ]},
-    {"ticker": "3665", "company": "BizLink", "native_name": "貿聯-KY", "exchange": "TWSE", "customers": [
-        {"name": "Credo", "relationship": "Customer: has its active electrical cables (AEC) manufactured by the company"},
-        {"name": "Siemens Healthineers", "relationship": "Customer: buys wiring harnesses, assemblies and cables (for over 30 years)"},
-        {"name": "Lam Research", "relationship": "Customer: gave the company its 2026 Supplier Excellence Award"},
+    {"ticker": "3324", "company": "Auras Technology", "native_name": "雙鴻", "exchange": "TPEx", "segment": "Thermal", "customers": [
+        {"name": "Dell", "relationship": "Customer: lists the company as a direct parts supplier on its public supplier list", "status": "verified", "source_type": "supplier_list", "source": "Dell Public Supplier List (published 2025-12)", "source_date": "2025-12", "source_url": "https://www.delltechnologies.com/asset/en-rs/solutions/business-solutions/briefs-summaries/dell-public-supplier-list.pdf"},
+        {"name": "ASUS", "relationship": "Customer: uses the company's precision liquid-cooling components in its AI/HPC solutions", "status": "verified", "source_type": "press_release", "source": "ASUS press release", "source_date": "2026-02-23", "source_url": "https://press.asus.com/news/press-releases/asus-liquid-cooling-solutions-ai-hpc/"},
+        {"name": "NVIDIA", "relationship": "Customer: the company says its Vera Rubin cold plates are on NVIDIA's recommended vendor list", "status": "partial", "source_type": "news", "source": "uAnalyze", "source_date": "2026-09-04", "source_url": "https://uanalyze.com.tw/articles/4231954648"},
+        {"name": "Supermicro", "relationship": "Reported: heat-dissipation parts customer", "status": "unverified", "source_type": "news", "source": "Economic Daily News", "source_date": "2026-07-23", "source_url": "https://udn.com/news/story/7240/9645023"},
+        {"name": "Meta", "relationship": "Reported: GB300 cold-plate and manifold customer (broker report)", "status": "unverified", "source_type": "news", "source": "KGI research report", "source_date": "2026-03-30", "source_url": "https://www.kgi.com.hk/en/-/media/files/kgishk/research-reports/tw-reports/auras-technology_3324-tt_20260330e.pdf"},
+        {"name": "AWS", "relationship": "Reported: GB300 cold-plate and manifold customer (broker report)", "status": "unverified", "source_type": "news", "source": "KGI research report", "source_date": "2026-03-30", "source_url": "https://www.kgi.com.hk/en/-/media/files/kgishk/research-reports/tw-reports/auras-technology_3324-tt_20260330e.pdf"},
+        {"name": "Oracle", "relationship": "Reported: manifold buyer (broker report)", "status": "unverified", "source_type": "news", "source": "KGI research report", "source_date": "2026-03-30", "source_url": "https://www.kgi.com.hk/en/-/media/files/kgishk/research-reports/tw-reports/auras-technology_3324-tt_20260330e.pdf"},
     ]},
-    {"ticker": "3533", "company": "Lotes", "native_name": "嘉澤", "exchange": "TWSE", "customers": []},
-    {"ticker": "2059", "company": "King Slide", "native_name": "川湖", "exchange": "TWSE", "customers": []},
-    {"ticker": "8210", "company": "Chenbro", "native_name": "勤誠", "exchange": "TWSE", "customers": []},
-    {"ticker": "2368", "company": "Gold Circuit Electronics", "native_name": "金像電", "exchange": "TWSE", "customers": []},
-    {"ticker": "2383", "company": "Elite Material", "native_name": "台光電", "exchange": "TWSE", "customers": [
-        {"name": "Insulectro", "relationship": "Customer (distributor): buys and resells the company's copper clad laminates"},
+    {"ticker": "2308", "company": "Delta Electronics", "native_name": "台達電", "exchange": "TWSE", "segment": "Power & components", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list", "status": "verified", "source_type": "supplier_list", "source": "Apple Supplier List (FY2023, published 2024-04)", "source_date": "2024-04", "source_url": "https://s203.q4cdn.com/367071867/files/doc_downloads/2024/04/Apple-Supplier-List.pdf"},
+        {"name": "EVgo", "relationship": "Customer: buys 1,000 fast EV chargers (up to 350kW) under a supply agreement", "status": "verified", "source_type": "press_release", "source": "EVgo press release", "source_date": "2022-08-11", "source_url": "https://www.evgo.com/press-release/evgo-and-delta-electronics-announce-strategic-collaboration-to-advance-nationwide-access-to-ev-charging/"},
+        {"name": "NETGEAR", "relationship": "Customer: uses the company as a primary manufacturer of its products", "status": "verified", "source_type": "sec_filing", "source": "NETGEAR 10-K FY2023", "source_date": "2024-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1122904/000095017024016525/ntgr-20231231.htm"},
+        {"name": "Hewlett Packard Enterprise", "relationship": "Customer: gave the company (power supplies) its 2023 Design Partner Award", "status": "verified", "source_type": "press_release", "source": "HPE 2023 Supplier Award winners (newsroom)", "source_date": "2023-08", "source_url": "https://www.hpe.com/us/en/newsroom/blog-post/2023/08/hpe-celebrates-2023-supplier-award-winners.html"},
+        {"name": "Dell", "relationship": "Customer: lists the company as a direct supplier on its public supplier list", "status": "verified", "source_type": "supplier_list", "source": "Dell Public Supplier List (published 2025-12)", "source_date": "2025-12", "source_url": "https://www.delltechnologies.com/asset/en-rs/solutions/business-solutions/briefs-summaries/dell-public-supplier-list.pdf"},
+        {"name": "Cisco", "relationship": "Customer: lists the company on its supplier list (top ~80% of spend)", "status": "verified", "source_type": "supplier_list", "source": "Cisco Supplier List FY2025", "source_date": "2026-04", "source_url": "https://www.cisco.com/c/dam/en_us/about/supply-chain/cisco-supplier-list.pdf"},
+        {"name": "Hushan Industrial Co., Ltd. (虎山實業)", "relationship": "Customer: contracted the company to build a 989.48 kWp solar installation at its new Ruifang plant (contract effective September 2025)", "status": "verified", "source_type": "annual_report", "source": "Delta Electronics 2025 Annual Report, important contracts (p.111)", "source_date": "2026-05-28", "source_url": "https://doc.twse.com.tw/server-java/t57sb01?step=9&kind=F&co_id=2308&filename=2025_2308_20260528F04.pdf"},
     ]},
-    {"ticker": "3037", "company": "Unimicron", "native_name": "欣興", "exchange": "TWSE", "customers": [
-        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
+    {"ticker": "3665", "company": "BizLink", "native_name": "貿聯-KY", "exchange": "TWSE", "segment": "Power & components", "customers": [
+        {"name": "Credo", "relationship": "Customer: has its active electrical cables (AEC) manufactured by the company under a supply agreement", "status": "verified", "source_type": "sec_filing", "source": "Credo 10-K FY2025", "source_date": "2025-06", "source_url": "https://www.sec.gov/Archives/edgar/data/1807794/000162828025033813/crdo-20250503.htm"},
+        {"name": "Siemens Healthineers", "relationship": "Customer: gave the company a supplier award (logistics) in 2025", "status": "verified", "source_type": "press_release", "source": "BizLink news", "source_date": "2025-05", "source_url": "https://healthcare.bizlinktech.com/news/article/bizlink-receives-siemens-healthineers-supplier-award-2025/"},
+        {"name": "Lam Research", "relationship": "Customer: gave the company its 2026 Supplier Excellence Award", "status": "verified", "source_type": "press_release", "source": "BizLink news", "source_date": "2026-08-21", "source_url": "https://www.bizlinktech.com/news/lam-research-2026-supplier-excellence-award"},
+        {"name": "Dell", "relationship": "Customer: lists the company as a direct supplier on its public supplier list", "status": "verified", "source_type": "supplier_list", "source": "Dell Public Supplier List (published 2025-12)", "source_date": "2025-12", "source_url": "https://www.delltechnologies.com/asset/en-rs/solutions/business-solutions/briefs-summaries/dell-public-supplier-list.pdf"},
     ]},
-    {"ticker": "3711", "company": "ASE Technology", "native_name": "日月光投控", "exchange": "TWSE", "customers": [
-        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list (fiscal 2023, published 2024-04)"},
-        {"name": "AMD", "relationship": "Customer: buys assembly, test, mark and packaging from the company's subsidiary SPIL"},
-        {"name": "Qualcomm", "relationship": "Customer: uses the company as a primary assembly and test supplier"},
-        {"name": "Broadcom", "relationship": "Customer: outsources assembly and test to the company"},
-        {"name": "Cirrus Logic", "relationship": "Customer: uses the company as a primary assembly and test house"},
-        {"name": "Lattice Semiconductor", "relationship": "Customer: uses the company as its primary assembly and test supplier"},
-        {"name": "Astera Labs", "relationship": "Customer: has its ICs assembled, packaged and tested by the company"},
-        {"name": "Credo", "relationship": "Customer: has its ICs packaged by the company"},
-        {"name": "SiTime", "relationship": "Customer: buys packaging, assembly and testing from the company"},
-        {"name": "Ambarella", "relationship": "Customer: has chips it buys as tested die assembled by the company"},
-        {"name": "MaxLinear", "relationship": "Customer: buys assembly, packaging and test from the company"},
-        {"name": "Silicon Motion", "relationship": "Customer: uses the company as a primary assembly and test subcontractor"},
-        {"name": "Sequans", "relationship": "Customer: buys chipset assembly and testing from the company"},
-        {"name": "Himax", "relationship": "Customer: buys assembly and testing from the company"},
-        {"name": "Valens Semiconductor", "relationship": "Customer: buys assembly and test from the company"},
-        {"name": "GCT Semiconductor", "relationship": "Customer: buys assembly and testing from the company"},
-        {"name": "GSI Technology", "relationship": "Customer: has most of its wafers packaged by the company"},
-        {"name": "Ambiq Micro", "relationship": "Customer: buys packaging and testing from the company"},
-        {"name": "Techpoint", "relationship": "Customer: buys packaging and testing from the company"},
+    {"ticker": "3533", "company": "Lotes", "native_name": "嘉澤", "exchange": "TWSE", "segment": "Connectors", "customers": [
+        {"name": "Samsung Electronics", "relationship": "Customer: certified the company as one of its Excellent Suppliers in March 2020", "status": "verified", "source_type": "company_website", "source": "Lotes 'About Us' milestones", "source_date": "2020-03", "source_url": "https://www.lotes.cc/en/about.php"},
+        {"name": "Wistron", "relationship": "Customer: receives the company's computer connectors in the US (customs records, latest 2026-10)", "status": "partial", "source_type": "customs_record", "source": "US customs records (ImportGenius)", "source_date": "2025-2026", "source_url": "https://www.importgenius.com/suppliers/lotes-co-ltd"},
+        {"name": "Quanta", "relationship": "Customer: receives the company's shipments into the US (customs records, latest 2025-01)", "status": "partial", "source_type": "customs_record", "source": "US customs records (ImportGenius)", "source_date": "2025-01", "source_url": "https://www.importgenius.com/suppliers/lotes-co-ltd"},
+        {"name": "ZT Systems", "relationship": "Customer: receives the company's server CPU carriers in the US (customs records, latest 2025-07)", "status": "partial", "source_type": "customs_record", "source": "US customs records (ImportGenius)", "source_date": "2025-07", "source_url": "https://www.importgenius.com/suppliers/lotes-co-ltd"},
+        {"name": "Flex", "relationship": "Customer: received the company's shipments into the US (customs records, latest 2022-07)", "status": "partial", "source_type": "customs_record", "source": "US customs records (ImportGenius)", "source_date": "2022-07", "source_url": "https://www.importgenius.com/suppliers/lotes-co-ltd"},
+        {"name": "NVIDIA", "relationship": "Reported: management cited GB200/GB300 and NVIDIA quick-connect products, without naming NVIDIA as a customer", "status": "partial", "source_type": "news", "source": "Commercial Times (CTEE)", "source_date": "2025-06-13", "source_url": "https://www.ctee.com.tw/news/20250613701339-430502"},
     ]},
-    {"ticker": "2449", "company": "King Yuan Electronics", "native_name": "京元電子", "exchange": "TWSE", "customers": [
-        {"name": "NVIDIA", "relationship": "Customer: prepaid for US test capacity the company reserves for it (MOPS filing 2026-10-13)"},
-        {"name": "AMD", "relationship": "Customer: buys assembly, test, mark and packaging from the company"},
-        {"name": "Credo", "relationship": "Customer: has its ICs tested by the company"},
-        {"name": "Lattice Semiconductor", "relationship": "Customer: uses the company as a second source for wafer sort testing"},
-        {"name": "Ambarella", "relationship": "Customer: has final testing of its products done by the company"},
-        {"name": "Himax", "relationship": "Customer: buys assembly and testing from the company"},
-        {"name": "Silicon Motion", "relationship": "Customer: uses the company as a primary assembly and test subcontractor"},
-        {"name": "Ambiq Micro", "relationship": "Customer: buys packaging and testing from the company"},
+    {"ticker": "2059", "company": "King Slide", "native_name": "川湖", "exchange": "TWSE", "segment": "Server rails", "customers": [
+        {"name": "Dell", "relationship": "Customer: King Slide named it a long-term customer in 2009", "status": "verified", "source_type": "company_website", "source": "King Slide company news (2009-07-28)", "source_date": "2009-07-28", "source_url": "https://www.kingslide.com/blog/post/news/identifier/company-news-006-cn/"},
+        {"name": "IBM", "relationship": "Customer: King Slide named it a long-term customer in 2009", "status": "verified", "source_type": "company_website", "source": "King Slide company news (2009-07-28)", "source_date": "2009-07-28", "source_url": "https://www.kingslide.com/blog/post/news/identifier/company-news-006-cn/"},
+        {"name": "HP", "relationship": "Customer: King Slide named it a long-term customer in 2009, before HP split into HP Inc. and HPE", "status": "verified", "source_type": "company_website", "source": "King Slide company news (2009-07-28)", "source_date": "2009-07-28", "source_url": "https://www.kingslide.com/blog/post/news/identifier/company-news-006-cn/"},
+        {"name": "NEC", "relationship": "Customer: King Slide named it a long-term customer in 2009", "status": "verified", "source_type": "company_website", "source": "King Slide company news (2009-07-28)", "source_date": "2009-07-28", "source_url": "https://www.kingslide.com/blog/post/news/identifier/company-news-006-cn/"},
+        {"name": "Oracle", "relationship": "Customer: King Slide named Sun Microsystems (now part of Oracle) a long-term customer in 2009", "status": "verified", "source_type": "company_website", "source": "King Slide company news (2009-07-28)", "source_date": "2009-07-28", "source_url": "https://www.kingslide.com/blog/post/news/identifier/company-news-006-cn/"},
+        {"name": "NVIDIA", "relationship": "Customer: the company says NVIDIA's rack architecture uses its rails", "status": "partial", "source_type": "news", "source": "Economic Daily News", "source_date": "2026-06-22", "source_url": "https://money.udn.com/money/amp/story/5607/9580552"},
+        {"name": "Supermicro", "relationship": "Reported: rail supplier to Supermicro", "status": "unverified", "source_type": "news", "source": "Economic Daily News", "source_date": "2026-10-22", "source_url": "https://money.udn.com/money/story/5612/9829685"},
     ]},
-    {"ticker": "3661", "company": "Alchip", "native_name": "世芯-KY", "exchange": "TWSE", "customers": []},
-    {"ticker": "5274", "company": "Aspeed Technology", "native_name": "信驊", "exchange": "TPEx", "customers": []},
+    {"ticker": "8210", "company": "Chenbro", "native_name": "勤誠", "exchange": "TWSE", "segment": "Server chassis", "customers": [
+        {"name": "NVIDIA", "relationship": "Partner: NVIDIA MGX collaborator building Vera Rubin server chassis (ecosystem partner, not a confirmed buyer)", "status": "partial", "source_type": "press_release", "source": "Chenbro release via DIGITIMES", "source_date": "2026-06-02", "source_url": "https://www.digitimes.com/news/a20260602PR203.html?chid=9"},
+        {"name": "Amazon", "relationship": "Reported: speculated to be the largest cloud client", "status": "unverified", "source_type": "news", "source": "CommonWealth Magazine", "source_date": "2024-05-21", "source_url": "https://english.cw.com.tw/article/article.action?id=3694"},
+    ]},
+    {"ticker": "2368", "company": "Gold Circuit Electronics", "native_name": "金像電", "exchange": "TWSE", "segment": "PCB & materials", "customers": [
+        {"name": "Amazon", "relationship": "Customer and investor: bought NT$1.59B of new shares (~0.35%) in a private placement the company tied to their business relationship", "status": "verified", "source_type": "company_filing", "source": "Gold Circuit TWSE announcement, quoted by TechNews", "source_date": "2026-09-29", "source_url": "https://finance.technews.tw/2026/09/29/golden-image-private-equity-funds-invest-nt1-589-billion-in-amazon/"},
+        {"name": "Dell", "relationship": "Customer: lists the company as a direct supplier on its public supplier list", "status": "verified", "source_type": "supplier_list", "source": "Dell Public Supplier List (published 2025-12)", "source_date": "2025-12", "source_url": "https://www.delltechnologies.com/asset/en-rs/solutions/business-solutions/briefs-summaries/dell-public-supplier-list.pdf"},
+        {"name": "Wistron", "relationship": "Customer: receives the company's shipments into the US (customs records through 2026-08)", "status": "partial", "source_type": "customs_record", "source": "US customs records (ImportGenius)", "source_date": "2026-08", "source_url": "https://www.importgenius.com/suppliers/gold-circuit-electronics-ltd"},
+        {"name": "Hon Hai / Foxconn", "relationship": "Customer: its unit FII USA receives the company's shipments into the US (customs records, latest 2025-08)", "status": "partial", "source_type": "customs_record", "source": "US customs records (Panjiva)", "source_date": "2025-08", "source_url": "https://panjiva.com/Gold-Circuit-Electronics-Ltd/1106183"},
+        {"name": "Microsoft", "relationship": "Reported: AI server PCB customer (trade press only)", "status": "unverified", "source_type": "news", "source": "Cloudnews", "source_date": "2026-09-30", "source_url": "https://cloudnews.tech/amazon-takes-a-stake-in-gold-circuit-taiwans-ai-server-board-maker/"},
+        {"name": "Google", "relationship": "Reported: AI server PCB customer (trade press only)", "status": "unverified", "source_type": "news", "source": "Cloudnews", "source_date": "2026-09-30", "source_url": "https://cloudnews.tech/amazon-takes-a-stake-in-gold-circuit-taiwans-ai-server-board-maker/"},
+    ]},
+    {"ticker": "2383", "company": "Elite Material", "native_name": "台光電", "exchange": "TWSE", "segment": "PCB & materials", "customers": [
+        {"name": "Insulectro", "relationship": "Customer (distributor): buys and resells the company's copper clad laminates in North America", "status": "verified", "source_type": "press_release", "source": "Insulectro press release", "source_date": "2023-06-27", "source_url": "https://insulectro.com/insulectro-announces-new-partnership-with-laminate-suppliers-arlon-electronic-materials-emc/"},
+    ]},
+    {"ticker": "3037", "company": "Unimicron", "native_name": "欣興", "exchange": "TWSE", "segment": "PCB & materials", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list", "status": "verified", "source_type": "supplier_list", "source": "Apple Supplier List (FY2023, published 2024-04)", "source_date": "2024-04", "source_url": "https://s203.q4cdn.com/367071867/files/doc_downloads/2024/04/Apple-Supplier-List.pdf"},
+    ]},
+    {"ticker": "3711", "company": "ASE Technology", "native_name": "日月光投控", "exchange": "TWSE", "segment": "Packaging & test", "customers": [
+        {"name": "Apple", "relationship": "Customer: lists the company on its official supplier list", "status": "verified", "source_type": "supplier_list", "source": "Apple Supplier List (FY2023, published 2024-04)", "source_date": "2024-04", "source_url": "https://s203.q4cdn.com/367071867/files/doc_downloads/2024/04/Apple-Supplier-List.pdf"},
+        {"name": "AMD", "relationship": "Customer: buys assembly, test, mark and packaging from the company's subsidiary SPIL", "status": "verified", "source_type": "sec_filing", "source": "AMD 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm"},
+        {"name": "Qualcomm", "relationship": "Customer: uses the company (ASE and SPIL) as a primary assembly and test supplier", "status": "verified", "source_type": "sec_filing", "source": "Qualcomm 10-K FY2025", "source_date": "2025-11", "source_url": "https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm"},
+        {"name": "Broadcom", "relationship": "Customer: outsources assembly and test to the company (ASE and SPIL)", "status": "verified", "source_type": "sec_filing", "source": "Broadcom 10-K FY2025", "source_date": "2025-12", "source_url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm"},
+        {"name": "Cirrus Logic", "relationship": "Customer: uses the company as a primary assembly and test house", "status": "verified", "source_type": "sec_filing", "source": "Cirrus Logic 10-K FY2026", "source_date": "2026-05", "source_url": "https://www.sec.gov/Archives/edgar/data/0000772406/000077240626000018/crus-20260328.htm"},
+        {"name": "Lattice Semiconductor", "relationship": "Customer: uses the company as its primary assembly supplier", "status": "verified", "source_type": "sec_filing", "source": "Lattice 10-K FY2025 (filed 2026-02-13)", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/855658/000143774926004100/lscc20260103_10k.htm"},
+        {"name": "Astera Labs", "relationship": "Customer: has its ICs assembled, packaged and tested by the company", "status": "verified", "source_type": "sec_filing", "source": "Astera Labs 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1736297/000173629726000010/alab-20251231.htm"},
+        {"name": "Credo", "relationship": "Customer: has its ICs packaged by the company", "status": "verified", "source_type": "sec_filing", "source": "Credo 10-K FY2026", "source_date": "2026-06", "source_url": "https://www.sec.gov/Archives/edgar/data/1807794/000162828026043303/crdo-20260502.htm"},
+        {"name": "SiTime", "relationship": "Customer: buys packaging, assembly and testing from the company", "status": "verified", "source_type": "sec_filing", "source": "SiTime 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1451809/000145180926000012/sitm-20251231.htm"},
+        {"name": "Ambarella", "relationship": "Customer: has chips it buys as tested die assembled by the company", "status": "verified", "source_type": "sec_filing", "source": "Ambarella 10-K FY2026 (filed 2026-03-23)", "source_date": "2026-03", "source_url": "https://www.sec.gov/Archives/edgar/data/1280263/000119312526119321/amba-20260131.htm"},
+        {"name": "MaxLinear", "relationship": "Customer: buys assembly, packaging and test from the company (ASE and SPIL)", "status": "verified", "source_type": "sec_filing", "source": "MaxLinear 10-K FY2025", "source_date": "2026-01", "source_url": "https://www.sec.gov/Archives/edgar/data/1288469/000128846926000011/mxl-20251231.htm"},
+        {"name": "Sequans", "relationship": "Customer: uses the company (ASE ChungLi, ASE Kaohsiung, SPIL) as an OSAT supplier", "status": "verified", "source_type": "sec_filing", "source": "Sequans 20-F FY2025", "source_date": "2026-05", "source_url": "https://www.sec.gov/Archives/edgar/data/0001383395/000138339526000082/sqns-20251231.htm"},
+        {"name": "GCT Semiconductor", "relationship": "Customer: buys assembly and testing from the company", "status": "verified", "source_type": "sec_filing", "source": "GCT Semiconductor 10-K FY2025", "source_date": "2026-03", "source_url": "https://www.sec.gov/Archives/edgar/data/1851961/000119312526124183/gcts-20251231.htm"},
+        {"name": "GSI Technology", "relationship": "Customer: has most of its products packaged by the company in Taiwan", "status": "verified", "source_type": "sec_filing", "source": "GSI Technology 10-K FY2026", "source_date": "2026-06", "source_url": "https://www.sec.gov/Archives/edgar/data/0001126741/000110465926070962/gsit-20260331x10k.htm"},
+        {"name": "Ambiq Micro", "relationship": "Customer: buys packaging and testing from the company", "status": "verified", "source_type": "sec_filing", "source": "Ambiq Micro 10-K FY2025", "source_date": "2026-03", "source_url": "https://www.sec.gov/Archives/edgar/data/1500412/000119312526094004/ambq-20251231.htm"},
+        {"name": "Techpoint", "relationship": "Customer: buys assembly, packaging and testing from the company", "status": "verified", "source_type": "sec_filing", "source": "Techpoint 10-Q Q1 2025", "source_date": "2025-05", "source_url": "https://www.sec.gov/Archives/edgar/data/1556898/000095017025072366/ck0001556898-20250331.htm"},
+        {"name": "Cisco", "relationship": "Customer: lists the company on its supplier list (top ~80% of spend)", "status": "verified", "source_type": "supplier_list", "source": "Cisco Supplier List FY2025", "source_date": "2026-04", "source_url": "https://www.cisco.com/c/dam/en_us/about/supply-chain/cisco-supplier-list.pdf"},
+        {"name": "Silicon Motion", "relationship": "Customer: uses the company (ASE and SPIL) as a primary assembly and test subcontractor", "status": "verified", "source_type": "sec_filing", "source": "Silicon Motion 20-F FY2025", "source_date": "2026-04", "source_url": "https://www.sec.gov/Archives/edgar/data/0001329394/000119312526197184/d17718d20f.htm"},
+        {"name": "Himax", "relationship": "Customer: lists the company among its assembly and testing service providers", "status": "verified", "source_type": "sec_filing", "source": "Himax 20-F FY2025", "source_date": "2026-03", "source_url": "https://www.sec.gov/Archives/edgar/data/1342338/000110465926035507/himx-20251231x20f.htm"},
+        {"name": "Valens Semiconductor", "relationship": "Customer: uses the company as a third-party assembly and test contract manufacturer", "status": "verified", "source_type": "sec_filing", "source": "Valens 20-F FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/1863006/000121390026020108/ea0276757-20f_valens.htm"},
+    ]},
+    {"ticker": "2449", "company": "King Yuan Electronics", "native_name": "京元電子", "exchange": "TWSE", "segment": "Packaging & test", "customers": [
+        {"name": "NVIDIA", "relationship": "Customer: prepays the company to build US test capacity at its subsidiary AeternZ (announced 2026-10-13)", "status": "verified", "source_type": "company_filing", "source": "KYEC material announcement, via Taiwan News", "source_date": "2026-10-14", "source_url": "https://www.taiwannews.com.tw/news/6457710"},
+        {"name": "AMD", "relationship": "Customer: buys assembly, test, mark and packaging from the company", "status": "verified", "source_type": "sec_filing", "source": "AMD 10-K FY2025", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm"},
+        {"name": "Credo", "relationship": "Customer: has its ICs tested by the company", "status": "verified", "source_type": "sec_filing", "source": "Credo 10-K FY2026", "source_date": "2026-06", "source_url": "https://www.sec.gov/Archives/edgar/data/1807794/000162828026043303/crdo-20260502.htm"},
+        {"name": "Lattice Semiconductor", "relationship": "Customer: uses the company as a second source for wafer sort testing", "status": "verified", "source_type": "sec_filing", "source": "Lattice 10-K FY2025 (filed 2026-02-13)", "source_date": "2026-02", "source_url": "https://www.sec.gov/Archives/edgar/data/855658/000143774926004100/lscc20260103_10k.htm"},
+        {"name": "Ambarella", "relationship": "Customer: has final testing of its products done by the company", "status": "verified", "source_type": "sec_filing", "source": "Ambarella 10-K FY2026 (filed 2026-03-23)", "source_date": "2026-03", "source_url": "https://www.sec.gov/Archives/edgar/data/1280263/000119312526119321/amba-20260131.htm"},
+        {"name": "Ambiq Micro", "relationship": "Customer: buys packaging and testing from the company", "status": "verified", "source_type": "sec_filing", "source": "Ambiq Micro 10-K FY2025", "source_date": "2026-03", "source_url": "https://www.sec.gov/Archives/edgar/data/1500412/000119312526094004/ambq-20251231.htm"},
+        {"name": "Himax", "relationship": "Customer: uses the company as an assembly, testing and chip probe testing house", "status": "verified", "source_type": "sec_filing", "source": "Himax 20-F FY2025", "source_date": "2026-03", "source_url": "https://www.sec.gov/Archives/edgar/data/1342338/000110465926035507/himx-20251231x20f.htm"},
+        {"name": "Silicon Motion", "relationship": "Customer: uses the company as a primary assembly and test subcontractor", "status": "verified", "source_type": "sec_filing", "source": "Silicon Motion 20-F FY2025", "source_date": "2026-04", "source_url": "https://www.sec.gov/Archives/edgar/data/0001329394/000119312526197184/d17718d20f.htm"},
+    ]},
+    {"ticker": "3661", "company": "Alchip", "native_name": "世芯-KY", "exchange": "TWSE", "segment": "ASIC design", "customers": [
+        {"name": "Preferred Networks", "relationship": "Customer: the company provided design support for its deep-learning supercomputer processor", "status": "verified", "source_type": "press_release", "source": "Alchip press release via HPCwire", "source_date": "2020-07-08", "source_url": "https://www.hpcwire.com/off-the-wire/alchip-provides-supercomputer-processor-design-support/"},
+        {"name": "AWS", "relationship": "Reported: design partner for Trainium 3 (press and broker notes; AWS has not named the company)", "status": "unverified", "source_type": "news", "source": "Economic Daily News", "source_date": "2026-09-11", "source_url": "https://money.udn.com/money/story/5710/9748217"},
+    ]},
+    {"ticker": "5274", "company": "Aspeed Technology", "native_name": "信驊", "exchange": "TPEx", "segment": "BMC chips", "customers": [
+        {"name": "NVIDIA", "relationship": "Customer: uses the company's AST2600 BMC in GB200 NVL systems (NVIDIA-authored Linux board files)", "status": "verified", "source_type": "code_commit", "source": "Linux kernel patch by NVIDIA engineers", "source_date": "2025-03-20", "source_url": "https://patchew.org/linux/20250320164633.101331-1-wthai@nvidia.com"},
+        {"name": "Meta", "relationship": "Customer: uses the company's AST2600/AST2620 BMCs across many server boards (e.g., Catalina, Ventura, SanMiguel)", "status": "verified", "source_type": "code_commit", "source": "Linux kernel patch (Meta SanMiguel)", "source_date": "2026-03", "source_url": "https://lkml.iu.edu/hypermail/linux/kernel/2603.2/14994.html"},
+        {"name": "Supermicro", "relationship": "Customer: uses the company's AST2600 BMC on its servers", "status": "verified", "source_type": "product_datasheet", "source": "Supermicro H14 Hyper datasheet", "source_date": "2024-10", "source_url": "https://www.supermicro.com/datasheet/h14/datasheet_H14_Hyper.pdf"},
+        {"name": "IBM", "relationship": "Customer: uses the company's AST2600 BMC (Rainier Power server)", "status": "verified", "source_type": "code_commit", "source": "Linux kernel commit (IBM Rainier)", "source_date": "2019-09-25", "source_url": "https://github.com/torvalds/linux/commit/961216c135a881b8f81d1eb39215525d4e96783e"},
+        {"name": "ByteDance", "relationship": "Customer: uses the company's AST2500 BMC (g220a server)", "status": "verified", "source_type": "code_commit", "source": "Linux kernel commit (ByteDance g220a)", "source_date": "2020-09-29", "source_url": "https://github.com/torvalds/linux/commit/b2826bdf910dccee07bede625c2005154bb6f698"},
+        {"name": "Quanta", "relationship": "Customer: uses the company's AST2600 BMC on its servers (S6Q board)", "status": "verified", "source_type": "code_commit", "source": "Linux kernel commit (Quanta S6Q)", "source_date": "2022-02-17", "source_url": "https://github.com/torvalds/linux/commit/d44ea6e3c747b760b438e6bbef288f7c41d74f4e"},
+        {"name": "Inspur", "relationship": "Customer: uses the company's AST2500 BMC (fp5280g2 server)", "status": "verified", "source_type": "code_commit", "source": "Linux kernel commit (Inspur fp5280g2)", "source_date": "2019-06-13", "source_url": "https://github.com/torvalds/linux/commit/03c511dde04074fb8519d50d8001157d4bdebc7d"},
+        {"name": "ASUS", "relationship": "Customer: uses the company's BMC (X4TF server board)", "status": "verified", "source_type": "code_commit", "source": "Linux patch (ASUS X4TF)", "source_date": "2024-03", "source_url": "https://lists.ozlabs.org/pipermail/openbmc/2024-March/035110.html"},
+        {"name": "ASRock Rack", "relationship": "Customer: uses the company's AST2500 BMC (E3C246D4I board; board file by an independent OpenBMC developer)", "status": "partial", "source_type": "code_commit", "source": "Linux patch (ASRock E3C246D4I)", "source_date": "2021-04-01", "source_url": "https://lkml.iu.edu/2103.3/10696.html"},
+        {"name": "Microsoft", "relationship": "Customer: used the company's BMC in Project Olympus servers (older platform)", "status": "partial", "source_type": "code_commit", "source": "Linux kernel commit (Microsoft Olympus)", "source_date": "2019-05-21", "source_url": "https://github.com/torvalds/linux/commit/130413736376e299e77328760209fd3307d02201"},
+    ]},
 ]
 
 
@@ -3290,6 +3362,10 @@ CHINA_PRESS_ENGLISH_CHECK_SOURCE: dict[str, Any] = {
 # ticker / exchange: the company's OWN listing on its home exchange (same
 #   meaning as Taiwan's). None = not listed; the spec marks everything about
 #   an unlisted company "indirect" (it is seen only through others).
+# kind: "company", "fund" (a sovereign fund - spec 4.3; its counterparties are
+#   holdings, which its own new deals do not move) or "site" (an Israeli site
+#   of a US company - spec 4.4; an event there moves that owner only).
+#   Read by signal-detection-agent, so no fund or site name is hard-coded there.
 # aliases: other written forms press uses, for matching (same name as
 #   research-universe's universe_companies.aliases). A company whose name is a
 #   common word is stored under its full name ("Elm Company", "Nova Ltd") so
@@ -3313,7 +3389,7 @@ def _counterparties(names: dict[str, str], relationship: str,
 
 MIDDLE_EAST_TICKER_UNIVERSE: list[dict[str, Any]] = [
     # --- 4.1 Gulf AI companies and data-centre builders --------------------
-    {"ticker": None, "company": "G42", "exchange": None, "country": "UAE",
+    {"ticker": None, "company": "G42", "kind": "company", "exchange": None, "country": "UAE",
      "aliases": ["Core42", "Khazna", "Stargate UAE"],
      "counterparties": [
          *_counterparties({"NVDA": "Nvidia", "CSCO": "Cisco", "ORCL": "Oracle"},
@@ -3325,7 +3401,7 @@ MIDDLE_EAST_TICKER_UNIVERSE: list[dict[str, Any]] = [
          *_counterparties({"CBRS": "Cerebras"},
                           "Supplier: named by the spec as affected by G42's news (spec 4.1)", "rise"),
      ]},
-    {"ticker": None, "company": "Humain", "exchange": None, "country": "Saudi Arabia",
+    {"ticker": None, "company": "Humain", "kind": "company", "exchange": None, "country": "Saudi Arabia",
      "aliases": [],
      "counterparties": [
          *_counterparties({"NVDA": "Nvidia", "AMD": "AMD", "AMZN": "Amazon", "QCOM": "Qualcomm"},
@@ -3333,60 +3409,60 @@ MIDDLE_EAST_TICKER_UNIVERSE: list[dict[str, Any]] = [
          *_counterparties({"CSCO": "Cisco"},
                           "Supplier: sells into the Gulf AI data-centre projects (spec 2.1)", "rise"),
      ]},
-    {"ticker": "PRESIGHT", "company": "Presight AI", "exchange": "ADX", "country": "UAE",
+    {"ticker": "PRESIGHT", "company": "Presight AI", "kind": "company", "exchange": "ADX", "country": "UAE",
      "aliases": ["Presight"],
      "counterparties": _counterparties(
          {"PLTR": "Palantir"},
          "Peer: a US AI software company; Presight is G42's listed AI software arm (spec 4.1)", "rise")},
     # Spec 4.1: "US satellite and connectivity companies" - no company named.
-    {"ticker": "SPACE42", "company": "Space42", "exchange": "ADX", "country": "UAE",
+    {"ticker": "SPACE42", "company": "Space42", "kind": "company", "exchange": "ADX", "country": "UAE",
      "aliases": [], "counterparties": []},
-    {"ticker": "EAND", "company": "e&", "exchange": "ADX", "country": "UAE",
+    {"ticker": "EAND", "company": "e&", "kind": "company", "exchange": "ADX", "country": "UAE",
      "aliases": ["Etisalat", "Emirates Telecommunications Group"],
      "counterparties": _counterparties(
          {"CSCO": "Cisco", "ORCL": "Oracle", "MSFT": "Microsoft"},
          "Supplier: sells into e&'s data centres and cloud services (spec 4.1)", "rise")},
-    {"ticker": "7010", "company": "stc", "exchange": "Tadawul", "country": "Saudi Arabia",
+    {"ticker": "7010", "company": "stc", "kind": "company", "exchange": "Tadawul", "country": "Saudi Arabia",
      "aliases": ["Saudi Telecom", "center3"],
      "counterparties": _counterparties(
          {"NVDA": "Nvidia", "CSCO": "Cisco", "ORCL": "Oracle", "MSFT": "Microsoft"},
          "Supplier: sells into stc's center3 data centres (spec 4.1)", "rise")},
     # Spec 4.1: "US business software and cloud companies" - no company named.
-    {"ticker": "7203", "company": "Elm Company", "exchange": "Tadawul", "country": "Saudi Arabia",
+    {"ticker": "7203", "company": "Elm Company", "kind": "company", "exchange": "Tadawul", "country": "Saudi Arabia",
      "aliases": [], "counterparties": []},
-    {"ticker": "ORDS", "company": "Ooredoo", "exchange": "QSE", "country": "Qatar",
+    {"ticker": "ORDS", "company": "Ooredoo", "kind": "company", "exchange": "QSE", "country": "Qatar",
      "aliases": [],
      "counterparties": _counterparties(
          {"NVDA": "Nvidia"},
          "Supplier: its GPUs are the computing Ooredoo rents out (spec 4.1)", "rise")},
     # --- 4.2 Gulf government investment funds -------------------------------
-    {"ticker": None, "company": "MGX", "exchange": None, "country": "UAE",
+    {"ticker": None, "company": "MGX", "kind": "fund", "exchange": None, "country": "UAE",
      "aliases": [],
      "counterparties": _counterparties(
          {"NVDA": "Nvidia", "MSFT": "Microsoft"},
          "Supplier to the AI labs and data-centre companies MGX invests in (spec 4.2)", "rise")},
-    {"ticker": None, "company": "Mubadala", "exchange": None, "country": "UAE",
+    {"ticker": None, "company": "Mubadala", "kind": "fund", "exchange": None, "country": "UAE",
      "aliases": ["Mubadala Investment Company"],
      "counterparties": _counterparties(
          {"GFS": "GlobalFoundries"},
          "Investee: Mubadala is its majority owner (spec 4.2)", "rise")},
     # Spec 4.2: "Data-centre and infrastructure funds" - no company named.
-    {"ticker": None, "company": "Abu Dhabi Investment Authority", "exchange": None, "country": "UAE",
+    {"ticker": None, "company": "Abu Dhabi Investment Authority", "kind": "fund", "exchange": None, "country": "UAE",
      "aliases": ["ADIA"], "counterparties": []},
-    {"ticker": None, "company": "ADQ", "exchange": None, "country": "UAE",
+    {"ticker": None, "company": "ADQ", "kind": "fund", "exchange": None, "country": "UAE",
      "aliases": [], "counterparties": []},
-    {"ticker": None, "company": "Public Investment Fund", "exchange": None, "country": "Saudi Arabia",
+    {"ticker": None, "company": "Public Investment Fund", "kind": "fund", "exchange": None, "country": "Saudi Arabia",
      "aliases": ["PIF"],
      "counterparties": _counterparties(
          {"NVDA": "Nvidia", "AMD": "AMD", "QCOM": "Qualcomm"},
          "Supplier to Humain, which PIF owns (spec 2.1, 4.2)", "rise")},
     # Spec 4.2: "US AI labs and infrastructure companies" - no company named.
-    {"ticker": None, "company": "Qatar Investment Authority", "exchange": None, "country": "Qatar",
+    {"ticker": None, "company": "Qatar Investment Authority", "kind": "fund", "exchange": None, "country": "Qatar",
      "aliases": ["QIA"], "counterparties": []},
     # --- 4.3 Energy, power and helium ---------------------------------------
     # QatarEnergy's good news splits: a Ras Laffan restart lifts the helium
     # buyers and lowers the helium sellers.
-    {"ticker": None, "company": "QatarEnergy", "exchange": None, "country": "Qatar",
+    {"ticker": None, "company": "QatarEnergy", "kind": "company", "exchange": None, "country": "Qatar",
      "aliases": ["Qatar Energy", "Ras Laffan"],
      "counterparties": [
          *_counterparties({"MU": "Micron", "INTC": "Intel"},
@@ -3398,28 +3474,28 @@ MIDDLE_EAST_TICKER_UNIVERSE: list[dict[str, Any]] = [
      ]},
     # Spec 4.3: "US chipmakers and data-centre operators, through energy
     # costs" - no company named.
-    {"ticker": "2222", "company": "Saudi Aramco", "exchange": "Tadawul", "country": "Saudi Arabia",
+    {"ticker": "2222", "company": "Saudi Aramco", "kind": "company", "exchange": "Tadawul", "country": "Saudi Arabia",
      "aliases": ["Aramco"], "counterparties": []},
-    {"ticker": "2082", "company": "ACWA Power", "exchange": "Tadawul", "country": "Saudi Arabia",
+    {"ticker": "2082", "company": "ACWA Power", "kind": "company", "exchange": "Tadawul", "country": "Saudi Arabia",
      "aliases": [],
      "counterparties": _counterparties(
          {"GEV": "GE Vernova", "VRT": "Vertiv", "ETN": "Eaton"},
          "Supplier: sells power equipment for ACWA's plants, including for data centres (spec 4.3)", "rise")},
-    {"ticker": "TAQA", "company": "TAQA", "exchange": "ADX", "country": "UAE",
+    {"ticker": "TAQA", "company": "TAQA", "kind": "company", "exchange": "ADX", "country": "UAE",
      "aliases": ["Abu Dhabi National Energy"],
      "counterparties": _counterparties(
          {"GEV": "GE Vernova", "VRT": "Vertiv"},
          "Supplier: sells power and cooling equipment to TAQA (spec 4.3)", "rise")},
-    {"ticker": "ADNOCGAS", "company": "ADNOC Gas", "exchange": "ADX", "country": "UAE",
+    {"ticker": "ADNOCGAS", "company": "ADNOC Gas", "kind": "company", "exchange": "ADX", "country": "UAE",
      "aliases": [],
      "counterparties": _counterparties(
          {"GEV": "GE Vernova", "VRT": "Vertiv", "ETN": "Eaton"},
          "Supplier: sells equipment for the UAE power stations ADNOC Gas supplies (spec 4.3)", "rise")},
     # Spec 4.3: "US chipmakers, through etch-gas supply" - no company named.
-    {"ticker": "ICL", "company": "ICL Group", "exchange": "NYSE", "country": "Israel",
+    {"ticker": "ICL", "company": "ICL Group", "kind": "company", "exchange": "NYSE", "country": "Israel",
      "aliases": [], "counterparties": []},
     # --- 4.4 Israel: chip design, factories and equipment -------------------
-    {"ticker": "TSEM", "company": "Tower Semiconductor", "exchange": "Nasdaq", "country": "Israel",
+    {"ticker": "TSEM", "company": "Tower Semiconductor", "kind": "company", "exchange": "Nasdaq", "country": "Israel",
      "aliases": [],
      "counterparties": [
          *_counterparties({"COHR": "Coherent", "LITE": "Lumentum"},
@@ -3427,12 +3503,12 @@ MIDDLE_EAST_TICKER_UNIVERSE: list[dict[str, Any]] = [
          *_counterparties({"GFS": "GlobalFoundries"},
                           "Competitor: also makes specialty chips (spec 4.4)", "fall"),
      ]},
-    {"ticker": "NVMI", "company": "Nova Ltd", "exchange": "Nasdaq", "country": "Israel",
+    {"ticker": "NVMI", "company": "Nova Ltd", "kind": "company", "exchange": "Nasdaq", "country": "Israel",
      "aliases": ["Nova Measuring Instruments"],
      "counterparties": _counterparties(
          {"KLAC": "KLA", "ONTO": "Onto Innovation"},
          "Peer: strong orders at Nova mean chip factories are spending (spec 4.4)", "rise")},
-    {"ticker": "CAMT", "company": "Camtek", "exchange": "Nasdaq", "country": "Israel",
+    {"ticker": "CAMT", "company": "Camtek", "kind": "company", "exchange": "Nasdaq", "country": "Israel",
      "aliases": [],
      "counterparties": [
          *_counterparties({"KLAC": "KLA", "ONTO": "Onto Innovation"},
@@ -3440,21 +3516,25 @@ MIDDLE_EAST_TICKER_UNIVERSE: list[dict[str, Any]] = [
          *_counterparties({"MU": "Micron"},
                           "AI memory (HBM) maker: Camtek's tools are used heavily for HBM (spec 4.4)", "rise"),
      ]},
-    {"ticker": "MBLY", "company": "Mobileye", "exchange": "Nasdaq", "country": "Israel",
+    {"ticker": "MBLY", "company": "Mobileye", "kind": "company", "exchange": "Nasdaq", "country": "Israel",
      "aliases": [],
      "counterparties": _counterparties(
          {"INTC": "Intel"},
          "Parent: Intel majority-owns Mobileye (spec 4.4)", "rise")},
     # Spec states the bad-news side (fall when these sites are disrupted);
     # good news is its reverse, per the spec's own convention.
-    {"ticker": None, "company": "Nvidia Israel and Intel Kiryat Gat", "exchange": None, "country": "Israel",
-     "aliases": ["Nvidia Israel", "Intel Israel", "Kiryat Gat"],
-     "counterparties": [
-         *_counterparties({"NVDA": "Nvidia"},
-                          "Owner: its networking products are designed in Israel (spec 2.4, 4.4)", "rise"),
-         *_counterparties({"INTC": "Intel"},
-                          "Owner: makes chips at its Kiryat Gat factory (spec 2.4, 4.4)", "rise"),
-     ]},
+    # Two rows, one per owner: as one combined row, every Intel Kiryat Gat
+    # event also named Nvidia (review 2026-10-23, point 22).
+    {"ticker": None, "company": "Intel Kiryat Gat", "kind": "site", "exchange": None, "country": "Israel",
+     "aliases": ["Intel Israel", "Kiryat Gat"],
+     "counterparties": _counterparties(
+         {"INTC": "Intel"},
+         "Owner: makes chips at its Kiryat Gat factory (spec 2.4, 4.4)", "rise")},
+    {"ticker": None, "company": "Nvidia Israel", "kind": "site", "exchange": None, "country": "Israel",
+     "aliases": [],
+     "counterparties": _counterparties(
+         {"NVDA": "Nvidia"},
+         "Owner: its networking products are designed in Israel (spec 2.4, 4.4)", "rise")},
 ]
 
 # Terms a WAM, SPA or BIS item must contain (title, or WAM's own lead) to
@@ -3467,16 +3547,22 @@ _ME_TOPIC_TERMS: list[str] = [
     # M1/M8 - US decisions on Gulf chip sales, enforcement
     "export control", "export controls", "export licence", "export license",
     "entity list", "Bureau of Industry and Security", "smuggling",
-    # M2/M6 - AI hardware, data centres, supplier choice
-    "AI", "artificial intelligence", "data centre", "data center",
+    # M2/M6 - AI hardware, data centres, supplier choice. Bare "AI" and
+    # "artificial intelligence" are left out: on the 2026-10-19 run they
+    # admitted 21 wire items, all noise (literacy platforms, conferences,
+    # campaigns); Gulf AI deals reach the feed through the company names,
+    # the hardware terms below, the Gulf-outlet query and Middle East AI News.
+    "data centre", "data center",
     "data centres", "data centers", "chip", "chips", "semiconductor",
     "semiconductors", "GPU", "Nvidia", "AMD", "Qualcomm", "Cisco",
     "Oracle", "Microsoft", "OpenAI", "Amazon Web Services", "AWS",
     "Huawei", "cloud", "megawatt", "gigawatt",
     # M3 - Gulf money into US AI
     "sovereign wealth", "sovereign fund",
-    # M4/M5 - war, shipping, helium and gas
-    "Hormuz", "Red Sea", "Bab el-Mandeb", "Houthi", "Houthis", "tanker",
+    # M4/M5 - war, shipping, helium and gas. "Red Sea" alone is left out:
+    # it admitted 6 wire items on that run, all tourism or boat-charter
+    # rules; Red Sea shipping news carries "Houthi", "tanker" or "shipping".
+    "Hormuz", "Bab el-Mandeb", "Houthi", "Houthis", "tanker",
     "shipping", "helium", "LNG", "force majeure",
 ]
 
@@ -3485,6 +3571,17 @@ _ME_COMPANY_NAMES: set[str] = {
 }
 
 _ME_MATCH_TERMS: list[str] = sorted(_ME_COMPANY_NAMES | set(_ME_TOPIC_TERMS))
+
+# WAM / SPA headlines that only REACT to news: on the 2026-10-19 run, 11 of
+# the 20 wire items left after the match terms were condemnation, welcome,
+# condolence or phone-call cables about the Houthi attacks - all noise. The
+# attacks themselves reach the feed through the coalition's and civil
+# defence's own statements and the energy-site and shipping queries.
+_ME_WIRE_REACTION_TERMS: list[str] = [
+    "condemn", "condemns", "condemned", "condemning", "condemnation",
+    "welcome", "welcomes", "welcomed", "condolence", "condolences",
+    "solidarity", "phone call", "denounce", "denounces", "denounced",
+]
 
 # The four Gulf funds that file with the SEC. 13F holdings are not
 # fetched: they arrive up to 45 days after quarter end, and the latest
@@ -3537,6 +3634,7 @@ MIDDLE_EAST_SOURCES: list[dict[str, Any]] = [
         "config": {
             "source_outlet_type": "state_press",
             "match_terms": _ME_MATCH_TERMS,
+            "exclude_title_terms": _ME_WIRE_REACTION_TERMS,
         },
     },
     {
@@ -3554,6 +3652,7 @@ MIDDLE_EAST_SOURCES: list[dict[str, Any]] = [
         "config": {
             "source_outlet_type": "state_press",
             "match_terms": _ME_MATCH_TERMS,
+            "exclude_title_terms": _ME_WIRE_REACTION_TERMS,
         },
     },
     {
@@ -3674,19 +3773,102 @@ MIDDLE_EAST_SOURCES: list[dict[str, Any]] = [
         },
     },
     {
+        # Added after the review of 2026-10-23 (point 5): no query reached
+        # strikes on Gulf energy sites, and the Houthi strikes on Aramco's
+        # headquarters (14-15 Oct) and Shaybah oilfield (21 Oct, Brent at
+        # $110) never entered the feed. Measured over 14 days: ~12 articles a
+        # day with site and attack both in the title, all on topic; the
+        # same sites in the BODY returned 742, mostly airports and diplomacy.
+        # 15 keywords, the free plan's cap (each word of a name counts);
+        # Jazan is left out - its only hits were intercepted missiles.
+        "domain_slug": "middle_east_market_signal",
+        "url": "eventregistry:me_energy_sites",
+        "name": "Event Registry - strikes on Gulf energy sites",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "M4: a Gulf energy site and an attack term, both in the title.",
+        "config": {
+            "url_scheme": "er-me",
+            "require_body": True,
+            "query": {"$and": [
+                _er_keywords(["Aramco", "Shaybah", "Abqaiq", "Ras Tanura", "Yanbu",
+                              "Fujairah", "Ras Laffan", "Ruwais"], "title"),
+                _er_keywords(["attack", "strike", "drone", "missile", "explosion"], "title"),
+            ]},
+        },
+    },
+    {
+        # Added after the review of 2026-10-23 (point 14): reports that the US
+        # and Israel were drawing up new strikes on Iran moved oil on 22 Oct
+        # and no query reached them. Measured over 14 days: 260 articles, all
+        # on topic, nearly all 22-23 Oct ("US, Israel draw up plans for
+        # renewed strikes on Iran") - a burst the title dedup collapses.
+        # 15 keywords ("military action" counts two), the plan's cap.
+        "domain_slug": "middle_east_market_signal",
+        "url": "eventregistry:me_strike_plans",
+        "name": "Event Registry - planned strikes on Iran and the Houthis",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "M4: a strike term, Iran or the Houthis, and a planning term, all in the title.",
+        "config": {
+            "url_scheme": "er-me",
+            "require_body": True,
+            "query": {"$and": [
+                _er_keywords(["strike", "strikes", "attack", "military action"], "title"),
+                _er_keywords(["Iran", "Houthi", "Houthis"], "title"),
+                _er_keywords(["plan", "plans", "prepare", "prepares", "preparing", "weighs",
+                              "considering"], "title"),
+            ]},
+        },
+    },
+    {
+        # Added after the review of 2026-10-23 (point 4 of its follow-up):
+        # the full run had no Gulf-money rows, because these deals are
+        # reported by Reuters / Bloomberg, outside the Gulf-outlet query.
+        # Measured over 60 days: 83 articles (~1.4 a day), including MGX and
+        # SoftBank joining OpenAI's $30B round, Mubadala Capital in Crusoe's
+        # $3.9B Series F, PIF's SpaceX stake and G42's stake-sale talks; the
+        # rest (Luckin Coffee, LIV Golf, "PIF" = Pacific Islands Forum) is
+        # left to the classifier, which only keeps money into US AI.
+        # 15 keywords, the plan's cap.
+        "domain_slug": "middle_east_market_signal",
+        "url": "eventregistry:me_gulf_money",
+        "name": "Event Registry - Gulf funds and state AI companies investing",
+        "source_type": "eventregistry",
+        "frequency_name": "daily",
+        "description": "M3: a Gulf fund or state AI company and an investment term, both in the title.",
+        "config": {
+            "url_scheme": "er-me",
+            "require_body": True,
+            "query": {"$and": [
+                _er_keywords(["MGX", "Mubadala", "PIF", "QIA", "ADIA", "ADQ", "G42", "Humain"], "title"),
+                _er_keywords(["invests", "investment", "stake", "funding", "round", "backs", "raises"],
+                             "title"),
+            ]},
+        },
+    },
+    {
         "domain_slug": "middle_east_market_signal",
         "url": "eventregistry:me_helium",
         "name": "Event Registry - helium supply",
         "source_type": "eventregistry",
         "frequency_name": "daily",
-        "description": "M5: helium in the title, with a supply or chip term in the body.",
+        "description": ("M5: helium in the title, with Qatar / Ras Laffan in the body or a"
+                        " shortage, price or chip term in the title."),
         "config": {
             "url_scheme": "er-me",
             "require_body": True,
+            # Measured over 14 days (2026-10-23). Supply, shortage, price or
+            # chip words in the BODY admitted 35 items, none about Qatar's
+            # supply: helium miners in Canada, Tanzania and Minnesota (their
+            # pages list chips as a use of helium) and the Helium crypto
+            # token. This form keeps 12, all about the Qatar-driven shortage.
             "query": {"$and": [
                 _er_keywords(["helium"], "title"),
-                _er_keywords(["Qatar", "shortage", "chip", "semiconductor",
-                              "supply", "price"], "body"),
+                {"$or": [
+                    _er_keywords(["Qatar", "Ras Laffan"], "body"),
+                    _er_keywords(["shortage", "chip", "semiconductor", "price", "prices"], "title"),
+                ]},
             ]},
         },
     },
@@ -3713,12 +3895,24 @@ MIDDLE_EAST_SOURCES: list[dict[str, Any]] = [
         "name": "Event Registry - Israeli chip sites",
         "source_type": "eventregistry",
         "frequency_name": "daily",
-        "description": "M7: Kiryat Gat, Tower Semiconductor, or Intel/Nvidia Israel and Mobileye in the title.",
+        "description": ("M7: Kiryat Gat with a chip term, Tower Semiconductor with Tower in the"
+                        " title, or Intel/Nvidia Israel and Mobileye in the title."),
         "config": {
             "url_scheme": "er-me",
             "require_body": True,
+            # Measured over 14 days (2026-10-23):
+            #  - Kiryat Gat only with a chip term in the body: the town alone
+            #    brought in an archaeology dig, UK-Israel diplomacy and
+            #    olive-oil stories; every Intel fab report kept.
+            #  - Tower only with "Tower" in the headline: the concept alone
+            #    matched every Tel Aviv market wrap that lists Tower among the
+            #    movers (19 "Israel stocks higher/lower", "Wed: TASE ..."
+            #    reports) and unrelated chip funding rounds. All 8 Tower
+            #    headlines of the period kept, the Semtech capacity deal too.
             "query": {"$or": [
-                _er_concepts("Kiryat_Gat", "Tower_Semiconductor"),
+                {"$and": [_er_concepts("Kiryat_Gat"),
+                          _er_keywords(["Intel", "fab", "chip", "semiconductor", "factory"], "body")]},
+                {"$and": [_er_concepts("Tower_Semiconductor"), _er_keywords(["Tower"], "title")]},
                 _er_keywords(["Intel Israel", "Nvidia Israel", "Mobileye"], "title"),
             ]},
         },

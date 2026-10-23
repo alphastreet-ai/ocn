@@ -33,11 +33,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import statistics
 import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
+from datetime import date, datetime, timedelta
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -182,7 +184,10 @@ MIDDLE_EAST_EVENTS: list[dict[str, Any]] = [
 
 _DIRECTIONS = {"rise", "fall"}
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
-_COMPANY_FIELDS = ("ticker", "company", "exchange", "country", "aliases", "counterparties")
+_COMPANY_FIELDS = ("ticker", "company", "kind", "exchange", "country", "aliases", "counterparties")
+# "fund": a sovereign fund - its counterparties are what it owns; "site": an
+# Israeli site of a US company - an event there moves that owner only.
+_COMPANY_KINDS = {"company", "fund", "site"}
 _COUNTERPARTY_FIELDS = ("counterparty_name", "counterparty_ticker", "relationship",
                         "share_price_on_good_news")
 
@@ -205,6 +210,8 @@ def company_table_problems(companies: list[dict[str, Any]]) -> list[str]:
         if missing:
             problems.append(f"{label}: missing {', '.join(missing)}")
             continue
+        if c["kind"] not in _COMPANY_KINDS:
+            problems.append(f"{label}: kind is {c['kind']!r}, not one of {sorted(_COMPANY_KINDS)}")
         for name in [c["company"], *c["aliases"]]:
             key = name.casefold()
             if key in owner_of and owner_of[key] != label:
@@ -248,6 +255,9 @@ SOURCE_EVENT_TYPES: dict[str, dict[str, Any]] = {
     "federal_register": {"event_type": "M1", "final": False},
     "bis_press": {"event_type": "M1", "final": False},
     "eventregistry:me_shipping": {"event_type": "M4", "final": False},
+    "eventregistry:me_energy_sites": {"event_type": "M4", "final": False},
+    "eventregistry:me_strike_plans": {"event_type": "M4", "final": False},
+    "eventregistry:me_gulf_money": {"event_type": "M3", "final": False},
     "eventregistry:me_helium": {"event_type": "M5", "final": False},
     "eventregistry:me_qatarenergy": {"event_type": "M5", "final": False},
     "eventregistry:me_israel_sites": {"event_type": "M7", "final": False},
@@ -504,17 +514,18 @@ def _reset_spend() -> None:
 _RETRY_STATUS = {408, 429, 500, 502, 503, 504}
 
 
-def _call_model(system: str, user: str) -> str | None:
+def _call_model(system: str, user: str, follow_up: list[dict[str, str]] | None = None) -> str | None:
     """One chat completion. Retried only when the request itself failed
-    (timeout, rate limit, server error) - never to get a different answer.
+    (timeout, rate limit, server error) - never to get a different answer;
+    the one repair turn (`follow_up`, see _model_result) is a separate call.
     None when every attempt failed."""
     payload = {
         "model": config.MIDDLE_EAST_SIGNAL_MODEL,
         "temperature": 0,
-        "max_tokens": 900,
+        "max_tokens": 1300,
         "response_format": {"type": "json_object"},
         "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
+                     {"role": "user", "content": user}, *(follow_up or [])],
         "usage": {"include": True},
     }
     attempts = max(1, config.OPENAI_MAX_ATTEMPTS)
@@ -554,13 +565,16 @@ EVENT_CODES: dict[str, str] = {
         "m1_rule_or_licence", "m1_congress_action", "m1_export_category_change",
         "m1_draft_or_hearing", "m1_repeat_or_speech",
         "m2_switched_on", "m2_chips_delivered", "m2_setback", "m2_deal_or_construction",
-        "m2_visit_or_ceremony",
+        "m2_company_update", "m2_visit_or_ceremony",
         "m3_investment", "m3_pullback", "m3_talks",
-        "m4_strike_on_site", "m4_other_strike", "m4_interception", "m4_waterway_status", "m4_shipping_or_insurance",
-        "m4_ship_incident", "m4_threat_or_statement", "m4_commentary",
+        "m4_strike_on_site", "m4_other_strike", "m4_interception",
+        "m4_waterway_closed", "m4_waterway_reopened", "m4_ship_traffic", "m4_shipping_or_insurance",
+        "m4_ship_incident", "m4_ship_sunk_or_crew_killed", "m4_attack_tally", "m4_strike_plan",
+        "m4_threat_or_statement", "m4_commentary",
         "m5_qatar_force_majeure", "m5_supplier_rationing", "m5_asia_shortfall", "m5_commentary",
         "m6_binding_rule", "m6_chinese_supplier", "m6_strategy", "m6_speech",
-        "m7_site_disruption", "m7_site_incident", "m7_home_front_restriction", "m7_acquisition", "m7_commentary",
+        "m7_site_disruption", "m7_site_incident", "m7_home_front_restriction", "m7_acquisition",
+        "m7_company_deal", "m7_commentary",
         "m8_enforcement", "m8_investigation_unnamed",
     )}
 _CONFIRMATIONS = ("official", "named_source", "unnamed")
@@ -572,9 +586,13 @@ _PUNCT_MAP = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "–
 
 
 def normalize_text(text: str) -> str:
-    """Case, quote, dash and whitespace differences removed, so a quote the
-    model copied is found however the page typeset it."""
+    """Case, quote, dash, whitespace and abbreviation-dot differences
+    removed, so a quote the model copied is found however the page typeset
+    it: "U.K. Maritime Trade Operations" and "UK Maritime Trade Operations"
+    are one name (a real UKMTO confirmation was dropped over the dots). Only
+    a dot after a single letter goes - decimals ("1.5") are untouched."""
     text = unicodedata.normalize("NFKC", text or "").translate(_PUNCT_MAP).casefold()
+    text = re.sub(r"\b([^\W\d_])\.", r"\1", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -676,9 +694,51 @@ def _name_in_text(name: str, text_norm: str) -> bool:
     return bool(words) and all(_whole_word(w, text_norm) for w in words)
 
 
+# Words that only say what KIND of place a name is. The model writes
+# "Strait of Hormuz" where the text says "Hormuz"; an exact match dropped
+# the place, and a row without a place cannot join its event or story.
+_PLACE_KIND_WORDS = {"strait", "straits", "sea", "gulf", "port", "city", "province", "region",
+                     "governorate", "emirate", "kingdom", "republic", "island", "islands",
+                     "coast", "waters", "field", "plant", "terminal", "facility", "site"}
+
+
+def _place_in_text(place: str, text_norm: str) -> bool:
+    """A place the text supports: as written, word by word, or by its
+    naming words alone ("Strait of Hormuz" when the text says "Hormuz")."""
+    if _name_in_text(place, text_norm):
+        return True
+    words = [w for w in re.findall(r"[\w-]+", normalize_text(place))
+             if w not in _NAME_STOPWORDS and w not in _PLACE_KIND_WORDS]
+    return bool(words) and all(_whole_word(w, text_norm) for w in words)
+
+
 _ANONYMOUS_RE = re.compile(
     r"\b(?:people|persons?|sources?|insiders?|familiar|aware|anonymity|unnamed|"
     r"officials? (?:said|say)|according to reports)\b", re.IGNORECASE)
+# "an Arab diplomat posted to a major Middle Eastern country" or "a senior
+# Iranian official" names nobody: an indefinite person described only by
+# nationality or region (full run 2026-10-23: kept as a named source and,
+# with Reuters, raised a strike-plan report to signal). "a spokesperson for
+# the Houthi armed forces" or "a Pentagon spokesperson" names the body.
+_INDEFINITE_RE = re.compile(r"^\s*(?:an?|one|two|three|four|several|some|multiple)\s+", re.IGNORECASE)
+_DESCRIPTOR_WORDS = frozenset({
+    "arab", "arabic", "iranian", "israeli", "saudi", "emirati", "qatari", "kuwaiti", "bahraini",
+    "omani", "yemeni", "iraqi", "egyptian", "jordanian", "lebanese", "syrian", "turkish",
+    "american", "us", "u.s", "european", "western", "eastern", "middle", "gulf", "asian",
+    "chinese", "russian", "indian", "pakistani", "british", "french", "german", "japanese",
+    "korean", "regional", "foreign", "senior"})
+
+
+def is_anonymous_source(by: str) -> bool:
+    """True when `by` names no person or body (see _INDEFINITE_RE)."""
+    if _ANONYMOUS_RE.search(by):
+        return True
+    m = _INDEFINITE_RE.match(by)
+    if not m:
+        return False
+    names = [w for w in re.findall(r"\b[A-Z][\w.'-]*", by[m.end():])
+             if w.strip(".'").casefold() not in _DESCRIPTOR_WORDS]
+    return not names
 
 
 def outlet_name(article: dict[str, Any], source: str) -> str | None:
@@ -691,10 +751,152 @@ def outlet_name(article: dict[str, Any], source: str) -> str | None:
     return stem.casefold() or None
 
 
+def _month_end(year: int, month: int) -> date:
+    return (date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1))
+
+
+def _as_date(value: Any) -> date | None:
+    """A datetime, date or ISO string -> date; None when it is none of them.
+    A month alone ("2026-09", an event dated only "last month") -> the last
+    day of that month: the latest it can have happened."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}", value.strip()):
+        year, month = map(int, value.strip().split("-"))
+        return _month_end(year, month) if 1 <= month <= 12 else None
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.strip().replace("Z", "+00:00")[:25]).date()
+        except ValueError:
+            return None
+    return None
+
+
+def event_date_checked(raw: Any, published: Any) -> str | None:
+    """The model's event date, as stored: a real YYYY-MM-DD day no later
+    than the day after the article, or a YYYY-MM month no later than the
+    article's month (an event dated only "last month"); else None - a date
+    after the article is a misreading."""
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    pub = _as_date(published)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        when = _as_date(raw)
+        if when is None or (pub is not None and when > pub + timedelta(days=1)):
+            return None
+        return when.isoformat()
+    if re.fullmatch(r"\d{4}-\d{2}", raw):
+        when = _as_date(raw)
+        if when is None or (pub is not None and (when.year, when.month) > (pub.year, pub.month)):
+            return None
+        return raw
+    return None
+
+
+def _exact_day(value: Any) -> date | None:
+    """An event date precise to the day - only these join reports of one
+    event; a month is too coarse to tell two events apart."""
+    return _as_date(value) if isinstance(value, str) and len(value.strip()) == 10 else None
+
+
+def _checked_confirmation(conf: Any, body: str, outlet: str | None,
+                          dropped: list[str], prefix: str = "confirmation") -> dict[str, Any]:
+    """{"level", "by"} kept only where the text supports it. A level above
+    "unnamed" needs a `by` the text contains - a confirmation nobody in the
+    article gave is not one, so it falls to "unnamed" (which can only lower
+    a label)."""
+    conf = conf if isinstance(conf, dict) else {"level": conf}
+    level_c = conf.get("level")
+    if level_c not in _CONFIRMATIONS:
+        dropped.append(prefix)
+        level_c = "unnamed"
+    by = conf.get("by") if isinstance(conf.get("by"), str) and conf.get("by").strip() else None
+    # Checked against the BODY: a headline often ends "| <outlet>".
+    if by and not _name_in_text(by, normalize_text(body)):
+        dropped.append(f"{prefix}.by:{by}")
+        by = None
+    # "two people aware of the plans" names nobody.
+    if by and is_anonymous_source(by):
+        dropped.append(f"{prefix}.by_anonymous:{by}")
+        by = None
+    if level_c != "unnamed" and not by:
+        dropped.append(f"{prefix}.level")
+        level_c = "unnamed"
+    # The outlet reporting a story does not confirm it: at most a named source.
+    # Compared without spaces: the outlet is "ndtvprofit", the model writes
+    # "NDTV Profit".
+    if (by and level_c == "official" and outlet
+            and (_whole_word(outlet, normalize_text(by))
+                 or re.sub(r"\W", "", normalize_text(by)) == re.sub(r"\W", "", outlet))):
+        dropped.append(f"{prefix}.outlet_not_official")
+        level_c = "named_source"
+    return {"level": level_c, **({"by": by} if by else {})}
+
+
+# Event codes whose facts include a deal (and so a party to confirm it).
+_DEAL_CODES = frozenset({"m2_deal_or_construction", "m2_chips_delivered", "m2_switched_on",
+                         "m3_investment", "m3_talks", "m6_chinese_supplier", "m7_acquisition",
+                         "m7_company_deal"})
+# Plans, threats, talks and statements: listed as other events, but never
+# taking over a row's label from what actually happened (full run
+# 2026-10-23: a coalition evacuation notice became a "planned strike" alert).
+_STATEMENT_CODES = frozenset({"m4_threat_or_statement", "m4_strike_plan", "m3_talks",
+                              "m1_draft_or_hearing", "m2_company_update", "m6_strategy",
+                              "m4_ship_traffic"})
+# Codes that are never "another event" in an article: they describe the
+# article itself (commentary), not something that happened.
+_NOT_AN_OTHER_EVENT = frozenset({"m4_commentary", "m5_commentary", "m7_commentary",
+                                 "m6_speech", "m1_repeat_or_speech"})
+_OTHER_EVENTS_MAX = 2
+_OTHER_EVENT_FRESH_DAYS = 2
+
+
+def _checked_other_events(raw: Any, main_code: str, text_norm: str, body: str, outlet: str | None,
+                          published: Any, dropped: list[str]) -> list[dict[str, Any]]:
+    """Up to _OTHER_EVENTS_MAX other NEW events the article reports (review
+    point 38: a closure, several attacks and a threat in one article lost
+    two of them), each checked like the main event: a known code, a place
+    the text supports, a real date, a confirmation the text gives."""
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(raw if isinstance(raw, list) else []):
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code")
+        if code not in EVENT_CODES or code in _NOT_AN_OTHER_EVENT or code == main_code:
+            continue
+        place = item.get("place") if isinstance(item.get("place"), str) and item["place"].strip() else None
+        if place and not _place_in_text(place, text_norm):
+            dropped.append(f"other_events[{i}].place")
+            place = None
+        day = event_date_checked(item.get("date"), published)
+        facts = item.get("facts") if isinstance(item.get("facts"), str) else ""
+        facts = re.sub(r"\s+", " ", facts).strip()
+        if facts and not _numbers_supported(facts, text_norm):
+            dropped.append(f"other_events[{i}].facts")
+            facts = ""
+        event = {k: v for k, v in {
+            "type": EVENT_CODES[code], "code": code, "place": place,
+            "date": day,
+            "country": country_name(item.get("country"))}.items() if v is not None}
+        out.append({k: v for k, v in {
+            "event": event,
+            "confirmation": _checked_confirmation(item.get("confirmation"), body, outlet, dropped,
+                                                  f"other_events[{i}].confirmation"),
+            "facts": (facts if facts.endswith((".", "!", "?")) else facts + ".") if facts else None,
+        }.items() if v is not None})
+        if len(out) == _OTHER_EVENTS_MAX:
+            break
+    return out
+
+
 def check_extraction(raw: str | None, title: str, body: str,
                      name_index: dict[str, dict[str, Any]],
                      counterparty_tickers: dict[str, str],
-                     outlet: str | None = None) -> tuple[dict[str, Any] | None, list[str]]:
+                     outlet: str | None = None,
+                     published: Any = None) -> tuple[dict[str, Any] | None, list[str]]:
     """The model's answer, kept only where the text supports it.
 
     Returns (extracted, dropped): `extracted` is None when the answer is not
@@ -767,6 +969,17 @@ def check_extraction(raw: str | None, title: str, body: str,
         if len(companies) == _COMPANIES_MAX:
             break
 
+    # The event's place may itself be a tracked site or company ("Kiryat
+    # Gat" is Intel's fab in the company table): the event is about it even
+    # when the model listed no company - so the right owner is named, and
+    # officials confirming the incident count (review point 22).
+    place_row = _match_tracked(raw_event.get("place") or "", name_index) \
+        if isinstance(raw_event.get("place"), str) and _place_in_text(raw_event["place"], text_norm) else None
+    if place_row and place_row["company"].casefold() not in seen and len(companies) < _COMPANIES_MAX:
+        seen.add(place_row["company"].casefold())
+        companies.append({"name": place_row["company"], "ticker": place_row["ticker"],
+                          "country": place_row["country"], "tracked": True})
+
     def copied(value: Any, name: str) -> str | None:
         """`value` if the text contains it, else None (and logged)."""
         if value is None:
@@ -776,32 +989,8 @@ def check_extraction(raw: str | None, title: str, body: str,
         dropped.append(name)
         return None
 
-    # confirmation: {"level", "by"}. A level above "unnamed" needs a `by`
-    # the text contains - a confirmation nobody in the article gave is not
-    # one, so it falls to "unnamed" (which can only lower a label).
-    conf = data.get("confirmation")
-    conf = conf if isinstance(conf, dict) else {"level": conf}
-    level_c = conf.get("level")
-    if level_c not in _CONFIRMATIONS:
-        dropped.append("confirmation")
-        level_c = "unnamed"
-    by = conf.get("by") if isinstance(conf.get("by"), str) and conf.get("by").strip() else None
-    # Checked against the BODY: a headline often ends "| <outlet>".
-    if by and not _name_in_text(by, normalize_text(body)):
-        dropped.append(f"confirmation.by:{by}")
-        by = None
-    # "two people aware of the plans" names nobody.
-    if by and _ANONYMOUS_RE.search(by):
-        dropped.append(f"confirmation.by_anonymous:{by}")
-        by = None
-    if level_c != "unnamed" and not by:
-        dropped.append("confirmation.level")
-        level_c = "unnamed"
-    # The outlet reporting a story does not confirm it: at most a named source.
-    if by and level_c == "official" and outlet and _whole_word(outlet, normalize_text(by)):
-        dropped.append("confirmation.outlet_not_official")
-        level_c = "named_source"
-    confirmation = {"level": level_c, **({"by": by} if by else {})}
+    confirmation = _checked_confirmation(data.get("confirmation"), body, outlet, dropped)
+    level_c = confirmation["level"]
 
     news_effect = data.get("news_effect", data.get("news"))
     if news_effect not in _NEWS:
@@ -813,9 +1002,12 @@ def check_extraction(raw: str | None, title: str, body: str,
     # Spec 9.1: "If the only source is unnamed, the highest level is 3."
     if deal_level and level_c == "unnamed" and deal_level > 3:
         deal_level = 3
-    new_development = data.get("new_development")
-    if not isinstance(new_development, bool):
-        new_development = True              # unknown: judged as new, not hidden as a repeat
+    # When it happened - the date code judges "new" and "same event" on
+    # (replaces the model's own yes/no "new_development", which marked an
+    # IRGC "Hormuz remains closed" statement new).
+    event_day = event_date_checked(raw_event.get("date"), published)
+    if raw_event.get("date") not in (None, "", "null") and event_day is None:
+        dropped.append("event.date")
     lasts = raw_event.get("lasts_over_24_hours", raw_event.get("over_24_hours"))
     if not isinstance(lasts, bool):
         lasts = None
@@ -830,9 +1022,21 @@ def check_extraction(raw: str | None, title: str, body: str,
         """Absent means not stated: nothing is stored as null."""
         return {k: v for k, v in d.items() if v is not None}
 
+    raw_place = raw_event.get("place")
+    place = None
+    if isinstance(raw_place, str) and raw_place.strip():
+        if _place_in_text(raw_place, text_norm):
+            place = raw_place.strip()
+        else:
+            dropped.append("event.place")
     event_obj = present({
         "type": EVENT_CODES[event], "code": event,
-        "place": copied(raw_event.get("place"), "event.place"),
+        "place": place,
+        "date": event_day,
+        # The country of the place - the one fact taken from the model's
+        # general knowledge (the text says "Dhahran", not "Saudi Arabia");
+        # it replaces hand-kept city lists for the region and alert checks.
+        "country": country_name(raw_event.get("country")),
         "effective_date": copied(raw_event.get("effective_date"), "event.effective_date"),
         "lasts_over_24_hours": lasts,
     })
@@ -842,12 +1046,22 @@ def check_extraction(raw: str | None, title: str, body: str,
         "up_to": (up_to is True) if amount else None,
         "capacity": copied(raw_deal.get("capacity", data.get("capacity")), "deal.capacity"),
     })
+    # For a deal, "official" means a PARTY to it says so: S&P reporting a
+    # data-centre lease it is not part of was taken as the official
+    # confirmation (full run 2026-10-23). A non-party is a named source.
+    by_c = confirmation.get("by")
+    if (event in _DEAL_CODES and confirmation["level"] == "official" and by_c and companies
+            and not any(_same_source(by_c, c["name"]) for c in companies)):
+        dropped.append("confirmation.not_a_party")
+        confirmation = {**confirmation, "level": "named_source"}
+    other_events = _checked_other_events(data.get("other_events"), event, text_norm, body,
+                                         outlet, published, dropped)
     extracted = {
         "event": event_obj,
+        "other_events": other_events or None,
         "companies": companies,
         "deal": deal or None,
         "confirmation": confirmation,
-        "new_development": new_development,
         "news_effect": news_effect,
         "reason_facts": reason_facts,
         "summary": summary,
@@ -900,33 +1114,57 @@ def _committed_amount(ex: dict[str, Any]) -> bool:
     return bool(_amount(ex)) and not _up_to(ex)
 
 
+def _party_confirms(ex: dict[str, Any]) -> bool:
+    """The confirmer is one of the companies the event is about."""
+    by = (ex.get("confirmation") or {}).get("by") or ""
+    return bool(by) and any(_same_source(by, c.get("name") or "") for c in ex.get("companies") or [])
+
+
+_US_NAMES = frozenset({"united states", "us", "u.s.", "usa", "united states of america", "america"})
+# Public bodies: they relay or regulate a company's decision, never make it.
+_AUTHORITY_RE = re.compile(
+    r"\b(?:authority|ministry|government|agency|council|command|coalition|navy|forces|embassy|"
+    r"police|department|administration|commission|regulator)\b", re.IGNORECASE)
+
+
+# The region by geography - its countries and the sea routes around them -
+# not a list of places seen in articles. The event's country comes from the
+# extraction (`event.country`), so a town no list names (Dhahran, Khamis
+# Mushait) is judged by its country.
+_MIDDLE_EAST_COUNTRIES = {"uae", "saudi arabia", "qatar", "kuwait", "bahrain", "oman",
+                          "israel", "iran", "iraq", "yemen", "jordan", "lebanon", "syria",
+                          "egypt", "palestine", "palestinian territories"}
+_MIDDLE_EAST_SEAS_RE = re.compile(
+    r"\b(?:hormuz|red sea|mandeb|mandab|gulf of oman|gulf of aden|persian gulf|"
+    r"arabian gulf|arabian sea|suez)\b"
+    # A bare "Gulf" ("the Gulf", "Saudi Arabia's Gulf coast") is the Persian
+    # Gulf in this feed; "Gulf of Mexico" is not.
+    r"|\bgulf\b(?!\s+of\b)", re.IGNORECASE)
+
+
 def _place_country(ex: dict[str, Any]) -> str | None:
-    place = (_event(ex, "place") or "").casefold()
-    for key, country in {**_GULF_COUNTRIES, "israel": "Israel", "haifa": "Israel",
-                         "tel aviv": "Israel", "eilat": "Israel", "ashdod": "Israel",
-                         "ras laffan": "Qatar", "fujairah": "UAE", "jebel ali": "UAE",
-                         "ras tanura": "Saudi Arabia", "abqaiq": "Saudi Arabia",
-                         "jeddah": "Saudi Arabia", "riyadh": "Saudi Arabia",
-                         "doha": "Qatar", "ruwais": "UAE"}.items():
-        if _whole_word(key, place):
-            return country
-    return None
+    """The country the event happened in, in the table's spelling for Gulf
+    countries; None at sea or when not stated."""
+    return country_name(_event(ex, "country"))
 
 
-_QATAR_RE = re.compile(r"\b(?:Qatar|QatarEnergy|Ras Laffan)\b", re.IGNORECASE)
-# QatarEnergy's own action, in the headline: declares / extends / lifts /
-# ends a force majeure, or restarts. Measured on the 403-article run: every
-# wrong "signal" headline named Qatar but reported a consequence ("exports
-# plunge 96%", "Pakistan ... amid Qatar force majeure"); the one real
-# announcement was "Qatar extends Force Majeure".
-_QATAR_ACTION_RE = re.compile(
-    r"\b(?:declar|extend|lift|end)\w*\s+(?:its\s+|the\s+)?force majeure"
-    r"|force majeure\s+(?:is\s+|was\s+|has been\s+)?(?:declar|extend|lift|end)\w*"
-    r"|\b(?:restart|resum|reopen)\w*", re.IGNORECASE)
+_SEA_WORD_RE = re.compile(r"\b(?:sea|ocean|strait|gulf|channel|bay)\b", re.IGNORECASE)
 
 
-def _qatar_announcement_headline(title: str) -> bool:
-    return bool(_QATAR_RE.search(title) and _QATAR_ACTION_RE.search(title))
+def _in_middle_east(ex: dict[str, Any]) -> bool:
+    """False only on evidence of another region: a country outside it, or a
+    named sea that is not one of its sea routes (the Black Sea). A place
+    with no country given, or no place at all, is not that evidence."""
+    country = _place_country(ex)
+    if country:
+        folded = country.casefold()
+        return folded in _MIDDLE_EAST_COUNTRIES or any(
+            _whole_word(c, folded) for c in _MIDDLE_EAST_COUNTRIES)
+    place = _event(ex, "place") or ""
+    folded = normalize_text(place)
+    if any(_whole_word(c, folded) for c in _MIDDLE_EAST_COUNTRIES):
+        return True                     # "off Saudi Arabia's Gulf coast"
+    return bool(_MIDDLE_EAST_SEAS_RE.search(place)) or not _SEA_WORD_RE.search(place)
 
 
 # What makes a Gulf rule an M6 rule: AI, data or chips. Added after the
@@ -941,27 +1179,61 @@ _AI_DATA_RE = re.compile(
 _HARDWARE_RE = re.compile(
     r"data[ -]?cent(?:re|er)s?|\bgpus?\b|\bchips?\b|semiconductor|\bservers?\b|megawatt|"
     r"gigawatt|\d\s?(?:mw|gw)\b|compute capacity|computing capacity|\bcampus\b|"
-    r"accelerators?|supercomputer", re.IGNORECASE)
+    r"accelerators?|supercomputer|ai factor(?:y|ies)", re.IGNORECASE)
 
 
-def _is_hardware_deal(ex: dict[str, Any], body: str) -> bool:
-    """A data-centre deal names a figure or at least talks about hardware:
-    capacity or an amount, or chips / servers / data centres in the body."""
-    return bool(_deal(ex, "capacity") or _amount(ex) or _HARDWARE_RE.search(body or ""))
+def _is_hardware_deal(ex: dict[str, Any], title: str, body: str | None = None) -> bool:
+    """A data-centre deal's OWN facts - its capacity, headline, facts
+    sentence and summary - talk about AI hardware (chips, servers, data
+    centres, MW of compute). An amount alone proves nothing: a $100 million
+    port-terminal expansion passed as a data-centre order; and a capacity is
+    not compute unless it says so - QatarEnergy's "4 million tonnes per
+    annum" LNG purchase passed, its body mentioning data-centre gas demand
+    (full run 2026-10-23)."""
+    text = _event_text(ex, title)
+    if len(re.findall(r"[A-Za-z]{3,}", text)) < 5:
+        text = body or ""                             # no facts of its own: read the article
+    if len(re.findall(r"[A-Za-z]{3,}", text)) < 5:
+        return True                                   # nothing to read: no evidence either way
+    return bool(_HARDWARE_RE.search(f"{_deal(ex, 'capacity') or ''} {text}"))
 
 
 # A headline that reacts to an event ("UN Security Council Members Strongly
 # Condemn Houthi Attacks...") is never the first report of it: the model
 # coded such a statement as a confirmed strike on the 403-article run.
 _REACTION_HEADLINE_RE = re.compile(
-    r"\b(?:condemn\w*|denounc\w*|welcom\w*|condolence\w*|solidarity|deplor\w*|"
+    r"\b(?:condemn\w*|denounc\w*|welcom\w*|condolence\w*|solidarity|deplor\w*|sermon|"
     r"urges? restraint|expresses? concern)\b", re.IGNORECASE)
 
 
-def decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) -> tuple[str, str, str]:
+# An event is new when it happened within this many days of the article.
+_NEW_WITHIN_DAYS = 7
+
+
+def is_new(ex: dict[str, Any], published: Any) -> bool:
+    """From the event's own date (event.date), not a yes/no from the
+    model. No date, or no published time, is judged new - a repeat must be
+    shown, not assumed."""
+    day, pub = _as_date(_event(ex, "date")), _as_date(published)
+    return day is None or pub is None or (pub - day).days <= _NEW_WITHIN_DAYS
+
+
+def decide_label(ex: dict[str, Any], title: str = "", body: str | None = None,
+                 waterway_status: dict[str, dict[str, Any]] | None = None,
+                 published: Any = None) -> tuple[str, str, str]:
     """(label, rule, why) - see _decide_label. A reaction headline is capped
     at weak_signal: the event itself is alerted from its own report."""
-    label, rule, why = _decide_label(ex, title, body)
+    label, rule, why = _decide_label(ex, title, body, waterway_status, published)
+    # An attack alert needs the day it happened: a report of an attack says
+    # when; an attack an analysis piece recalls without a day is background
+    # (a sinking from days before became three alerts, 2026-10-23). Same
+    # for a force majeure extension: dated only "2026-10", Edison's 28 Sep
+    # extension was re-alerted from a 13 Oct roundup (full run 2026-10-23).
+    if (label == "signal" and event_code(ex) in _ATTACK_CODES | {"m4_attack_tally", "m5_qatar_force_majeure"}
+            and not _exact_day(_event(ex, "date"))):
+        return ("weak_signal", f"{rule}_undated",
+                "The article does not say on which day this happened, so it is not reported as"
+                " new.")
     if label == "signal" and _REACTION_HEADLINE_RE.search(title or ""):
         return ("weak_signal", f"{rule}_reaction_headline",
                 "The article is a statement reacting to the event, not the first report of it.")
@@ -981,7 +1253,94 @@ _SHIP_COUNT_RE = re.compile(
     re.IGNORECASE)
 
 
-def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) -> tuple[str, str, str]:
+# The waterways a closure or reopening is judged on, by a word of the place.
+_WATERWAYS = {"hormuz": "the Strait of Hormuz", "red sea": "the Red Sea",
+              "mandeb": "the Red Sea", "mandab": "the Red Sea"}
+# How far back a statement by the other side still makes a status contested.
+_CONTESTED_WINDOW_DAYS = 14
+
+
+def current_waterway_status(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """{waterway: ...} from stored rows only - nothing set by hand:
+      closed / as_of   the latest closure or reopening ALERTED (a signal),
+                       i.e. a change already reported;
+      said             {True: {"by", "date"}, False: {...}} - the latest
+                       statement that it is closed (True) or open (False),
+                       signal or weak, so a new statement can say who
+                       contradicts it.
+    Rows as returned by get_middle_east_story_candidates."""
+    status: dict[str, dict[str, Any]] = {}
+    for r in sorted((r for r in rows if r.get("published")), key=lambda r: r["published"]):
+        md = r.get("metadata") or {}
+        code = event_code(md)
+        if "collapsed_into" in md or code not in ("m4_waterway_closed", "m4_waterway_reopened"):
+            continue
+        key = waterway_key(_event(md, "place"))
+        if not key:
+            continue
+        closed = code == "m4_waterway_closed"
+        entry = status.setdefault(key, {"said": {}})
+        entry["said"][closed] = {"by": (md.get("confirmation") or {}).get("by"),
+                                 "date": _as_date(_event(md, "date")) or _as_date(r["published"])}
+        if r.get("signal_detection") == "signal":
+            entry.update(closed=closed, as_of=f"since {r['published']:%d %B %Y}")
+    return status
+
+
+def waterway_key(place: str | None) -> str | None:
+    """"hormuz" / "red sea" / "mandeb" for a place naming one, else None."""
+    folded = (place or "").casefold()
+    return next((k for k in _WATERWAYS if k in folded), None)
+
+
+def _waterway_label(ex: dict[str, Any], body: str | None,
+                    status: dict[str, dict[str, Any]]) -> tuple[str, str, str]:
+    """A closure or reopening is news only when it CHANGES the waterway's
+    status. Two things show it is not a change, neither set by hand:
+      - its own date: a closure the text dates weeks back ("closed since
+        March") is old - judged before this, by the repeat rule;
+      - the stored history (`status`, current_waterway_status): the same
+        status was already alerted."""
+    event = event_code(ex)
+    closing = event == "m4_waterway_closed"
+    key = waterway_key(_event(ex, "place"))
+    known = status.get(key) if key else None
+    name = _WATERWAYS.get(key or "", "the waterway")
+    if known and known.get("closed") == closing:
+        return ("noise", "m4_waterway_status_unchanged",
+                f"{name[0].upper()}{name[1:]} was already {'closed' if closing else 'open'}"
+                f" ({known.get('as_of', 'earlier')}); this restates it.")
+    confirmed = (ex.get("confirmation") or {}).get("level")
+    by = (ex.get("confirmation") or {}).get("by") or ""
+    # Departs from spec 7.5 (user decision 2026-10-22): the spec waits for
+    # ship counts within 72h and there is no ship-count feed, so a named
+    # tracker's counts in the article, or the side that CONTROLS the
+    # waterway declaring it, confirm the change.
+    if confirmed in ("official", "named_source") and body is not None and _SHIP_COUNT_RE.search(body):
+        return ("signal", f"{event}_confirmed_by_ship_counts",
+                "Ship-tracking figures in the article show the change in traffic.")
+    if confirmed == "official" and _CONTROLLING_PARTY_RE.search(by):
+        return ("signal", f"{event}_declared_by_controlling_party",
+                "Declared by the side that controls the waterway; ship traffic has not yet"
+                " confirmed it.")
+    # Contested: the other side's latest stored statement, if recent - the
+    # US saying Hormuz is open while Iran says it is closed (review point 2).
+    other = ((known or {}).get("said") or {}).get(not closing)
+    day = _as_date(_event(ex, "date"))
+    if other and other.get("by") and (day is None or other.get("date") is None
+                                      or abs((day - other["date"]).days) <= _CONTESTED_WINDOW_DAYS):
+        when = f" on {other['date']:%d %B}" if other.get("date") else ""
+        return ("weak_signal", f"{event}_contested",
+                f"Contested: {other['by']} said{when} that {name} is"
+                f" {'open' if closing else 'closed'}.")
+    return ("weak_signal", f"{event}_unconfirmed",
+            "The statement does not come from the side that controls the waterway, and no"
+            " ship-tracking figures confirm it.")
+
+
+def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None,
+                  waterway_status: dict[str, dict[str, Any]] | None = None,
+                  published: Any = None) -> tuple[str, str, str]:
     """(label, rule, why) from the checked facts.
 
     `why` is the second half of signal_reason, shown to readers in the UI,
@@ -992,6 +1351,13 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
 
     `title` is the article's headline - one rule needs to know the event
     is the article's main subject, not background."""
+    guarded = guarded_code(ex, title, body)
+    if guarded != event_code(ex):
+        if guarded is None:
+            return ("noise", "guard_no_attack_in_text",
+                    "The text reports no attack, so it is not a strike on a site.")
+        ex = {**ex, "event": {**(ex.get("event") or {}), "code": guarded,
+                              "type": EVENT_CODES[guarded]}}
     event = event_code(ex)
     if event is None:
         # The model's reason_facts already says, for THIS article, why it
@@ -1003,7 +1369,7 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
     named = confirmed_by in ("official", "named_source")
     level = _deal(ex, "level") or 0
 
-    if not ex.get("new_development", True):
+    if not is_new(ex, published):
         if event_type(ex) == "M8":   # spec 7.9: an action naming a Gulf company is never ignored
             return ("weak_signal", "m8_repeat",
                     "This repeats an earlier US action against a Gulf company; such actions are always kept.")
@@ -1012,14 +1378,24 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
     unconfirmed = "Only unnamed sources report it so far."
 
     # --- M1 US decisions on Gulf chip sales (spec 7.1)
+    country = _place_country(ex)
+    if event_type(ex) == "M1" and country and country.casefold() not in _US_NAMES:
+        # China's draft export controls were stored as a US draft rule (full
+        # run 2026-10-23): another government's decision is not M1.
+        return ("noise", "m1_not_a_us_decision",
+                "It is another government's decision, not a US decision on chip sales to the Gulf.")
     if event == "m1_rule_or_licence":
-        if official and _event(ex, "effective_date"):
-            return ("signal", "m1_final_with_date",
-                    f"It is a final US decision and takes effect {_event(ex, 'effective_date')}.")
+        # An approval is final when it is granted: review 2026-10-23 (point
+        # 42) - approvals rarely state a start date, and waiting for one held
+        # every licence at weak_signal.
+        if official:
+            date = _event(ex, "effective_date")
+            return ("signal", "m1_final_decision",
+                    f"It is a final US decision{f' and takes effect {date}' if date else ''}.")
         if not named:
             return ("weak_signal", "m1_unnamed_officials", unconfirmed)
-        return ("weak_signal", "m1_no_effective_date",
-                "No date is given for when it takes effect, so shipments cannot be planned on it yet.")
+        return ("weak_signal", "m1_not_official",
+                "The decision is reported, but not by the US government itself.")
     if event == "m1_congress_action":
         if named and (_gulf_company(ex) or _amount(ex)):
             return ("signal", "m1_congress_named_deal",
@@ -1040,6 +1416,11 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
 
     # --- M2 Gulf data centres (spec 7.3, deal levels 7.2)
     if event == "m2_switched_on":
+        if not _is_hardware_deal(ex, title, body):
+            # A bank starting to use OpenAI's models was coded as capacity
+            # switched on (review 2026-10-23, point 20).
+            return ("noise", "m2_not_hardware",
+                    "It is the use of an AI service; no chips, servers or data-centre capacity changed.")
         if _deal(ex, "capacity") and named:
             return ("signal", "m2_switched_on_with_capacity",
                     "The capacity is running now, which shows Gulf AI orders turning into real hardware sales.")
@@ -1057,7 +1438,7 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
                     "A delay, cut or cancellation pushes back hardware sales that were expected.")
         return ("weak_signal", "m2_setback_unconfirmed", unconfirmed)
     if event == "m2_deal_or_construction":
-        if body is not None and not _is_hardware_deal(ex, body):
+        if not _is_hardware_deal(ex, title, body):
             # The model kept calling software / agentic-AI partnerships
             # (OrbitronAI-Aramco Digital) data-centre deals despite the prompt.
             return ("noise", "m2_not_hardware",
@@ -1066,10 +1447,39 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
         if level == 1:
             return ("noise", "m2_pledge",
                     "It is a headline spending figure with no named contract behind it.")
-        stage = ("The order is signed, but the capacity is not built or running yet." if level >= 4 else
+        # A signed order with its amount is money committed to Gulf AI
+        # hardware (review 2026-10-23, point 6: MIS's $500 million, 50 MW
+        # order for Humain was held at weak_signal).
+        if level == 2 and not _amount(ex) and not _deal(ex, "capacity"):
+            # Departs from spec 7.2 (review 2026-10-23, point 21): a
+            # memorandum or partnership with no amount, no capacity and
+            # nothing binding - a company opening an office under a
+            # partnership "to explore" opportunities - commits nothing.
+            return ("noise", "m2_memorandum_without_figures",
+                    "It is a memorandum or partnership with no amount or capacity; nothing is"
+                    " committed yet.")
+        if not _gulf_company(ex):
+            return ("noise", "m2_no_gulf_company",
+                    "No Gulf company is a party to the deal, so it is not a Gulf data-centre deal.")
+        if level >= 4 and _committed_amount(ex) and named:
+            if not (_party_confirms(ex) or official):
+                # MEEZA's lease was cited inside an S&P sector report (full
+                # run 2026-10-23): a third party's mention, not the deal news.
+                return ("weak_signal", "m2_signed_reported_by_third_party",
+                        "A third party mentions the order; neither party nor a government announced it.")
+            return ("signal", "m2_signed_with_amount",
+                    "The order is signed and its value is stated: committed spending on Gulf AI capacity.")
+        stage = ("The order is signed, but no amount is stated." if level >= 4 else
                  "It is a partnership or plan, not a signed order." if level else
                  "It is a plan or construction update; nothing is running yet.")
-        return ("weak_signal", "m2_deal_below_delivery", stage)
+        return ("weak_signal", "m2_deal_below_signed_amount", stage)
+    if event == "m2_company_update":
+        # Nvidia saying its Middle East plans "have not changed" speaks to its
+        # Gulf sales without changing anything (review 2026-10-23, point 7).
+        if named:
+            return ("weak_signal", "m2_company_update",
+                    "The company states where its Gulf plans stand; nothing new is ordered or cancelled.")
+        return ("noise", "m2_company_update_unnamed", "No named source stands behind it.")
     if event == "m2_visit_or_ceremony":
         return ("noise", "m2_visit_or_ceremony",
                 "It is a visit, a ceremony or a repeated target; no capacity has changed.")
@@ -1078,7 +1488,15 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
     if event == "m3_investment":
         if level == 1:
             return ("noise", "m3_pledge", "It is a headline pledge with no named deal behind it.")
-        if level >= 4 and _committed_amount(ex) and named:
+        investees = [c for c in ex.get("companies") or [] if c.get("country") not in set(_GULF_COUNTRIES.values())]
+        if len(investees) > 1:
+            # Several different companies invested in = a roundup or review
+            # of earlier investments (an MGX board meeting listing Anthropic,
+            # Databricks and SpaceX, full run 2026-10-23), not one new one.
+            return ("weak_signal", "m3_several_investments_listed",
+                    "The article lists several investments rather than reporting one new one.")
+        if (level >= 4 and _committed_amount(ex) and named and len(ex.get("companies") or []) >= 2
+                and (_party_confirms(ex) or official)):
             return ("signal", "m3_completed_with_amount",
                     "It is a completed investment with the amount stated: more money for AI spending.")
         why = ("the amount is only an \"up to\" figure" if _up_to(ex)
@@ -1093,60 +1511,98 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
                     "A Gulf fund pulling money out means less fuel for AI spending.")
         return ("weak_signal", "m3_pullback_unconfirmed", unconfirmed)
     if event == "m3_talks":
+        if not _amount(ex):
+            # Talks with no amount - a fund and a US AI company agreeing to
+            # "explore investment opportunities" - commit nothing (review
+            # point 21; same reasoning as a memorandum without figures).
+            return ("noise", "m3_talks_without_amount",
+                    "These are talks with no amount; nothing is committed.")
         return ("weak_signal", "m3_talks", "These are talks; no money has been committed yet.")
 
     # --- M4 War and shipping (spec 7.5)
+    if event_type(ex) == "M4" and not _in_middle_east(ex):
+        # A Black Sea drone attack on a tanker came in through the shipping
+        # search and was stored as a ship incident (review 2026-10-23, point 16).
+        return ("noise", "m4_outside_middle_east",
+                "It happened outside the Middle East and its sea routes.")
     if event == "m4_strike_on_site":
         country = _place_country(ex)
         if official and country in _STRIKE_ALERT_COUNTRIES:
             return ("signal", "m4_strike_confirmed",
-                    f"A government or the site's operator confirms the strike on energy, port or"
-                    f" data-centre infrastructure in {country}.")
+                    f"A government, the attacker or the site's operator confirms the strike on"
+                    f" energy, industrial, port, data-centre or cable infrastructure in {country}.")
         if official:
             return ("weak_signal", "m4_strike_outside_alert_countries",
                     "The strike was not in the UAE, Saudi Arabia, Qatar or Israel, where the"
                     " infrastructure US AI companies depend on sits.")
         return ("weak_signal", "m4_strike_claimed",
-                "Only one side or unnamed sources say it happened; no government or site operator"
-                " has confirmed it.")
+                "Only the other side or unnamed sources say it happened; no government, attacker"
+                " or site operator has confirmed it.")
     if event == "m4_interception":
         return ("noise", "m4_interception", "The missiles or drones were intercepted; nothing was hit.")
     if event == "m4_other_strike":
+        # A Houthi projectile that damaged homes in Najran was kept as
+        # relevant (review 2026-10-23, point 18): it reaches no market.
+        return ("noise", "m4_no_economic_target",
+                "Nothing economic was hit: no energy or industrial site, port, data centre or cable.")
+    if event in ("m4_waterway_closed", "m4_waterway_reopened"):
+        return _waterway_label(ex, body, waterway_status or {})
+    if event == "m4_ship_traffic":
         if named:
-            return ("weak_signal", "m4_other_strike",
-                    "No energy plant, port or data centre was hit.")
-        return ("noise", "m4_other_strike_unnamed", "No named source confirms it.")
-    if event == "m4_waterway_status":
-        # Departs from spec 7.5 (user decision 2026-10-22): the spec alerts a
-        # closure or reopening only once ship counts confirm it within 72h,
-        # and this module has no ship-count feed - so the IRGC's declaration
-        # that Hormuz was closed to all shipping was held at weak_signal.
-        # Now: ship counts quoted in the article from a named tracker
-        # confirm it; otherwise the party that CONTROLS the waterway
-        # declaring it alerts too, marked as not yet confirmed by traffic.
-        by = (ex.get("confirmation") or {}).get("by") or ""
-        if named and body is not None and _SHIP_COUNT_RE.search(body):
-            return ("signal", "m4_waterway_confirmed_by_ship_counts",
-                    "Ship-tracking figures in the article show the change in traffic.")
-        if official and _CONTROLLING_PARTY_RE.search(by):
-            return ("signal", "m4_waterway_declared_by_controlling_party",
-                    "Declared by the side that controls the waterway; ship traffic has not yet"
-                    " confirmed it.")
-        return ("weak_signal", "m4_waterway_unconfirmed_by_ship_counts",
-                "The statement does not come from the side that controls the waterway, and no"
-                " ship-tracking figures confirm it.")
+            return ("weak_signal", "m4_ship_traffic",
+                    "Ship-traffic figures show the state of the route; they are a measure, not a"
+                    " new decision.")
+        return ("noise", "m4_ship_traffic_unnamed", "No named tracker stands behind the figures.")
     if event == "m4_shipping_or_insurance":
-        if named:
+        # The line or insurer itself, among the companies the event is
+        # about, must announce it: freight-rate reports, a ministry's note on
+        # one tanker and a government travel advisory were all signals here
+        # (full run 2026-10-23).
+        by = (ex.get("confirmation") or {}).get("by") or ""
+        # ...and the confirmer must be that company, not a canal or port
+        # authority listed among the parties (the Suez Canal Authority
+        # relaying that Hapag-Lloyd "expects" to return, full run 2026-10-23).
+        if official and _party_confirms(ex) and not _AUTHORITY_RE.search(by):
             return ("signal", "m4_shipping_line_or_insurer",
                     "Shipping lines and insurers changing course moves freight costs and delivery times"
                     " for oil, gas and chip supplies.")
-        return ("weak_signal", "m4_shipping_unconfirmed", unconfirmed)
+        return ("weak_signal", "m4_shipping_not_announced_by_line",
+                "No shipping line or insurer has announced the change itself.")
+    # Ships at sea (review 2026-10-23, points 11-12): a sinking, crew killed
+    # or an authority's count of attacks raises oil, freight and insurance
+    # costs the way a hit on a port does; a single damaged ship is stored.
+    if event == "m4_ship_sunk_or_crew_killed":
+        if named:
+            return ("signal", "m4_ship_sunk_or_crew_killed",
+                    "A ship was sunk or crew were killed, which raises oil, freight and insurance"
+                    " costs on the route.")
+        return ("weak_signal", "m4_ship_sunk_unconfirmed", unconfirmed)
+    if event == "m4_attack_tally":
+        if named and not _event(ex, "date"):
+            # A count with no period ("vessels attacked in recent weeks",
+            # quoted at a forum) measures nothing new.
+            return ("weak_signal", "m4_attack_tally_undated",
+                    "The count of attacks gives no period, so it cannot show a new escalation.")
+        if named:
+            return ("signal", "m4_attack_tally",
+                    "Several ships were attacked, which moves oil, freight and insurance costs on"
+                    " the route.")
+        return ("weak_signal", "m4_attack_tally_unnamed", "No named authority stands behind the count.")
     if event == "m4_ship_incident":
         if named:
             return ("weak_signal", "m4_ship_incident",
-                    "Ships were hit, but no port or energy site was, and no shipping line has"
+                    "A ship was hit, but none sank, no crew were killed and no shipping line has"
                     " stopped the route.")
         return ("noise", "m4_ship_incident_unnamed", "No named source confirms it.")
+    if event == "m4_strike_plan":
+        # A report of planned US strikes moved oil on 22 October (review
+        # 2026-10-23, point 14).
+        if official:
+            return ("signal", "m4_strike_plan_announced",
+                    "A government announces military action that has not happened yet; oil and"
+                    " shipping prices move on it.")
+        return ("weak_signal", "m4_strike_plan_reported",
+                "A plan for new strikes is reported, but not announced by a government.")
     if event == "m4_threat_or_statement":
         if named:
             return ("weak_signal", "m4_threat_or_statement", "It is a threat or statement; nothing has happened yet.")
@@ -1155,19 +1611,27 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
         return ("noise", "m4_commentary", "It is commentary on the war, not a new event.")
 
     # --- M5 Helium and gas supply (spec 7.6)
-    if event == "m5_qatar_force_majeure" and not _qatar_announcement_headline(title):
-        # The model repeatedly took a force majeure mentioned as background
-        # (in a story about Oman's LNG) for the article's event.
-        return ("weak_signal", "m5_force_majeure_in_background",
-                "Qatar's force majeure appears only as background to this story.")
+    # A force majeure mentioned as background (a story about another
+    # country's LNG) carries the date it was declared, weeks back, so the
+    # repeat rule above already drops it - no headline wording test.
+    if event == "m5_qatar_force_majeure" and not _event(ex, "date"):
+        # A force majeure the text gives no time for is background (an EU
+        # gas-market piece mentioning it, full run 2026-10-23); a month
+        # alone is not enough for an alert either (see decide_label).
+        return ("weak_signal", "m5_force_majeure_undated",
+                "The article mentions Qatar's force majeure without saying when it was declared"
+                " or extended.")
     if event == "m5_qatar_force_majeure":
-        if official:
+        by = (ex.get("confirmation") or {}).get("by") or ""
+        if official and re.search(r"\bqatar", by, re.IGNORECASE):
             return ("signal", event,
                     "QatarEnergy announced it itself; Ras Laffan also produces the helium chip factories use.")
         return ("weak_signal", f"{event}_unconfirmed",
                 "QatarEnergy has not announced it itself.")
     if event == "m5_supplier_rationing":
-        if named:
+        # Spec 7.6: the supplier itself announces it. "Suppliers have begun
+        # rationing", per an unnamed consultant, was a signal (2026-10-23).
+        if official:
             return ("signal", event,
                     "Helium rationing or surcharges raise costs for chip factories.")
         return ("weak_signal", f"{event}_unconfirmed", unconfirmed)
@@ -1211,13 +1675,15 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
         return ("weak_signal", "m7_disruption_unconfirmed",
                 "The disruption is not confirmed by a listed chip or AI company.")
     if event == "m7_site_incident":
-        # Departs from spec 7.8 (user decision 2026-10-22), which wants the
-        # company itself to announce a stop: police, fire and ambulance
-        # services confirmed the Intel Kiryat Gat fab explosion the same day
-        # and Intel's shares fell ~4.5%, while Intel never announced a stop.
+        # Spec 7.8: an alert needs the company to announce a stop. The
+        # 2026-10-22 departure (officials confirming the Intel Kiryat Gat
+        # blast -> signal) was reversed by the review of 2026-10-23 (point
+        # 3): no production stop was reported, so it is one weak signal,
+        # and the later hazardous-materials leak joins it as one story.
         if official and any(c["tracked"] or c["ticker"] for c in ex.get("companies", [])):
-            return ("signal", "m7_site_incident_confirmed",
-                    "Officials confirm the incident at a listed chip company's site in Israel.")
+            return ("weak_signal", "m7_site_incident_confirmed",
+                    "Officials confirm the incident at a listed chip company's site in Israel;"
+                    " the company has not announced a production stop.")
         return ("weak_signal", "m7_site_incident", "No official body has confirmed it yet.")
     if event == "m7_home_front_restriction":
         place = (_event(ex, "place") or "").casefold()
@@ -1233,10 +1699,24 @@ def _decide_label(ex: dict[str, Any], title: str = "", body: str | None = None) 
                     "The deal is agreed and the price is stated.")
         return ("weak_signal", "m7_acquisition_talks",
                 "The deal is not agreed yet, or no price is stated.")
+    if event == "m7_company_deal":
+        # Tower Semiconductor's capacity deal with Semtech had no code and
+        # was stored as noise (review 2026-10-23, point 9). Same bar as a
+        # Gulf order: signed with its value -> signal.
+        if level >= 4 and _committed_amount(ex) and named:
+            return ("signal", "m7_company_deal_signed_with_amount",
+                    "The deal is signed and its value is stated.")
+        return ("weak_signal", "m7_company_deal",
+                "It is business news from an Israeli chip or AI company; no signed amount is stated.")
     if event == "m7_commentary":
         return ("noise", "m7_commentary", "It is commentary on the war, not a new event.")
 
     # --- M8 Enforcement against a named Gulf company (spec 7.9)
+    if event == "m8_enforcement" and body is not None and not _AI_DATA_RE.search(f"{title}\n{body}"):
+        # US sanctions on oil-tanker agents were read as chip enforcement
+        # (full run 2026-10-23). M8 is the gate on US chips reaching the Gulf.
+        return ("noise", "m8_not_chips_or_technology",
+                "The action is not about chips or technology, so it does not affect US chip sales.")
     if event == "m8_enforcement":
         gulf = _gulf_company(ex)
         if gulf:
@@ -1277,10 +1757,17 @@ _ROWS_BY_CODE: dict[tuple[str, str], list[str]] = {
     ("m3_investment", "good"): ["A Gulf sovereign fund invests in a US AI company"],
     ("m3_pullback", "bad"): ["A Gulf fund pulls back or misses a commitment"],
     ("m4_strike_on_site", "bad"): ["Hormuz or the Red Sea is closed, or ships are attacked"],
-    ("m4_waterway_status", "bad"): ["Hormuz or the Red Sea is closed, or ships are attacked"],
+    ("m4_waterway_closed", "bad"): ["Hormuz or the Red Sea is closed, or ships are attacked"],
+    # Ships attacked are the spec row's own words (review 2026-10-23, point
+    # 24: tanker attacks named no US stock).
+    ("m4_ship_incident", "bad"): ["Hormuz or the Red Sea is closed, or ships are attacked"],
+    ("m4_ship_sunk_or_crew_killed", "bad"): ["Hormuz or the Red Sea is closed, or ships are attacked"],
+    ("m4_attack_tally", "bad"): ["Hormuz or the Red Sea is closed, or ships are attacked"],
+    ("m4_ship_traffic", "bad"): ["Hormuz or the Red Sea is closed, or ships are attacked"],
     ("m7_site_incident", "bad"): ["Missile strikes or shutdowns in Israel"],
     ("m4_shipping_or_insurance", "bad"): ["Hormuz or the Red Sea is closed, or ships are attacked"],
-    ("m4_waterway_status", "good"): ["A ceasefire holds and ships move through Hormuz again"],
+    ("m4_waterway_reopened", "good"): ["A ceasefire holds and ships move through Hormuz again"],
+    ("m4_ship_traffic", "good"): ["A ceasefire holds and ships move through Hormuz again"],
     ("m4_shipping_or_insurance", "good"): ["A ceasefire holds and ships move through Hormuz again"],
     ("m5_qatar_force_majeure", "bad"): ["Qatar's helium plant stays offline",
                                         "Qatar's helium plant stays offline (other side)"],
@@ -1322,12 +1809,14 @@ def read_through(ex: dict[str, Any], name_index: dict[str, dict[str, Any]]) -> l
     if event_code(ex) is None or ex.get("news_effect") not in ("good", "bad"):
         return []
     affected: dict[str, dict[str, Any]] = {}
-    # A fund's table counterparties (Mubadala -> GlobalFoundries) describe
-    # what it already owns, not what a NEW investment moves: for M3 only the
-    # events table row applies.
     companies = [] if event_type(ex) == "M3" else ex.get("companies", [])
     for c in companies:
         row = name_index.get(c["name"].casefold()) if c["tracked"] else None
+        # A fund's counterparties (Mubadala -> GlobalFoundries) are what it
+        # OWNS, which its new deals do not move - for any event type (review
+        # 2026-10-23, point 23). Which rows are funds is the table's `kind`.
+        if (row or {}).get("kind") == "fund":
+            continue
         for cp in (row or {}).get("counterparties", []):
             share = cp["share_price_on_good_news"]
             affected.setdefault(cp["counterparty_ticker"], {
@@ -1335,8 +1824,16 @@ def read_through(ex: dict[str, Any], name_index: dict[str, dict[str, Any]]) -> l
                 "role": "affected",
                 "share_price": share if ex["news_effect"] == "good" else _FLIP[share],
                 "relationship": plain_relationship(cp["relationship"])})
+    # An Israeli site event that names its company moves that company only:
+    # the generic Israel row added Nvidia and Tower to every Intel fab row
+    # (review 2026-10-23, point 22). The company comes from the table
+    # ("Intel Kiryat Gat") or as a listed name the model wrote ("Intel").
+    own = {c["ticker"] for c in ex.get("companies", []) if c.get("ticker")}
+    if event_type(ex) == "M7" and affected:
+        return list(affected.values())
     for row in _event_rows(event_code(ex), ex["news_effect"]):
-        for c in row["affected_companies"]:
+        named = [c for c in row["affected_companies"] if c["ticker"] in own]
+        for c in (named if event_type(ex) == "M7" and named else row["affected_companies"]):
             affected.setdefault(c["ticker"], {
                 "name": c["company_name"], "ticker": c["ticker"], "role": "affected",
                 "share_price": c["share_price"], "relationship": row["why"]})
@@ -1352,13 +1849,15 @@ _FALLBACK_REASON = ("This article could not be assessed automatically: the model
 
 def _model_result(article: dict[str, Any], source: str, system: str,
                   name_index: dict[str, dict[str, Any]],
-                  counterparty_tickers: dict[str, str]) -> dict[str, Any] | None:
+                  counterparty_tickers: dict[str, str],
+                  waterway_status: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
     title = article.get("title") or ""
     body = article.get("body") or ""
     truncated = len(body) > _BODY_MAX_CHARS
     body = body[:_BODY_MAX_CHARS]
     tracked = tracked_names_in(f"{title}\n{body}", name_index)
-    raw = _call_model(system, _user_message(article, source, body, tracked))
+    user = _user_message(article, source, body, tracked)
+    raw = _call_model(system, user)
     if raw is None:
         return None                       # not stored: the next run retries it
     base: dict[str, Any] = {"extracted_by": {"model": config.MIDDLE_EAST_SIGNAL_MODEL,
@@ -1366,7 +1865,25 @@ def _model_result(article: dict[str, Any], source: str, system: str,
     if truncated:
         base["body_truncated"] = True
     ex, dropped = check_extraction(raw, title, body, name_index, counterparty_tickers,
-                                   outlet_name(article, source))
+                                   outlet_name(article, source), _published(article))
+    invented = [d.split(":", 1)[1] for d in dropped if d.startswith("unknown_event:")]
+    if ex is None and invented:
+        # The model blends two codes into one that does not exist
+        # ("m4_ship_attack_tally", "m7_site_setback": 3 of 361 articles in
+        # the full run, the same on a re-run). Guessing which code it meant
+        # would be ours, not the text's, so it is asked once to pick from
+        # the list; a second miss stays model_output_unusable.
+        logger.info("[MIDDLE_EAST_SIGNAL] repair call url=%s: invented code %s",
+                    article.get("url"), ", ".join(invented))
+        repaired = _call_model(system, user, [
+            {"role": "assistant", "content": raw},
+            {"role": "user", "content":
+                f"The event code {', '.join(invented)} is not one of the codes listed in STEP 1. Use"
+                " only a code from that list, exactly as written, or null when none fits. Return the"
+                " whole JSON answer again."}])
+        if repaired is not None:
+            ex, dropped = check_extraction(repaired, title, body, name_index, counterparty_tickers,
+                                           outlet_name(article, source), _published(article))
     if dropped:
         logger.info("[MIDDLE_EAST_SIGNAL] dropped from model answer url=%s: %s",
                     article.get("url"), ", ".join(dropped))
@@ -1376,7 +1893,31 @@ def _model_result(article: dict[str, Any], source: str, system: str,
         return {"signal": "weak_signal", "reason": _FALLBACK_REASON, "entities": [],
                 "metadata": {**base, "rule": "model_output_unusable"}}
 
-    label, rule, sentence = decide_label(ex, title, body)
+    label, rule, sentence = decide_label(ex, title, body, waterway_status, _published(article))
+    # The article's other new events (review point 38): each judged the same
+    # way; the strongest becomes the row's event, the rest stay listed.
+    published = _as_date(_published(article))
+    for i, other in enumerate(list(ex.get("other_events") or [])):
+        if other["event"]["code"] in _STATEMENT_CODES:
+            continue
+        # Only the article's OWN news takes over the row: an event within
+        # _OTHER_EVENT_FRESH_DAYS of it. An analysis piece recalling a
+        # sinking from days before became a sinking alert (2026-10-23).
+        o_day = _exact_day(other["event"].get("date"))
+        if not (o_day and published and (published - o_day).days <= _OTHER_EVENT_FRESH_DAYS):
+            continue
+        candidate = {**ex, "event": other["event"], "confirmation": other["confirmation"], "deal": None}
+        o_label, o_rule, o_sentence = decide_label(candidate, title, body, waterway_status,
+                                                   _published(article))
+        if _STORY_LABEL_RANK.get(o_label, 2) < _STORY_LABEL_RANK.get(label, 2):
+            previous = {"event": ex["event"], "confirmation": ex["confirmation"],
+                        "facts": ex.get("reason_facts")}
+            ex["other_events"][i] = {k: v for k, v in previous.items() if v}
+            ex["event"], ex["confirmation"] = other["event"], other["confirmation"]
+            ex.pop("deal", None)                 # a deal belongs to the event it came with
+            if other.get("facts"):
+                ex["reason_facts"] = other["facts"]
+            label, rule, sentence = o_label, o_rule, o_sentence
     # Each model field is stored ONCE, in the column made for it:
     #  - companies -> entities_json (role "subject"), with the read-through
     #    companies (role "affected") - so entity_names_normalized finds a row
@@ -1410,6 +1951,7 @@ def classify_middle_east_signal_batch(
     companies: list[dict[str, Any]],
     us_universe: list[dict[str, Any]] | None = None,
     stored_event_members: dict[str, list[dict[str, Any]]] | None = None,
+    waterway_status: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Classify new articles against the company table (already checked by
     company_table_problems). Returns one {"article", "result"} per article
@@ -1451,7 +1993,8 @@ def classify_middle_east_signal_batch(
     def judge(i: int) -> dict[str, Any] | None:
         article = articles[i]
         try:
-            return _model_result(article, source_name(article), system, name_index, cp_tickers)
+            return _model_result(article, source_name(article), system, name_index, cp_tickers,
+                                 waterway_status)
         except Exception:
             logger.exception("[MIDDLE_EAST_SIGNAL] classify failed url=%s", article.get("url"))
             return None
@@ -1486,6 +2029,90 @@ def classify_middle_east_signal_batch(
         round(100 * used["cached"] / used["prompt"]) if used["prompt"] else 0,
         used["completion"], used["cost"])
     return judged
+
+
+# ---------------------------------------------------------------------------
+# Market reference - a check on what the run may have missed
+# ---------------------------------------------------------------------------
+# Prices are never an event and never move a label (a price report is
+# m4_commentary). They are how the review of 2026-10-23 found the biggest
+# miss: Brent at $110 on a day with no signal. So each run logs the oil
+# reference and every US stock this module can name - from the company and
+# events tables, not a hand list - with the biggest daily moves of the last
+# 10 trading days next to the signal rows stored that day: a big move on a
+# day with none is a row to look at by hand. Prices are news-retrieval's
+# DynamoDB market data (GET /market/price-history).
+
+
+def market_reference_tickers(companies: list[dict[str, Any]]) -> list[str]:
+    """The oil reference (config.MIDDLE_EAST_OIL_REFERENCE_TICKER), then every
+    US ticker the company table's counterparties and the events table name."""
+    tickers = [config.MIDDLE_EAST_OIL_REFERENCE_TICKER]
+    for c in companies:
+        tickers += [cp["counterparty_ticker"] for cp in c.get("counterparties") or []]
+    for row in MIDDLE_EAST_EVENTS:
+        tickers += [a["ticker"] for a in row["affected_companies"]]
+    return list(dict.fromkeys(t for t in tickers if t))
+
+
+# What makes a market day unusual, measured on 95 days of prices (2026-10-23):
+# single-stock jumps are mostly company news (Amazon +5% on 19 Oct); the
+# Middle East shows as oil, or as many of these stocks moving together (22
+# Oct: oil +2.8%, 9x its normal move; 13 stocks over 3x theirs).
+UNUSUAL_MOVE_FACTOR = 3.0         # x the ticker's median daily move
+UNUSUAL_MIN_STOCKS = 3            # stocks moving unusually on the same day
+_MOVE_BASELINE_DAYS = 60
+_MOVE_MIN_BASELINE = 10
+
+
+def unusual_market_days(histories: dict[str, list[dict[str, Any]]], tickers: list[str],
+                        since: str) -> list[dict[str, Any]]:
+    """Unusual days on or after `since` (YYYY-MM-DD): oil (tickers[0]) moving
+    UNUSUAL_MOVE_FACTOR x its median daily move of the previous
+    _MOVE_BASELINE_DAYS days, or UNUSUAL_MIN_STOCKS stocks doing so. Each:
+    {"day", "oil": (pct, x) or None, "stocks": [(ticker, pct, x)]}."""
+    flagged: dict[str, dict[str, Any]] = {}
+    for i, ticker in enumerate(tickers):
+        closes = sorted((h["date"], h["adjusted_close"]) for h in histories.get(ticker) or []
+                        if h.get("adjusted_close"))
+        rets = [(day, 100 * (close / prev - 1))
+                for (_, prev), (day, close) in zip(closes, closes[1:]) if prev]
+        for j, (day, pct) in enumerate(rets):
+            base = [abs(r) for _, r in rets[max(0, j - _MOVE_BASELINE_DAYS):j]]
+            if day < since or len(base) < _MOVE_MIN_BASELINE:
+                continue
+            normal = statistics.median(base)
+            if not normal or abs(pct) < UNUSUAL_MOVE_FACTOR * normal:
+                continue
+            entry = flagged.setdefault(day, {"day": day, "oil": None, "stocks": []})
+            if i == 0:
+                entry["oil"] = (pct, abs(pct) / normal)
+            else:
+                entry["stocks"].append((ticker, pct, abs(pct) / normal))
+    return [e for _, e in sorted(flagged.items())
+            if e["oil"] or len(e["stocks"]) >= UNUSUAL_MIN_STOCKS]
+
+
+def missed_move_lines(days: list[dict[str, Any]], oil_ticker: str,
+                      signals_by_day: dict[str, int]) -> list[str]:
+    """One line per unusual day - COVERED when a Middle East signal was stored
+    that day or the day before, MISS otherwise - then the score."""
+    lines, misses = [], 0
+    for e in days:
+        day = date.fromisoformat(e["day"])
+        covered = signals_by_day.get(e["day"], 0) + signals_by_day.get(f"{day - timedelta(days=1)}", 0)
+        what = []
+        if e["oil"]:
+            what.append(f"oil ({oil_ticker}) {e['oil'][0]:+.1f}% ({e['oil'][1]:.1f}x normal)")
+        if e["stocks"]:
+            top = sorted(e["stocks"], key=lambda s: -s[2])[:5]
+            what.append(f"{len(e['stocks'])} stocks over {UNUSUAL_MOVE_FACTOR:g}x normal ("
+                        + ", ".join(f"{t} {p:+.1f}%" for t, p, _ in top) + ")")
+        misses += not covered
+        lines.append(f"{'COVERED' if covered else 'MISS'} {e['day']}: " + "; ".join(what)
+                     + f" - Middle East signals that day or the day before: {covered}")
+    lines.append(f"missed-move score: {misses} of {len(days)} unusual days had no Middle East signal")
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -1590,6 +2217,11 @@ def corroboration_for(article: dict[str, Any],
 #     signal_detection IN ('signal','weak_signal') AND NOT (metadata ? 'in_story')
 # Regrouped from scratch on every run, so a later arrival can re-seed.
 _STORY_WINDOW_HOURS = 72
+# An incident at one site develops over days, not hours: the Intel Kiryat
+# Gat blast (14 Oct) and the hazardous-materials leak at the same fab (19
+# Oct) were two stories under 72h (review 2026-10-23, point 36).
+_SITE_STORY_CODES = frozenset({"m7_site_incident", "m7_site_disruption"})
+_SITE_STORY_WINDOW_HOURS = 14 * 24
 _STORY_LABEL_RANK = {"signal": 0, "weak_signal": 1}
 
 
@@ -1602,6 +2234,10 @@ _ME_GENERIC_KEYS = frozenset({
     "kuwait", "bahrain", "oman", "gcc", "gulf", "middle east", "uae government",
     "coalition restore legitimacy", "crly", "coalition", "saudi-led coalition",
 })
+# Words that name a country or region but no specific place.
+_ME_GENERIC_WORDS = frozenset(
+    w for k in _ME_GENERIC_KEYS | _MIDDLE_EAST_COUNTRIES for w in k.replace("-", " ").split()
+) | {"province", "region", "kingdom", "territory", "territories"}
 # Direction and position words around a place: "eastern Strait of Hormuz"
 # and "east of the Strait of Hormuz" are one place.
 _PLACE_FILLER = frozenset({
@@ -1643,11 +2279,15 @@ def build_middle_east_stories(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     signal_reason, entities (parsed) and metadata.
 
     The seed - the row a reader lands on - is a signal before a weak
-    signal, then the best-corroborated, then the earliest."""
+    signal, then the best-confirmed, then the best-corroborated, then the
+    earliest (confirmation added after review 2026-10-23, point 37: a
+    better-confirmed later report must lead)."""
     for r in rows:
         r["_keys"] = story_keys(r)
     ordered = sorted(rows, key=lambda r: (
         _STORY_LABEL_RANK.get(r.get("signal_detection"), 2),
+        _CONFIRMATION_RANK.get(((r.get("metadata") or {}).get("confirmation") or {}).get("level"), 3),
+        *_lead_quality(r),
         -int(((r.get("metadata") or {}).get("corroboration") or {}).get("count") or 0),
         r.get("published").timestamp() if r.get("published") else float("inf")))
     stories: list[dict[str, Any]] = []
@@ -1659,9 +2299,12 @@ def build_middle_east_stories(rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 continue
             shared = seed["_keys"] & row["_keys"]
             gap = _hours_apart(seed.get("published"), row.get("published"))
-            # A row with no published time cannot be placed in the 72h
-            # window, so it never joins a story.
-            if shared and gap is not None and gap <= _STORY_WINDOW_HOURS:
+            window = (_SITE_STORY_WINDOW_HOURS
+                      if {event_code(seed["metadata"]), event_code(row["metadata"])} <= _SITE_STORY_CODES
+                      else _STORY_WINDOW_HOURS)
+            # A row with no published time cannot be placed in the window,
+            # so it never joins a story.
+            if shared and gap is not None and gap <= window:
                 story["members"].append({"row": row, "shared": shared})
                 break
         else:
@@ -1690,36 +2333,154 @@ def build_middle_east_stories(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 # attacks fold only on a shared ship or company name: several tankers hit
 # near Hormuz on one day are separate events.
 _SAME_EVENT_WINDOW_HOURS = 48
+# With both events dated, reports of one event fold however far apart they
+# were published, up to this - a sinking on 13 October was still being
+# reported on the 19th, and each report outside 48h became its own alert.
+_SAME_EVENT_DATED_WINDOW_HOURS = 14 * 24
+_SAME_EVENT_DATE_SLACK_DAYS = 1      # "Sunday night" vs "Monday" for one event
+_NAMED_SHIP_DATE_SLACK_DAYS = 3      # hit one day, sank under tow later
 _PLACE_BOUND_CODES = frozenset({
-    "m4_waterway_status", "m4_strike_on_site", "m4_other_strike",
-    "m5_qatar_force_majeure", "m7_site_incident", "m7_site_disruption",
+    "m4_waterway_closed", "m4_waterway_reopened", "m4_strike_on_site", "m4_other_strike",
+    "m4_attack_tally", "m4_strike_plan", "m5_qatar_force_majeure", "m7_site_incident", "m7_site_disruption",
     "m7_home_front_restriction"})
 _CONFIRMATION_RANK = {"official": 0, "named_source": 1, "unnamed": 2}
 
 
-def _subject_keys(row: dict[str, Any]) -> set[str]:
+def _lead_quality(row: dict[str, Any]) -> tuple[int, int, int]:
+    """Tie-breakers for which report leads an event or story, after label
+    and confirmation (review point 37): (1) the target, operator or an
+    authority confirming before the attacker's own claim - both "official",
+    but a target confirming a hit is the stronger evidence; (2) a report
+    whose facts sentence passed the text check before one that fell back to
+    its headline; (3) a dated event before an undated one."""
+    md = row.get("metadata") or {}
+    by = (md.get("confirmation") or {}).get("by") or ""
+    attacker = int(event_code(md) in _ATTACK_CODES and bool(_CONTROLLING_PARTY_RE.search(by)))
+    fallback = int((row.get("signal_reason") or "").startswith("Headline:"))
+    undated = int(not _event(md, "date"))
+    return attacker, fallback, undated
+
+
+def _subject_keys(row: dict[str, Any],
+                  name_index: dict[str, dict[str, Any]] | None = None) -> set[str]:
+    """The specific names an event can be matched on: the companies the
+    row is about, plus - with the company table - any tracked company its
+    HEADLINE names. One Aramco HQ strike was reported at "Aramco compound,
+    Eastern Province" and at "Dhahran", and the model listed different
+    parties each time; both headlines name Aramco (review 2026-10-23)."""
     keys: set[str] = set()
     for e in row.get("entities") or []:
         if e.get("role") == "subject":
             keys |= _entity_keys(e.get("name") or "")
+    if name_index:
+        for name in tracked_names_in(row.get("title") or "", name_index):
+            keys |= _entity_keys(name)
     return {k for k in keys if k and _is_specific(k) and k not in _ME_GENERIC_KEYS}
 
 
-def _same_event(kept: dict[str, Any], row: dict[str, Any]) -> bool:
-    code = event_code(row["metadata"])
-    if not code or code != event_code(kept["metadata"]):
+# Codes that describe the same kind of happening - an attack - so one
+# attack coded differently by two reports ("Iran claims seven ships hit":
+# a ship attack in one, a strike in another) is still one event.
+_ATTACK_CODES = frozenset({"m4_strike_on_site", "m4_other_strike", "m4_ship_incident",
+                           "m4_ship_sunk_or_crew_killed"})
+_SHIP_CODES = frozenset({"m4_ship_incident", "m4_ship_sunk_or_crew_killed"})
+_ATTACK_OR_INTERCEPTION = _ATTACK_CODES | {"m4_interception"}
+_STRIKE_PLAN_WINDOW_HOURS = 72
+
+
+def _same_place(a: str | None, b: str | None) -> bool:
+    """One place written two ways: equal place keys, or one inside the
+    other ("Strait of Hormuz" within "Persian Gulf and Strait of Hormuz")."""
+    if not a or not b:
         return False
+    ka, kb = set(place_key(a).split()), set(place_key(b).split())
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    smaller = ka if len(ka) <= len(kb) else kb
+    # A country or region alone ("Saudi Arabia") is inside every place in
+    # it - it never joins two strikes on its own.
+    if all(w in _ME_GENERIC_WORDS for w in smaller):
+        return False
+    return ka <= kb or kb <= ka
+
+
+def _same_code(a: str | None, b: str | None) -> bool:
+    return bool(a) and (a == b or (a in _ATTACK_CODES and b in _ATTACK_CODES))
+
+
+def _same_event(kept: dict[str, Any], row: dict[str, Any],
+                name_index: dict[str, dict[str, Any]] | None = None) -> bool:
+    code, kept_code = event_code(row["metadata"]), event_code(kept["metadata"])
     gap = _hours_apart(kept.get("published"), row.get("published"))
-    if gap is None or gap > _SAME_EVENT_WINDOW_HOURS:
+    day_a, day_b = (_exact_day(_event(r["metadata"], "date")) for r in (kept, row))
+    by_a, by_b = ((r["metadata"].get("confirmation") or {}).get("by") for r in (kept, row))
+    # A drone "intercepted" whose debris killed workers at Shaybah was coded
+    # an interception in four reports and a strike on the site in a fifth
+    # (full run 2026-10-23): the same attack when the day and place match
+    # exactly - a strike and an interception at one site a day apart are two.
+    if {code, kept_code} & {"m4_interception"} and code in _ATTACK_OR_INTERCEPTION and \
+            kept_code in _ATTACK_OR_INTERCEPTION:
+        place_a, place_b = (_event(r["metadata"], "place") for r in (kept, row))
+        return bool(day_a and day_a == day_b and (
+            _same_place(place_a, place_b)
+            or _subject_keys(kept, name_index) & _subject_keys(row, name_index)))
+    if not _same_code(code, kept_code):
         return False
-    if _subject_keys(kept) & _subject_keys(row):
+    # One count of attacks: dated within a day, and on the same waters - or
+    # from the same speaker, since one side's claim is re-reported with the
+    # place written three ways ("wider Gulf", "northern Arabian Gulf") and
+    # the speaker two ways ("IRGC", "Iranian forces"; full run 2026-10-23).
+    if code == "m4_attack_tally" and kept_code == "m4_attack_tally":
+        if not (day_a and day_b and abs((day_a - day_b).days) <= _SAME_EVENT_DATE_SLACK_DAYS
+                and gap is not None and gap <= _SAME_EVENT_DATED_WINDOW_HOURS):
+            return False
+        places = [_event(r["metadata"], "place") for r in (kept, row)]
+        return _same_place(*places) or bool(by_a and by_b and _same_source(by_a, by_b))
+    # A reported plan to strike one country, re-reported within days (the
+    # "after the midterms" plan: a diplomat on the 20th, Trump on the 22nd).
+    # Its date is the report's, so the publication window decides.
+    if code == "m4_strike_plan" and kept_code == "m4_strike_plan":
+        target_a, target_b = (_place_country(r["metadata"]) for r in (kept, row))
+        return bool(target_a and target_a == target_b and gap is not None
+                    and gap <= _STRIKE_PLAN_WINDOW_HOURS)
+    subjects_a, subjects_b = _subject_keys(kept, name_index), _subject_keys(row, name_index)
+    shared = subjects_a & subjects_b
+    # Two deals by one Gulf company are two deals: when both name two or
+    # more parties, they must share two (Humain-Nvidia 84 MW and
+    # Humain-Nebius NEOM folded on "Humain" alone, full run 2026-10-23).
+    if (code in _DEAL_CODES and kept_code in _DEAL_CODES and len(subjects_a) >= 2
+            and len(subjects_b) >= 2 and len(shared) < 2):
+        return False
+    # A named ship is one event across a wider spread of dates: GFS Pride
+    # was hit on the 13th and sank under tow - reports dated 13 and 15 Oct.
+    slack = (_NAMED_SHIP_DATE_SLACK_DAYS if shared and code in _SHIP_CODES and kept_code in _SHIP_CODES
+             else _SAME_EVENT_DATE_SLACK_DAYS)
+    if day_a and day_b:
+        # Both dated: the event's own day decides, not when it was reported.
+        if (gap is None or gap > _SAME_EVENT_DATED_WINDOW_HOURS
+                or abs((day_a - day_b).days) > slack):
+            return False
+    elif gap is None or gap > _SAME_EVENT_WINDOW_HOURS:
+        return False
+    if shared:
         return True
     place_a, place_b = (_event(r["metadata"], "place") for r in (kept, row))
-    return (code in _PLACE_BOUND_CODES and bool(place_a) and bool(place_b)
-            and place_key(place_a) == place_key(place_b))
+    same_place = _same_place(place_a, place_b)
+    if code in _PLACE_BOUND_CODES and kept_code in _PLACE_BOUND_CODES and same_place:
+        return True
+    # Ship attacks with no ship named (review point 35: one day's mine
+    # strikes were three rows). Several tankers can be hit near Hormuz in
+    # a day, so all three must match: the SAME day (no slack), the same
+    # place, and the same source reporting it.
+    if code in _SHIP_CODES and kept_code in _SHIP_CODES and same_place and day_a and day_a == day_b:
+        return bool(by_a and by_b and _same_source(by_a, by_b))
+    return False
 
 
-def find_same_event_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _same_event_groups(rows: list[dict[str, Any]],
+                       name_index: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """[{"kept": row, "duplicates": [rows]}] for every event reported more
     than once. The kept row is the one a reader should see: a signal before
     a weak signal, then the best-confirmed, then the most corroborated,
@@ -1729,17 +2490,299 @@ def find_same_event_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ordered = sorted(rows, key=lambda r: (
         _STORY_LABEL_RANK.get(r.get("signal_detection"), 2),
         _CONFIRMATION_RANK.get((r["metadata"].get("confirmation") or {}).get("level"), 3),
+        *_lead_quality(r),
         -int((r["metadata"].get("corroboration") or {}).get("count") or 0),
         r.get("published").timestamp() if r.get("published") else float("inf")))
     groups: list[dict[str, Any]] = []
     for row in ordered:
         for group in groups:
-            if _same_event(group["kept"], row):
+            if _same_event(group["kept"], row, name_index):
                 group["duplicates"].append(row)
                 break
         else:
-            groups.append({"kept": row, "duplicates": []})
+            # A noise report of an event (four "drone intercepted" reports of
+            # the Shaybah hit) folds into the alert, but never leads one.
+            if row.get("signal_detection") != "noise":
+                groups.append({"kept": row, "duplicates": []})
     return [g for g in groups if g["duplicates"]]
+
+
+def find_same_event_groups(rows: list[dict[str, Any]],
+                           name_index: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """_same_event_groups over `rows`, leaving out noise rows whose event is
+    not new: an article mentioning March's Qatar force majeure as background
+    is not a report of this week's extension, and must not corroborate or
+    confirm it (full run 2026-10-23)."""
+    return _same_event_groups([r for r in rows if r.get("signal_detection") != "noise"
+                               or is_new(r.get("metadata") or {}, r.get("published"))], name_index)
+
+
+_IRAN_FORCES_RE = re.compile(r"\b(?:irgc|revolutionary guards?|iranian (?:armed )?forces|iran's (?:armed )?forces)\b",
+                             re.IGNORECASE)
+_HOUTHI_FORCES_RE = re.compile(r"\b(?:houthi\w*|ansar ?allah|yemeni armed forces)\b", re.IGNORECASE)
+
+
+def _armed_side(name: str) -> str | None:
+    if _IRAN_FORCES_RE.search(name):
+        return "iran"
+    if _HOUTHI_FORCES_RE.search(name):
+        return "houthis"
+    return None
+
+
+def _source_words(name: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", normalize_text(name).replace("'s", ""))
+            if w not in _NAME_STOPWORDS]
+
+
+def _same_source(a: str, b: str) -> bool:
+    """"IRGC Navy" and "IRGC" are one source, and so are "Iran's navy" and
+    "Iranian Navy" (a word and its adjective: one starts with the other);
+    "UKMTO" and "Maritime and Port Authority of Singapore" are two."""
+    na, nb = normalize_text(a), normalize_text(b)
+    if na == nb or _whole_word(na, nb) or _whole_word(nb, na):
+        return True
+    # One side's armed forces, however named: "IRGC", "IRGC Navy", "Iranian
+    # forces" (full run 2026-10-23: one claim of four ships hit stayed three
+    # rows). Only military / official speakers of the side, so "Iran's
+    # foreign minister" and the "Iranian navy" still compare by name.
+    side_a, side_b = _armed_side(a), _armed_side(b)
+    if side_a and side_a == side_b:
+        return True
+    wa, wb = _source_words(a), _source_words(b)
+    if not wa or len(wa) != len(wb):
+        return False
+    return all(x == y or (min(len(x), len(y)) >= 4 and (x.startswith(y) or y.startswith(x)))
+               for x, y in zip(wa, wb))
+
+
+def confirmed_across_reports(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The event's confirmation when its reports TOGETHER confirm more than
+    the lead report does alone (review 2026-10-23, point 4: the "$110, nine
+    ships attacked" report named no source, while another report of the same
+    sinking quoted the maritime authority). `reports` = the lead row first,
+    then every report folded into it.
+      - any report confirmed officially -> official;
+      - two or more DIFFERENT named sources -> official;
+      - one source repeated by many outlets, or unnamed only -> no change.
+    Returns {"level": "official", "by": [names]} or None. Uses only each
+    row's stored metadata.confirmation."""
+    own = (reports[0]["metadata"].get("confirmation") or {}).get("level")
+    if own == "official":
+        return None
+    named: list[tuple[str, str]] = []
+    for r in reports:
+        conf = r["metadata"].get("confirmation") or {}
+        by = conf.get("by")
+        if conf.get("level") in ("official", "named_source") and by:
+            if not any(_same_source(by, seen) for _, seen in named):
+                named.append((conf["level"], by))
+    officials = [by for level, by in named if level == "official"]
+    if officials:
+        return {"level": "official", "by": officials[:1] + [b for _, b in named if b not in officials[:1]]}
+    if len(named) >= 2:
+        return {"level": "official", "by": [b for _, b in named]}
+    return None
+
+
+def relabel_confirmed(kept: dict[str, Any], combined: dict[str, Any],
+                      name_index: dict[str, dict[str, Any]],
+                      waterway_status: dict[str, dict[str, Any]] | None = None,
+                      ) -> tuple[str, str, str] | None:
+    """(label, rule, reason) for the lead row judged with the combined
+    confirmation, when that RAISES its label; else None. Rebuilt from the
+    stored row - no model call. `reason` keeps the stored facts sentence and
+    says who confirmed it."""
+    md = kept["metadata"]
+    companies = [{"name": e.get("name") or "", "ticker": e.get("ticker"), "country": e.get("country"),
+                  "tracked": (e.get("name") or "").casefold() in name_index}
+                 for e in kept.get("entities") or [] if e.get("role") == "subject"]
+    ex = {**md, "companies": companies}
+    _, _, old_why = decide_label(ex, kept.get("title") or "", None, waterway_status, kept.get("published"))
+    upgraded = {**ex, "confirmation": {"level": "official", "by": combined["by"][0]}}
+    label, rule, why = decide_label(upgraded, kept.get("title") or "", None, waterway_status,
+                                    kept.get("published"))
+    if _STORY_LABEL_RANK.get(label, 2) >= _STORY_LABEL_RANK.get(kept.get("signal_detection"), 2):
+        return None
+    facts = kept.get("signal_reason") or ""
+    if old_why and facts.endswith(old_why):
+        facts = facts[: -len(old_why)].rstrip()
+    names = combined["by"]
+    who = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+    return (label, f"{rule}_confirmed_across_reports",
+            " ".join(p for p in (facts, why, f"Confirmed across reports by {who}.") if p))
+
+
+# --- Guardrails: what the TEXT must show for a strong code to stand --------
+# The model's code is a reading; these checks need the words that make it
+# true. A code that fails is lowered to the code its text does support -
+# a guardrail can only lower a label, never raise one (full run 2026-10-23:
+# a tanker explosion and a shot-down helicopter were "sunk or crew killed",
+# an oil spill and a destroyed launcher were "strikes on a site").
+_SANK_OR_KILLED_RE = re.compile(
+    r"\b(?:sank|sunk|sinking|sink|capsiz\w*|killed|dead|died|deaths?|fatalit\w*|lost their lives)\b",
+    re.IGNORECASE)
+_SHIP_WORD_RE = re.compile(
+    r"\b(?:ships?|vessels?|tankers?|supertankers?|carriers?|freighters?|boats?|bulkers?|containerships?)\b",
+    re.IGNORECASE)
+_ATTACK_WORD_RE = re.compile(
+    r"\b(?:strikes?|struck|attack\w*|drones?|missiles?|rockets?|projectiles?|hit|bomb\w*|shell\w*|"
+    r"blast|explosion|explod\w*|sabotag\w*|targeted)\b", re.IGNORECASE)
+# A SITE, not a commodity: "oil spill" or "oil tanker" names no site.
+_SITE_WORD_RE = re.compile(
+    r"\b(?:oil ?fields?|gas ?fields?|fields?|refiner\w*|plants?|ports?|terminals?|facility|facilities|"
+    r"pipelines?|data cent\w*|cables?|stations?|factory|factories|compound|headquarters|offices|"
+    r"depots?|storage|desalination|aramco|complex|installation)\b", re.IGNORECASE)
+_CLOSURE_WORD_RE = re.compile(r"\b(?:clos\w*|shut\w*|block\w*|ban\w*|bar(?:red|s)?|halt\w*|seal\w*)\b",
+                              re.IGNORECASE)
+_REOPEN_WORD_RE = re.compile(r"\b(?:reopen\w*|open\w*|resum\w*|ceasefire|truce|allow\w*|lift\w*|"
+                            r"pass|passage|transit\w*)\b",
+                             re.IGNORECASE)
+_HELIUM_CODES = frozenset({"m5_supplier_rationing", "m5_asia_shortfall"})
+
+
+def _event_text(ex: dict[str, Any], title: str) -> str:
+    """What the guardrails read: the headline, the event's place and the
+    model's own two checked sentences about the event."""
+    return " ".join(str(p) for p in (title, _event(ex, "place") or "", ex.get("reason_facts") or "",
+                                     ex.get("summary") or "") if p)
+
+
+def guarded_code(ex: dict[str, Any], title: str = "", body: str | None = None) -> str | None:
+    """The event code the text supports - the model's code, or a weaker one."""
+    code = event_code(ex)
+    text = _event_text(ex, title) + " " + (body or "")
+    if len(re.findall(r"[A-Za-z]{3,}", text)) < 5:
+        return code                                   # nothing to read: no evidence either way
+    if code == "m4_ship_sunk_or_crew_killed":
+        if not _SHIP_WORD_RE.search(text):
+            return "m4_other_strike"                  # an aircraft, not a ship
+        if not _SANK_OR_KILLED_RE.search(text):
+            return "m4_ship_incident"                 # fire, explosion, disabled
+    # Status words are read in the event's own sentences only: the body of
+    # nearly every Hormuz story says "closed" somewhere as background.
+    own = _event_text(ex, title)
+    if code == "m4_waterway_closed" and not _CLOSURE_WORD_RE.search(own):
+        return "m4_threat_or_statement"               # "mine threats" are not a closure
+    if code == "m4_waterway_reopened" and not _REOPEN_WORD_RE.search(own):
+        return "m4_threat_or_statement"
+    if code in _HELIUM_CODES and not re.search(r"\bhelium\b", text, re.IGNORECASE):
+        return "m5_commentary"                        # gas, not helium
+    if code == "m4_strike_on_site":
+        if not _ATTACK_WORD_RE.search(text):
+            return None                               # a spill or accident: no attack at all
+        site_text = " ".join(p for p in (_event(ex, "place") or "", ex.get("reason_facts") or "",
+                                         ex.get("summary") or "", title) if p)
+        if not _SITE_WORD_RE.search(site_text):
+            return "m4_other_strike"                  # no site named as hit
+    return code
+
+
+# --- Attack waves: separate weak ship attacks adding up (review point 13) ---
+# One damaged ship is stored as weak; a week of them is an escalation. After
+# folding (so each event is counted once), the distinct ship-attack events
+# on one waterway are counted by their own dates: the weak event that makes
+# _ATTACK_WAVE_EVENTS within _ATTACK_WAVE_DAYS is raised to signal - the same
+# three-ship bar as m4_attack_tally. One wave alert per waterway per window,
+# so a week of attacks is one alert, not one per ship.
+_ATTACK_WAVE_EVENTS = 3
+_ATTACK_WAVE_DAYS = 7
+_WAVE_CODES = frozenset({"m4_ship_incident", "m4_ship_sunk_or_crew_killed", "m4_attack_tally"})
+
+
+def _wave_key(row: dict[str, Any]) -> str | None:
+    place = _event(row["metadata"], "place")
+    return waterway_key(place) or (place_key(place) if place else None)
+
+
+def attack_wave_raises(rows: list[dict[str, Any]]) -> list[tuple[int, str, str, str]]:
+    """[(row id, label, rule, reason)] for weak ship attacks that complete a
+    wave. `rows` = the visible signal/weak rows (folded duplicates left out),
+    as from get_middle_east_story_candidates. A row already raised by a wave
+    (its rule) counts as that window's alert."""
+    by_key: dict[str, list[tuple[date, dict[str, Any]]]] = {}
+    for r in rows:
+        md = r.get("metadata") or {}
+        if "collapsed_into" in md or event_code(md) not in _WAVE_CODES:
+            continue
+        day = _as_date(_event(md, "date")) or _as_date(r.get("published"))
+        key = _wave_key(r)
+        if day and key:
+            by_key.setdefault(key, []).append((day, r))
+    raises: list[tuple[int, str, str, str]] = []
+    for key, events in by_key.items():
+        events.sort(key=lambda e: (e[0], str(e[1].get("published"))))
+        # Count ATTACKS, not reports: reports of one attack that did not fold
+        # (one tanker off Qatar written as "off Qatar", "north of Madinat ash
+        # Shamal", dated 7 and 8 Oct) made a false wave (test set,
+        # 2026-10-23). A report from the same source within a day of a
+        # counted one is that attack again - conservative: it can delay a
+        # wave, never invent one.
+        counted: list[tuple[date, str]] = []
+        distinct: list[bool] = []
+        for day, r in events:
+            by = ((r.get("metadata") or {}).get("confirmation") or {}).get("by") or ""
+            again = any(abs((day - d).days) <= 1 and by and b and _same_source(by, b) for d, b in counted)
+            distinct.append(not again)
+            if not again:
+                counted.append((day, by))
+        last_alert: date | None = None
+        for i, (day, r) in enumerate(events):
+            window = [d for (d, _), new in zip(events[: i + 1], distinct[: i + 1])
+                      if new and (day - d).days < _ATTACK_WAVE_DAYS]
+            # Any signal in the window - a sinking, an authority's count, or a
+            # wave already raised - is that window's alert: the wave is for
+            # weeks of weak incidents only (review point 13).
+            if r.get("signal_detection") == "signal":
+                last_alert = day
+                continue
+            if (r.get("signal_detection") != "weak_signal" or len(window) < _ATTACK_WAVE_EVENTS
+                    or (last_alert and (day - last_alert).days < _ATTACK_WAVE_DAYS)):
+                continue
+            last_alert = day
+            name = _WATERWAYS.get(key, _event(r["metadata"], "place") or key)
+            raises.append((r["id"], "signal", f"{event_code(r['metadata'])}_attack_wave",
+                           f"{r.get('signal_reason') or ''} It is attack number {len(window)} on"
+                           f" shipping near {name} in {_ATTACK_WAVE_DAYS} days - an escalation that"
+                           " moves oil, freight and insurance costs.".strip()))
+    return raises
+
+
+def repeated_count_lowers(rows: list[dict[str, Any]]) -> list[tuple[int, str, str, str]]:
+    """[(row id, label, rule, reason)] lowering later attack-count signals on
+    one waterway within _ATTACK_WAVE_DAYS of an earlier one. Counts for
+    overlapping periods ("22 vessels, 1-13 Oct"; "12 in the week to 16 Oct")
+    are one escalation: they do not fold (different periods) but must not
+    alert three times in four days (test set, 2026-10-23). The earliest
+    stays the alert; the later ones stay visible as weak."""
+    by_key: dict[str, list[tuple[date, dict[str, Any]]]] = {}
+    for r in rows:
+        md = r.get("metadata") or {}
+        if ("collapsed_into" in md or event_code(md) != "m4_attack_tally"
+                or r.get("signal_detection") != "signal"):
+            continue
+        # The attacking side announcing a new night of attacks (the IRGC's
+        # four ships set afire on 22 Oct) is a new event, not a recount of
+        # a tracker's period tally (Kpler's 18 vessels in two weeks).
+        if _armed_side((md.get("confirmation") or {}).get("by") or ""):
+            continue
+        day = _as_date(_event(md, "date")) or _as_date(r.get("published"))
+        key = _wave_key(r)
+        if day and key:
+            by_key.setdefault(key, []).append((day, r))
+    lowers: list[tuple[int, str, str, str]] = []
+    for key, counts in by_key.items():
+        counts.sort(key=lambda e: (e[0], str(e[1].get("published"))))
+        alert_day: date | None = None
+        for day, r in counts:
+            if alert_day is None or (day - alert_day).days >= _ATTACK_WAVE_DAYS:
+                alert_day = day
+                continue
+            name = _WATERWAYS.get(key, key)
+            lowers.append((r["id"], "weak_signal", "m4_attack_tally_same_escalation",
+                           f"{r.get('signal_reason') or ''} Another count of the same escalation near"
+                           f" {name}, already alerted on {alert_day:%d %B}.".strip()))
+    return lowers
 
 
 def folded_corroboration(kept: dict[str, Any], duplicates: list[dict[str, Any]]) -> dict[str, Any]:

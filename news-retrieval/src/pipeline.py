@@ -9721,6 +9721,15 @@ def _me_matches(source: dict, text: str) -> bool:
     return not terms or bool(_me_match_regex(tuple(terms)).search(text or ""))
 
 
+def _me_excluded(source: dict, title: str) -> bool:
+    """A wire HEADLINE that only reacts to news (condemns, welcomes,
+    condolences) - see seed._ME_WIRE_REACTION_TERMS. Checked on the
+    headline alone: the subtitle of a real announcement can mention a
+    condemnation."""
+    terms = (source.get("config") or {}).get("exclude_title_terms") or []
+    return bool(terms) and bool(_me_match_regex(tuple(terms)).search(title or ""))
+
+
 def _me_names(items: Any, key: str = "name") -> list[str]:
     """Display names from a list of API objects (tags, categories)."""
     return [i.get(key) or i.get("title") for i in (items or [])
@@ -9794,7 +9803,8 @@ def _fetch_one_wam_wire(source: dict, days_back: int) -> list[dict]:
 
     listed = [i for i in items if (_date(i) or cutoff) >= cutoff]
     kept = [i for i in listed
-            if _me_matches(source, f"{i.get('title', '')} {i.get('subTitle', '')}")]
+            if _me_matches(source, f"{i.get('title', '')} {i.get('subTitle', '')}")
+            and not _me_excluded(source, i.get("title", ""))]
     with ThreadPoolExecutor(max_workers=5) as executor:
         details = list(executor.map(
             lambda i: _fetch_wam_article(i["urlSlug"]), kept))
@@ -9877,7 +9887,8 @@ def _fetch_one_spa_wire(source: dict, days_back: int) -> list[dict]:
     listed = [i for i in items if i.get("locale") == "en"
               and (_date(i) or cutoff) >= cutoff]
     kept = [i for i in listed
-            if _me_matches(source, f"{i.get('title', '')} {i.get('subtitle') or ''}")]
+            if _me_matches(source, f"{i.get('title', '')} {i.get('subtitle') or ''}")
+            and not _me_excluded(source, i.get("title", ""))]
     with ThreadPoolExecutor(max_workers=5) as executor:
         details = list(executor.map(lambda i: _fetch_spa_article(i["uuid"]), kept))
 

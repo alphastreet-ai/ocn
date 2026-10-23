@@ -129,6 +129,12 @@ DynamoDB access for the poller is granted via an IAM role policy (`aws_iam_role_
 
 Fetched from SEC EDGAR (`data.sec.gov`), not Alpha Vantage. Ticker→CIK mapping via `https://www.sec.gov/files/company_tickers.json` (cached process-lifetime), filings list via `https://data.sec.gov/submissions/CIK{cik}.json`. Six form types are kept: 8-K, 10-Q, 10-K and — for foreign private issuers, which file none of those three — 6-K, 20-F and 40-F. The foreign forms matter for the non-US names in the universe: Alibaba files 6-K and nothing else, so a domestic-only filter would store zero filings for it while looking like it worked. Deduplicated per ticker by `accession_number` — each filing is a permanent, unique key from EDGAR, so re-running the poller never creates duplicates and skips filings already stored. Stores metadata + a link to the primary document only, not the filing body — `signal-detection-agent`'s daily filing-classification job reads this metadata via `GET /market/sec-filings/{ticker}` and fetches the body text itself (see `src/sec_edgar.py`).
 
+### company_news schedule and the shared Alpha Vantage key
+
+`company_news` and the market poller use the same Alpha Vantage key (75 calls/min). Until 2026-10-23 `company_news` ran at 01:00 UTC, inside `market_poll_daily` (00:30 UTC, ~52 min, latest end seen 01:29). Checked on staging: articles Alpha Vantage held for 34 tickers since 2026-09-18 (242 articles, 105 of them published 12-24h before the run that should have fetched them) were never stored in any domain, and those tickers logged `articles=0` every day; the poller logged empty responses for TXN, SNOW and SPOT in the same window. Moved to 02:30 UTC. No other job calls Alpha Vantage between ~01:30 and `market_poll_quotes` at 14:00 UTC.
+
+`_fetch_alpha_vantage` reads `data.get("feed", [])`, so a rate-limit reply (no `feed` key) is counted as 0 articles and not logged.
+
 ### Ticker universe
 
 Single source of truth: `get_tracked_ticker_universe()` in `src/pipeline.py`, which fetches US-listed tickers live from research-universe (`GET /companies?country=United States&has_ticker=true`, requires `RESEARCH_UNIVERSE_URL`/`RESEARCH_UNIVERSE_API_KEY`) and normalizes them to Alpha Vantage/SEC EDGAR format (`_normalize_av_ticker`: dot share-class suffixes like `BRK.B` → `BRK-B`; other dotted tickers, e.g. foreign exchange suffixes, are dropped). Returns `[]` (poll run skipped) if `RESEARCH_UNIVERSE_URL` is unset or research-universe is unreachable — there is no hardcoded fallback list. Used by both the Alpha Vantage fetch and the `GET /market/tracked-tickers` route, so they never drift apart.
@@ -144,9 +150,9 @@ Manual run: `python __main__.py expire-articles --domain <slug> --days <n>` - de
 | Domain | Retention | Schedule (CloudWatch) | Rationale |
 |--------|-----------|------------------------|-----------|
 | `geopolitical_news` | 7 days | Sunday 04:00 UTC | Short-lived event coverage; volume is high and low-value past a week |
-| `company_news` | 30 days | Sunday 05:00 UTC | Matches the TTL already used for Alpha Vantage's other data types (`ocn-market-overview`, `ocn-market-earnings`) |
+| `company_news` | ~~30 days~~ retained indefinitely | Sunday 05:00 UTC - **rule DISABLED (2026-10-23)** | Expiry stopped; rule kept in Terraform with `state = "DISABLED"` so it can be re-enabled. Original 30 days matched the TTL used for Alpha Vantage's other data types (`ocn-market-overview`, `ocn-market-earnings`) |
 
-Both schedules run after that domain's own daily fetch completes (`geopolitical_news` fetches at 02:00 UTC, `company_news` at 01:00 UTC) and are offset from each other, so no two scheduled jobs overlap. CloudWatch targets reference the task definition by family name only (no revision pinned), so a scheduled run always launches whatever revision is currently `ACTIVE` — see `infra/CLAUDE.md` for why revision-pinned targets are a real drift risk in this repo.
+Both schedules run after that domain's own daily fetch completes (`geopolitical_news` fetches at 02:00 UTC, `company_news` at 02:30 UTC) and are offset from each other, so no two scheduled jobs overlap. CloudWatch targets reference the task definition by family name only (no revision pinned), so a scheduled run always launches whatever revision is currently `ACTIVE` — see `infra/CLAUDE.md` for why revision-pinned targets are a real drift risk in this repo.
 
 ## Taiwan Market Signal (`taiwan_market_signal` domain)
 
@@ -163,17 +169,18 @@ translation of bare 2-4 character Taiwan company names was confirmed live to pro
 errors, e.g. 2383 Elite Material mistranslated as "Taiwan Semiconductor Manufacturing
 Company" - so this field is never LLM-translated).
 
-Each entry also carries `customers`: the company's **verified** customers as
-`{name, relationship}` - the one source of truth for Taiwan customers. A customer is listed only
-when a primary source names it (the company's own annual report / MOPS filing / press release,
-the customer's own SEC 10-K or Apple's official supplier list, or an official MOPS announcement
-naming the counterparty); press and analyst claims, partners, investors and code-only customers
-(客戶A) are left out; `[]` means checked and none verified (researched 2026-10-19, 68 customers
-across 12 of the 20 companies). Served at `GET /market/taiwan/universe` (`ticker`, `company_name`,
-`translated_company_name`, `customers`) and never copied onto articles - a copy is frozen at fetch
-time, so rows fetched before a customer was verified never showed it. signal-detection-agent serves
-it as `GET /taiwan-signals/universe`; a consumer joins on `metadata.ticker`. Older articles may
-still carry a `metadata.customers` copy; nothing reads it.
+Each entry also carries `segment` (its place in the AI-server supply chain: Foundry, Packaging &
+test, Server ODM / EMS, Thermal, ...) and `customers`, each customer with its evidence: `name`,
+`relationship` (one readable sentence), `status` (`verified` = a primary source states it - the
+customer's SEC filing or supplier list, a press release by either party, the company's own filing,
+website or earnings call, or customer-authored code; `partial` = indirect evidence such as customs
+records; `unverified` = press or analysts only), `source_type`, `source`, `source_date`,
+`source_url`. Every source was checked live on 2026-10-22: 125 customers, 101 verified, 19 of 20
+companies with at least one verified customer. Served at `GET /market/taiwan/universe` (`ticker`,
+`company_name`, `translated_company_name`, `segment`, `customers`) with all statuses, and never
+copied onto articles. signal-detection-agent serves it as `GET /taiwan-signals/universe`; a
+consumer joins on `metadata.ticker` and shows `verified` by default. Older articles may still
+carry a `metadata.customers` copy; nothing reads it.
 
 | Source | `source_type` | `source_category` (metadata) | What it fetches |
 |--------|---------------|-------------------------------|------------------|
@@ -971,12 +978,19 @@ names' prices are read by ticker from `/market/*`.
 | BIS press releases | `bis_press` | `__NEXT_DATA__` JSON on `bis.gov/news-updates` (whole archive, one request) | inline body, else DOJ press API matched by title + date |
 | Federal Register (BIS, Gulf terms) | `federal_register` | existing fetcher, `config.terms` + `config.url_scheme` | govinfo / raw text |
 | SEC 13D/13G (PIF, Mubadala, ADIA, QIA) | `sec_fund_stake` | `data.sec.gov/submissions` | `primary_doc.xml`: cover facts + narrative items |
-| newsapi.ai, 5 queries | `eventregistry` | existing fetcher, `config.query` | with the article |
+| newsapi.ai, 6 queries | `eventregistry` | existing fetcher, `config.query` | with the article |
 
 WAM and SPA publish everything (weather, sport, condolence cables), so items are matched
 against `match_terms` - universe names plus the spec's M1-M8 topic terms - **before** the
 body fetch, the same order Japan and China use. Matching is word-bounded on "not a word
 character or &", so "AI" does not match inside "Dubai" and "e&" matches on its own.
+Bare "AI", "artificial intelligence" and "Red Sea" are NOT match terms (review 2026-10-23):
+on the 2026-10-19 run they admitted 27 wire items, all noise - literacy platforms,
+conferences, tourism. A headline that only reacts to news is dropped by
+`exclude_title_terms` (`seed._ME_WIRE_REACTION_TERMS`: condemns, welcomes, condolences,
+solidarity, phone call ..., checked on the headline alone in `pipeline._me_excluded`) -
+11 of the 20 wire items left were such cables, all noise. Measured on that run: 52 wire
+items -> 9, no signal or weak_signal lost.
 
 **Every source was probed live (2026-10-19), from a local machine and from ECS:**
 - **WAM's site is an Angular shell** and newsapi.ai's copy of WAM English was ~21 days
@@ -997,6 +1011,12 @@ character or &", so "AI" does not match inside "Dubai" and "e&" matches on its o
 - **Federal Register terms match Russian-airline denial orders** (they mention flights to
   the UAE) - about one a month. Kept: a denial order naming a Gulf company (M8) has the same
   form, so excluding them would drop real signals.
+- **"No rows in two weeks" from the Federal Register and BIS is real quiet, not a broken
+  feed** (re-checked live 2026-10-23): BIS published 16 Federal Register documents in 90 days
+  and none names a Gulf country or Israel bar the Russian-airline orders; bis.gov has 3 press
+  releases since mid-August, none Gulf (last: "Eases Export Controls for UAE", 10 July). A
+  news query for US chip-export decisions on the Gulf found 1 article in 30 days (a law-firm
+  explainer), so none was added.
 
 **newsapi.ai queries** (`eventregistry:me_*`). Each pairs an entity or place with a topic
 term - an entity alone was measured to match astronomy ("helium"), Jio's IPO anchor book
@@ -1007,6 +1027,27 @@ and Middle East AI News. The free plan rejects a query with more than 15 keyword
 every word of a phrase. Measured volumes over a day: shipping ~100, Gulf outlets ~10,
 QatarEnergy ~5, Israel sites ~5, helium ~3. The chip-exports-to-the-Gulf query returned 0,
 so M1/M8 come from BIS, the Federal Register and DOJ.
+
+Changes from the review of 2026-10-23, each measured live over 14 days before it was made:
+- **`me_energy_sites` (new)** - a Gulf energy site (Aramco, Shaybah, Abqaiq, Ras Tanura,
+  Yanbu, Fujairah, Ras Laffan, Ruwais) AND an attack term, both in the title. No query had
+  reached strikes on Gulf energy sites: the Houthi strikes on Aramco's headquarters (14-15
+  Oct) and the Shaybah oilfield (21 Oct, Brent at $110) never entered the feed. ~12 a day,
+  all on topic; the same sites in the BODY returned 742, mostly airports and diplomacy. 15
+  keywords (Jazan left out - its only hits were intercepted missiles).
+- **`me_israel_sites`** - Kiryat Gat only with a chip term in the body (the town alone
+  brought in an archaeology dig, UK-Israel diplomacy, olive oil); Tower only with "Tower" in
+  the title (the concept alone matched every Tel Aviv market wrap listing Tower among the
+  movers - 19 "Israel stocks higher/lower", "Wed: TASE ..." reports). Every Intel fab report
+  and all 8 Tower headlines of the period kept.
+- **`me_helium`** - Qatar or Ras Laffan in the body, or a shortage/price/chip term in the
+  title. Supply/price/chip words in the BODY admitted helium miners in Canada, Tanzania and
+  Minnesota (their pages list chips as a use of helium) and the Helium crypto token: 35 -> 12,
+  all about the Qatar-driven shortage.
+- **`me_shipping` left as is.** Requiring a Gulf place word in the title would have removed
+  15 off-topic items (food inflation, Russian oil routes, Brexit) but also real events whose
+  headlines name other places ("tanker Al Dasma hit near Oman", the Umm Al Quwain oil spill,
+  "Bab al-Mandab" spellings). Its off-topic items are labelled noise by the classifier.
 
 **Own url schemes, because dedup is global.** `geopolitical_news` already fetches every
 BIS Federal Register document and runs a "Strait of Hormuz" query; 28 of 100 shipping
@@ -1108,9 +1149,21 @@ from an API that could not be found), Lloyd's war-risk list (PDF only), ADX (PDF
 disclosures), Tadawul and Israel's Home Front Command (Access Denied from ECS too), QNA
 (newsapi.ai indexes its English feed within minutes), EIA/Alpha Vantage commodity series (3
 trading days behind - BNO's quote is used instead), Congress.gov, USGS, Suez Canal Authority.
+Re-probed 2026-10-23: IMF PortWatch's daily Hormuz transits now arrive ~5 days behind (a
+number series - if added, it belongs in the market poller and DynamoDB like BNO, not in
+`articles`; not added, user decision); UKMTO's site answers 403 and it is not a newsapi.ai
+source; QatarEnergy's SharePoint `News` list API answers but exposes only system fields (no
+title or text), so its announcements come through `me_qatarenergy`; Home Front Command
+still answers Access Denied. UKMTO and QatarEnergy news arrives in articles quoting them.
 
-**Token budget:** 6 newsapi.ai tokens a run (shipping takes 2 pages). Twice a day is ~360 a
-month, against a 2,000-token plan that `geopolitical_news` also draws on.
+**Prices are market data, never articles.** Oil (BNO) is polled into DynamoDB with the
+stock quotes; signal-detection-agent reads it as a reference only. A price-led news story
+("Brent crosses $110 as deadly strike near Aramco") is an article like any other: the
+classifier codes the event in its body, never the price.
+
+**Token budget:** 7 newsapi.ai tokens a run (shipping takes 2 pages; `me_energy_sites`
+added one). Twice a day is ~420 a month, against a 2,000-token plan that
+`geopolitical_news` also draws on.
 
 **Trigger:**
 ```bash
@@ -1118,6 +1171,21 @@ python __main__.py trigger --domain middle_east_market_signal --days-back 1
 ```
 First local run (2026-10-19, `--days-back 1`): 121 rows - 108 newsapi.ai, 5 SPA, 4 WAM,
 4 Middle East AI News - every one with a body.
+
+After the 2026-10-23 changes (local run 152, `--days-back 10`): 591 fetched, 10 outside the
+window, 581 -> 322 after title-similarity dedup (259 merged). Stored: shipping 93, Gulf
+outlets 82, QatarEnergy 39, energy sites 32, Israel sites 23, Middle East AI News 20, WAM
+12, SPA 11, helium 9, SEC 1; Federal Register and BIS 0 (nothing Gulf-related published).
+Checked on the stored rows: no archaeology, diplomacy, Tel Aviv market wraps, helium miners,
+crypto or wire reaction cables. The dedup's same-event model calls took ~35 minutes for 581
+articles - a daily run is ~60.
+
+**Backfill day by day, not in one window.** Each newsapi.ai query returns its newest
+articles first and stops at its page cap (`max_pages`: shipping 2, the rest 1), so one
+10-day request kept shipping's newest 200 of 896 and energy sites' newest 100 of 198 - the
+older days were cut. A daily run stays under the caps (shipping ~100, energy sites ~12).
+The fetcher takes only "the last N days", so a day-by-day backfill needs a from/to date
+option that does not exist yet.
 
 **Needs before deploy:** `EVENT_REGISTRY_API_KEY` is not in the news-retrieval task
 definition or Terraform yet (also true for `geopolitical_news`), and the domain has no

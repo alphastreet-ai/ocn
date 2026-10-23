@@ -45,6 +45,9 @@ MIDDLE_EAST_SIGNAL_MODEL: str = os.environ.get("MIDDLE_EAST_SIGNAL_MODEL") or SE
 MIDDLE_EAST_SIGNAL_PROMPT: Path = (
     Path(__file__).parent.parent / "prompts" / "middle_east_signal_extract_v1.txt")
 MIDDLE_EAST_CLASSIFY_CONCURRENCY: int = int(os.environ.get("MIDDLE_EAST_CLASSIFY_CONCURRENCY", "5"))
+# The oil price the run's market-reference log reads from news-retrieval's
+# DynamoDB market data: the Brent oil fund the poller already tracks.
+MIDDLE_EAST_OIL_REFERENCE_TICKER: str = os.environ.get("MIDDLE_EAST_OIL_REFERENCE_TICKER", "BNO")
 NEWS_DOMAIN: str = os.environ.get("NEWS_DOMAIN", "ai_news")
 GEOPOLITICAL_SIGNAL_DOMAIN: str = os.environ.get("GEOPOLITICAL_SIGNAL_DOMAIN", "geopolitical_news")
 # Stage B is a forced one-word HIGH/WEAK call, but it is also the stage

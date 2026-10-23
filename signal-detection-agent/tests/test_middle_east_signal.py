@@ -63,6 +63,10 @@ def test_describe_pool_counts_per_source() -> None:
 
 # --- Step 1: pooling and the already-judged skip -------------------------------
 
+async def _no_market_reference(job_id, companies):
+    return None
+
+
 def _fake_news(monkeypatch, runs, judged=frozenset()):
     async def list_completed_runs(domain, from_date, to_date):
         assert domain == "middle_east_market_signal"
@@ -76,7 +80,8 @@ def _fake_news(monkeypatch, runs, judged=frozenset()):
     monkeypatch.setattr(run, "get_existing_middle_east_signal_source_ids",
                         lambda urls: {u for u in urls if u in judged})
     monkeypatch.setattr(run, "get_middle_east_event_members", lambda uris: {})
-    monkeypatch.setattr(run, "regroup_middle_east_stories", lambda job_id: None)
+    monkeypatch.setattr(run, "regroup_middle_east_stories", lambda job_id, companies=None: None)
+    monkeypatch.setattr(run, "log_middle_east_market_reference", _no_market_reference)
 
 
 def test_pool_dedups_across_runs_counts_missing_url_and_skips_judged(monkeypatch) -> None:
@@ -102,6 +107,7 @@ def _fake_table(monkeypatch):
     async def table():
         return _news_retrieval_company_table()
     monkeypatch.setattr(run, "fetch_middle_east_universe", table)
+    monkeypatch.setattr(run, "get_middle_east_story_candidates", lambda: [])
 
 
 def test_run_stores_nothing_when_the_model_call_fails(monkeypatch) -> None:
@@ -133,8 +139,9 @@ def test_run_drops_rows_an_overlapping_pass_stored_meanwhile(monkeypatch) -> Non
 
     monkeypatch.setattr(run, "get_existing_middle_east_signal_source_ids", existing)
     _fake_table(monkeypatch)
-    monkeypatch.setattr(run, "classify_middle_east_signal_batch", lambda arts, companies, universe, stored: [
-        {"article": a, "result": {"signal": "noise", "reason": "r"}} for a in arts])
+    monkeypatch.setattr(run, "classify_middle_east_signal_batch",
+                        lambda arts, companies, universe, stored, waterways: [
+                            {"article": a, "result": {"signal": "noise", "reason": "r"}} for a in arts])
     monkeypatch.setattr(run, "update_job_status", lambda *a, **k: None)
     inserted = []
     monkeypatch.setattr(run, "insert_middle_east_signal_classification",
@@ -238,11 +245,12 @@ def _news_retrieval_company_table():
 def test_the_real_company_table_passes_the_load_check() -> None:
     companies = _news_retrieval_company_table()
     assert company_table_problems(companies) == []
-    assert len(companies) == 25
+    # 26: Intel Kiryat Gat and Nvidia Israel are separate rows (review point 22).
+    assert len(companies) == 26
 
 
 def test_company_table_problems_catch_hand_edit_mistakes() -> None:
-    good = {"ticker": None, "company": "G42", "exchange": None, "country": "UAE",
+    good = {"ticker": None, "company": "G42", "kind": "company", "exchange": None, "country": "UAE",
             "aliases": ["Core42"],
             "counterparties": [{"counterparty_name": "Nvidia", "counterparty_ticker": "NVDA",
                                 "relationship": "Partner: ...", "share_price_on_good_news": "rise"}]}
@@ -332,7 +340,8 @@ def test_every_source_news_retrieval_sends_has_an_entry() -> None:
     sources = {"wam_wire", "spa_wire", "substack_post", "bis_press", "federal_register",
                "sec_fund_stake", "eventregistry:me_shipping", "eventregistry:me_helium",
                "eventregistry:me_qatarenergy", "eventregistry:me_israel_sites",
-               "eventregistry:me_gulf_outlets"}
+               "eventregistry:me_gulf_outlets", "eventregistry:me_energy_sites",
+               "eventregistry:me_strike_plans", "eventregistry:me_gulf_money"}
     assert set(SOURCE_EVENT_TYPES) == sources
 
 
@@ -417,20 +426,20 @@ def _index():
     return company_name_index(companies), counterparty_ticker_index(companies)
 
 
-_EVENT_KEYS = ("place", "effective_date", "lasts_over_24_hours")
+_EVENT_KEYS = ("place", "date", "country", "effective_date", "lasts_over_24_hours")
 _DEAL_KEYS = {"deal_level": "level", "amount": "amount", "up_to": "up_to", "capacity": "capacity"}
 
 
 def _answer(**overrides):
     """A model answer in the prompt's output shape. Overrides may name a
     nested field flat (place=, capacity=, deal_level=, amount=)."""
-    answer = {"event": {"code": "m2_switched_on", "place": "Abu Dhabi", "effective_date": None,
-                        "lasts_over_24_hours": None},
+    answer = {"event": {"code": "m2_switched_on", "place": "Abu Dhabi", "date": "2026-10-19",
+                        "country": "UAE", "effective_date": None, "lasts_over_24_hours": None},
               "companies": [{"name": "G42", "country": "UAE"},
                             {"name": "Nvidia", "country": "United States"}],
               "deal": {"level": 6, "amount": None, "up_to": False, "capacity": "200MW"},
               "confirmation": {"level": "official", "by": "G42"},
-              "new_development": True, "news_effect": "good",
+              "news_effect": "good",
               "reason_facts": "G42 switched on the first 200MW phase of Stargate UAE, running Nvidia GB300 systems.",
               "summary": "G42 said the first 200MW phase of Stargate UAE is now operational."}
     for key, value in overrides.items():
@@ -453,7 +462,8 @@ def _check(raw, title="G42 switches on Stargate UAE", body=_BODY):
 def test_check_keeps_supported_facts_and_maps_tracked_companies() -> None:
     ex, dropped = _check(_answer())
     assert dropped == []
-    assert ex["event"] == {"type": "M2", "code": "m2_switched_on", "place": "Abu Dhabi"}
+    assert ex["event"] == {"type": "M2", "code": "m2_switched_on", "place": "Abu Dhabi",
+                           "date": "2026-10-19", "country": "UAE"}
     assert ex["deal"] == {"level": 6, "capacity": "200MW"}
     assert ex["confirmation"] == {"level": "official", "by": "G42"}
     # Not stated -> absent, never stored as null.
@@ -521,10 +531,10 @@ def test_failed_reason_facts_falls_back_to_the_summarys_first_sentence() -> None
 
 def test_check_falls_back_to_the_weakest_value_for_bad_enums() -> None:
     ex, dropped = _check(_answer(confirmation={"level": "certain", "by": "G42"}, news_effect="great",
-                                 new_development="yes", deal_level=9))
+                                 date="next week", deal_level=9))
     assert ex["confirmation"]["level"] == "unnamed" and ex["news_effect"] == "mixed"
-    assert ex["new_development"] is True and "level" not in ex["deal"]
-    assert {"confirmation", "news_effect"} <= set(dropped)
+    assert "date" not in ex["event"] and "level" not in ex["deal"]
+    assert {"confirmation", "news_effect", "event.date"} <= set(dropped)
 
 
 def test_check_caps_deal_level_at_3_when_only_unnamed_sources() -> None:
@@ -560,15 +570,17 @@ def test_every_event_code_is_in_the_prompt() -> None:
 # --- Step 7b: label rules (spec section 7) -------------------------------------
 
 def _ex(event, confirmation="official", amount=None, amount_up_to=False, deal_level=None,
-        capacity=None, place=None, effective_date=None, over_24_hours=None, news="bad", **kw):
+        capacity=None, place=None, effective_date=None, over_24_hours=None, news="bad",
+        country=None, day=None, by="x", **kw):
     """A checked extraction in its stored shape; None values are left out
     exactly as check_extraction leaves them out."""
-    ex = {"companies": [], "new_development": True, "news_effect": news, "summary": "s.",
-          "confirmation": {"level": confirmation, **({"by": "x"} if confirmation != "unnamed" else {})}}
+    ex = {"companies": [], "news_effect": news, "summary": "s.",
+          "confirmation": {"level": confirmation, **({"by": by} if confirmation != "unnamed" else {})}}
     if event:
         ex["event"] = {k: v for k, v in {
-            "type": EVENT_CODES[event], "code": event, "place": place,
-            "effective_date": effective_date, "lasts_over_24_hours": over_24_hours}.items()
+            "type": EVENT_CODES[event], "code": event, "place": place, "date": day,
+            "country": country, "effective_date": effective_date,
+            "lasts_over_24_hours": over_24_hours}.items()
             if v is not None}
     deal = {k: v for k, v in {"level": deal_level, "amount": amount,
                               "up_to": amount_up_to if amount else None,
@@ -581,15 +593,17 @@ def _ex(event, confirmation="official", amount=None, amount_up_to=False, deal_le
 
 _G42 = {"name": "G42", "ticker": None, "country": "UAE", "tracked": True}
 _TOWER = {"name": "Tower Semiconductor", "ticker": "TSEM", "country": "Israel", "tracked": True}
+_OPENAI = {"name": "OpenAI", "ticker": None, "country": "United States", "tracked": False}
+_MAERSK = {"name": "Maersk", "ticker": None, "country": "Denmark", "tracked": False}
 
 
 @pytest.mark.parametrize("ex, label, rule", [
     (_ex(None), "noise", "not_an_event_type"),
-    (_ex("m4_strike_on_site", new_development=False), "noise", "repeat"),
-    (_ex("m8_enforcement", new_development=False), "weak_signal", "m8_repeat"),
     # M1
-    (_ex("m1_rule_or_licence", effective_date="15 December 2026"), "signal", "m1_final_with_date"),
-    (_ex("m1_rule_or_licence"), "weak_signal", "m1_no_effective_date"),
+    (_ex("m1_rule_or_licence", effective_date="15 December 2026"), "signal", "m1_final_decision"),
+    # An official approval is final without a start date (review point 42).
+    (_ex("m1_rule_or_licence"), "signal", "m1_final_decision"),
+    (_ex("m1_rule_or_licence", confirmation="named_source"), "weak_signal", "m1_not_official"),
     (_ex("m1_rule_or_licence", confirmation="unnamed"), "weak_signal", "m1_unnamed_officials"),
     (_ex("m1_congress_action", companies=[_G42]), "signal", "m1_congress_named_deal"),
     (_ex("m1_congress_action"), "weak_signal", "m1_congress_no_named_deal"),
@@ -602,36 +616,71 @@ _TOWER = {"name": "Tower Semiconductor", "ticker": "TSEM", "country": "Israel", 
     (_ex("m2_chips_delivered", companies=[_G42]), "signal", "m2_chips_delivered"),
     (_ex("m2_chips_delivered"), "weak_signal", "m2_delivery_unconfirmed"),
     (_ex("m2_setback"), "signal", "m2_setback"),
-    (_ex("m2_deal_or_construction", deal_level=2), "weak_signal", "m2_deal_below_delivery"),
+    # A memorandum with no amount and no capacity commits nothing (review point 21)...
+    (_ex("m2_deal_or_construction", deal_level=2), "noise", "m2_memorandum_without_figures"),
+    # ...one with a figure, or a partnership with an amount, is still stored.
+    (_ex("m2_deal_or_construction", companies=[_G42], deal_level=2, capacity="100MW"), "weak_signal", "m2_deal_below_signed_amount"),
+    (_ex("m2_deal_or_construction", companies=[_G42], deal_level=3, amount="$2 billion", amount_up_to=True),
+     "weak_signal", "m2_deal_below_signed_amount"),
+    # A signed order with its value (review point 6: MIS's $500M order for Humain).
+    (_ex("m2_deal_or_construction", companies=[_G42], deal_level=4, amount="$500 million"), "signal", "m2_signed_with_amount"),
+    (_ex("m2_deal_or_construction", companies=[_G42], deal_level=4, amount="$500 million", amount_up_to=True),
+     "weak_signal", "m2_deal_below_signed_amount"),
+    (_ex("m2_deal_or_construction", companies=[_G42], deal_level=4), "weak_signal", "m2_deal_below_signed_amount"),
     (_ex("m2_deal_or_construction", deal_level=1), "noise", "m2_pledge"),
+    (_ex("m2_company_update", confirmation="named_source"), "weak_signal", "m2_company_update"),
+    (_ex("m2_company_update", confirmation="unnamed"), "noise", "m2_company_update_unnamed"),
     (_ex("m2_visit_or_ceremony"), "noise", "m2_visit_or_ceremony"),
     # M3
-    (_ex("m3_investment", deal_level=4, amount="$2 billion"), "signal", "m3_completed_with_amount"),
+    (_ex("m3_investment", deal_level=4, amount="$2 billion", companies=[_G42, _OPENAI]), "signal",
+     "m3_completed_with_amount"),
     (_ex("m3_investment", deal_level=4, amount="$2 billion", amount_up_to=True),
      "weak_signal", "m3_investment_not_alertable"),
     (_ex("m3_investment", deal_level=4), "weak_signal", "m3_investment_not_alertable"),
     (_ex("m3_investment", deal_level=2, amount="$2 billion"), "weak_signal", "m3_investment_not_alertable"),
     (_ex("m3_investment", deal_level=1), "noise", "m3_pledge"),
     (_ex("m3_pullback"), "signal", "m3_pullback"),
-    (_ex("m3_talks"), "weak_signal", "m3_talks"),
+    (_ex("m3_talks", amount="$30 billion"), "weak_signal", "m3_talks"),
+    # "Exploring investment opportunities" with no amount commits nothing.
+    (_ex("m3_talks"), "noise", "m3_talks_without_amount"),
     # M4
-    (_ex("m4_strike_on_site", place="Ras Laffan"), "signal", "m4_strike_confirmed"),
-    (_ex("m4_strike_on_site", place="Haifa port"), "signal", "m4_strike_confirmed"),
-    (_ex("m4_strike_on_site", place="Basra"), "weak_signal", "m4_strike_outside_alert_countries"),
-    (_ex("m4_strike_on_site", place="Ras Laffan", confirmation="unnamed"),
+    (_ex("m4_strike_on_site", place="Ras Laffan", country="Qatar", day="2026-10-14"), "signal", "m4_strike_confirmed"),
+    (_ex("m4_strike_on_site", place="Haifa port", country="Israel", day="2026-10-14"), "signal", "m4_strike_confirmed"),
+    (_ex("m4_strike_on_site", place="Basra", country="Iraq"), "weak_signal",
+     "m4_strike_outside_alert_countries"),
+    (_ex("m4_strike_on_site", place="Ras Laffan", country="Qatar", confirmation="unnamed"),
      "weak_signal", "m4_strike_claimed"),
-    (_ex("m4_waterway_status"), "weak_signal", "m4_waterway_unconfirmed_by_ship_counts"),
-    (_ex("m4_other_strike", place="Najran"), "weak_signal", "m4_other_strike"),
-    (_ex("m4_other_strike", confirmation="unnamed"), "noise", "m4_other_strike_unnamed"),
-    (_ex("m4_shipping_or_insurance"), "signal", "m4_shipping_line_or_insurer"),
+    # A waterway with no known status and no controlling-party confirmer.
+    (_ex("m4_waterway_closed"), "weak_signal", "m4_waterway_closed_unconfirmed"),
+    # Homes hit, nothing economic (review point 18).
+    (_ex("m4_other_strike", place="Najran"), "noise", "m4_no_economic_target"),
+    (_ex("m4_other_strike", confirmation="unnamed"), "noise", "m4_no_economic_target"),
+    (_ex("m4_shipping_or_insurance", by="Maersk", companies=[_MAERSK]), "signal", "m4_shipping_line_or_insurer"),
     (_ex("m4_ship_incident"), "weak_signal", "m4_ship_incident"),
     (_ex("m4_ship_incident", confirmation="unnamed"), "noise", "m4_ship_incident_unnamed"),
+    # Ships at sea (review points 11-12).
+    (_ex("m4_ship_sunk_or_crew_killed", confirmation="named_source", day="2026-10-13"), "signal",
+     "m4_ship_sunk_or_crew_killed"),
+    (_ex("m4_ship_sunk_or_crew_killed", confirmation="unnamed"), "weak_signal", "m4_ship_sunk_unconfirmed"),
+    (_ex("m4_attack_tally", confirmation="named_source", day="2026-10-16"), "signal", "m4_attack_tally"),
+    (_ex("m4_attack_tally", confirmation="unnamed"), "weak_signal", "m4_attack_tally_unnamed"),
+    (_ex("m4_ship_traffic", confirmation="named_source"), "weak_signal", "m4_ship_traffic"),
+    (_ex("m4_ship_traffic", confirmation="unnamed"), "noise", "m4_ship_traffic_unnamed"),
+    # Planned strikes (review point 14).
+    (_ex("m4_strike_plan"), "signal", "m4_strike_plan_announced"),
+    (_ex("m4_strike_plan", confirmation="unnamed"), "weak_signal", "m4_strike_plan_reported"),
+    # The Black Sea is not the Middle East (review point 16).
+    (_ex("m4_ship_incident", place="Black Sea"), "noise", "m4_outside_middle_east"),
+    (_ex("m4_ship_incident", place="off Constanta", country="Romania"), "noise", "m4_outside_middle_east"),
     (_ex("m4_threat_or_statement", confirmation="named_source"), "weak_signal", "m4_threat_or_statement"),
     (_ex("m4_commentary"), "noise", "m4_commentary"),
     # M5
-    (_ex("m5_qatar_force_majeure"), "signal", "m5_qatar_force_majeure"),
+    (_ex("m5_qatar_force_majeure", by="QatarEnergy", day="2026-10-12"), "signal", "m5_qatar_force_majeure"),
+    # Official, but not QatarEnergy itself.
+    (_ex("m5_qatar_force_majeure", by="Pakistan LNG Ltd", day="2026-10-12"), "weak_signal",
+     "m5_qatar_force_majeure_unconfirmed"),
     # Only QatarEnergy itself can declare or end its force majeure.
-    (_ex("m5_qatar_force_majeure", confirmation="named_source"), "weak_signal",
+    (_ex("m5_qatar_force_majeure", confirmation="named_source", day="2026-10-12"), "weak_signal",
      "m5_qatar_force_majeure_unconfirmed"),
     (_ex("m5_supplier_rationing", confirmation="unnamed"), "weak_signal", "m5_supplier_rationing_unconfirmed"),
     (_ex("m5_asia_shortfall"), "signal", "m5_asia_shortfall"),
@@ -650,7 +699,11 @@ _TOWER = {"name": "Tower Semiconductor", "ticker": "TSEM", "country": "Israel", 
     # Intel is not in the Israeli table by that name, but is listed (INTC).
     (_ex("m7_site_disruption", companies=[{"name": "Intel", "ticker": "INTC", "country": None,
                                            "tracked": False}]), "signal", "m7_site_disruption"),
-    (_ex("m7_site_incident", companies=[_TOWER]), "signal", "m7_site_incident_confirmed"),
+    # No production stop announced -> one weak signal (review point 3).
+    (_ex("m7_site_incident", companies=[_TOWER]), "weak_signal", "m7_site_incident_confirmed"),
+    (_ex("m7_company_deal", deal_level=4, amount="$300 million", companies=[_TOWER]),
+     "signal", "m7_company_deal_signed_with_amount"),
+    (_ex("m7_company_deal", deal_level=2, companies=[_TOWER]), "weak_signal", "m7_company_deal"),
     (_ex("m7_site_incident", companies=[_TOWER], confirmation="named_source"), "weak_signal", "m7_site_incident"),
     (_ex("m4_interception"), "noise", "m4_interception"),
     (_ex("m7_home_front_restriction", place="Haifa", over_24_hours=True), "signal", "m7_home_front_over_24h"),
@@ -730,11 +783,11 @@ def test_reasons_shown_to_readers_carry_no_internal_terms() -> None:
     for code in EVENT_CODES:
         for conf in ("official", "named_source", "unnamed"):
             for level in (None, 1, 3, 4):
-                for new in (True, False):
-                    ex = _ex(code, confirmation=conf, deal_level=level, new_development=new,
+                for day in ("2026-10-19", "2026-08-01"):      # new, and a repeat
+                    ex = _ex(code, confirmation=conf, deal_level=level, day=day,
                              amount="$1 billion", capacity="50MW", effective_date="1 Jan",
-                             place="Haifa", over_24_hours=True, companies=[_G42])
-                    _, _, why = decide_label(ex, "Qatar")
+                             place="Haifa", country="Israel", over_24_hours=True, companies=[_G42])
+                    _, _, why = decide_label(ex, "Qatar", None, None, "2026-10-20")
                     assert not banned.search(why), (code, why)
 
 
@@ -771,9 +824,10 @@ def test_batch_end_to_end_with_a_fake_model(monkeypatch) -> None:
     # Each field stored once: companies in entities_json, not in metadata.
     assert "companies" not in md
     assert "effective_date" not in md and "amount" not in md      # nulls not stored
-    assert set(md) == {"extracted_by", "event", "deal", "confirmation", "new_development",
+    assert set(md) == {"extracted_by", "event", "deal", "confirmation",
                        "news_effect", "summary", "rule", "source", "corroboration"}
-    assert md["event"] == {"type": "M2", "code": "m2_switched_on", "place": "Abu Dhabi"}
+    assert md["event"] == {"type": "M2", "code": "m2_switched_on", "place": "Abu Dhabi",
+                           "date": "2026-10-19", "country": "UAE"}
     assert md["deal"] == {"level": 6, "capacity": "200MW"}
     roles = {(e["name"], e["role"]) for e in result["entities"]}
     assert ("G42", "subject") in roles and ("Nvidia", "affected") in roles
@@ -854,16 +908,19 @@ def test_batch_warms_the_cache_with_one_call_before_the_parallel_ones(monkeypatc
 
 
 def test_qatar_force_majeure_in_the_background_is_not_an_alert() -> None:
-    ex = _ex("m5_qatar_force_majeure")
-    assert decide_label(ex, "Hormuz: Qatar extends Force Majeure")[0] == "signal"
-    assert decide_label(ex, "Long-term LNG supplier OQT seeks spot-linked price")[:2] == (
-        "weak_signal", "m5_force_majeure_in_background")
+    """A force majeure mentioned as background carries the day it was
+    declared - weeks before the article - so it is a repeat, whatever the
+    headline says."""
+    fresh = _ex("m5_qatar_force_majeure", by="QatarEnergy", day="2026-10-12")
+    assert decide_label(fresh, "any headline", None, None, "2026-10-13")[0] == "signal"
+    background = _ex("m5_qatar_force_majeure", by="QatarEnergy", day="2026-09-30")
+    assert decide_label(background, "any headline", None, None, "2026-10-16")[:2] == ("noise", "repeat")
 
 
 
 # --- Corroboration: who else reported this same event -----------------------------
 
-from datetime import datetime, timedelta, timezone  # noqa: E402
+from datetime import date, datetime, timedelta, timezone  # noqa: E402
 
 from pipeline.middle_east_signal_classifier import (  # noqa: E402
     build_middle_east_stories,
@@ -1075,9 +1132,10 @@ def test_country_null_string_is_absent() -> None:
 
 def test_read_through_only_for_codes_the_spec_ties_to_stock_moves() -> None:
     names, _ = _index()
-    # A construction contract or a ship incident moves no spec row.
+    # A construction contract moves no spec row...
     assert read_through(_ex("m2_deal_or_construction", news="good", deal_level=4), names) == []
-    assert read_through(_ex("m4_ship_incident"), names) == []
+    # ...ships attacked do: the spec row's own words (review point 24).
+    assert {a["ticker"] for a in read_through(_ex("m4_ship_incident"), names)} == {"MU", "INTC"}
     # A helium restart reverses the direction AND the wording.
     good = {a["ticker"]: a for a in read_through(_ex("m5_qatar_force_majeure", news="good"), names)}
     assert good["MU"]["share_price"] == "rise"
@@ -1113,24 +1171,53 @@ def test_sec_rows_carry_event_code_issuer_and_summary() -> None:
     ("Estithmar will build MEEZA's new data centre in two phases.", "weak_signal"),
 ])
 def test_a_data_centre_deal_must_involve_hardware(body, label) -> None:
-    got, _, _ = decide_label(_ex("m2_deal_or_construction", deal_level=2), "", body)
+    # A construction update (no deal level): only the hardware test decides.
+    got, _, _ = decide_label(_ex("m2_deal_or_construction", companies=[_G42]), "", body)
     assert got == label
 
 
 
 # --- Field naming and the 403-article run fixes (2026-10-22) --------------------------
 
-@pytest.mark.parametrize("title, announced", [
-    ("Hormuz: As Global Gas Crisis Unfolds, Qatar extends Force Majeure", True),
-    ("QatarEnergy declares force majeure on LNG cargoes", True),
-    ("QatarEnergy to restart Ras Laffan trains next month", True),
-    ("Qatar LNG Exports Plunge 96% as Strait of Hormuz Disruption Persists", False),
-    ("Pakistan seeks alternative LNG supplies, braces for winter shortages amid Qatar force majeure", False),
-    ("Why Qatar's LNG Exports May Take Years to Recover From the Iran War", False),
-])
-def test_qatar_alert_needs_qatarenergys_own_action_in_the_headline(title, announced) -> None:
-    label, _, _ = decide_label(_ex("m5_qatar_force_majeure"), title)
-    assert (label == "signal") is announced
+def test_an_old_event_is_a_repeat_by_its_own_date() -> None:
+    """New = happened within 7 days of the article - from the event's date,
+    not a yes/no from the model. No date is judged new."""
+    old = _ex("m4_strike_on_site", place="Ras Laffan", country="Qatar", day="2026-09-01")
+    assert decide_label(old, "", None, None, "2026-10-17")[:2] == ("noise", "repeat")
+    m8 = _ex("m8_enforcement", day="2026-09-01", companies=[_G42])
+    assert decide_label(m8, "", None, None, "2026-10-17")[:2] == ("weak_signal", "m8_repeat")
+    recent = _ex("m4_strike_on_site", place="Ras Laffan", country="Qatar", day="2026-10-12")
+    assert decide_label(recent, "", None, None, "2026-10-17")[0] == "signal"
+    # Undated: not a repeat, but an attack alert needs its day - stored as weak.
+    undated = _ex("m4_strike_on_site", place="Ras Laffan", country="Qatar")
+    assert decide_label(undated, "", None, None, "2026-10-17")[0] == "weak_signal"
+
+
+def test_an_event_date_after_the_article_is_dropped() -> None:
+    from pipeline.middle_east_signal_classifier import event_date_checked
+    assert event_date_checked("2026-10-17", "2026-10-17T10:00:00+00:00") == "2026-10-17"
+    assert event_date_checked("2026-10-25", "2026-10-17T10:00:00+00:00") is None
+    assert event_date_checked("17 October", "2026-10-17") is None
+    # A month alone ("last month") is kept; a month after the article is not.
+    assert event_date_checked("2026-09", "2026-10-13") == "2026-09"
+    assert event_date_checked("2026-11", "2026-10-13") is None
+
+
+def test_an_event_dated_only_last_month_is_old() -> None:
+    """Point 40: a force majeure "extended last month" mentioned as background."""
+    bg = _ex("m5_qatar_force_majeure", by="QatarEnergy", day="2026-09")
+    assert decide_label(bg, "", None, None, "2026-10-13")[:2] == ("noise", "repeat")
+    # This month is not old, but not shown new either: kept, not alerted
+    # (Edison's 28 Sep extension re-alerted as "2026-10", 2026-10-24).
+    this_month = _ex("m5_qatar_force_majeure", by="QatarEnergy", day="2026-10")
+    assert decide_label(this_month, "", None, None, "2026-10-13")[0] == "weak_signal"
+
+
+def test_a_month_alone_never_joins_two_reports() -> None:
+    a = _ev(1, "m4_strike_on_site", "Ras Laffan", label="signal")
+    b = _ev(2, "m4_strike_on_site", "Ras Laffan", hours=24 * 5)
+    a["metadata"]["event"]["date"] = b["metadata"]["event"]["date"] = "2026-10"
+    assert find_same_event_groups([a, b]) == []          # 5 days apart, no exact day
 
 
 def test_a_gulf_rule_must_be_about_ai_data_or_chips() -> None:
@@ -1161,7 +1248,8 @@ def test_gulf_countries_and_the_coalition_never_make_a_story_alone() -> None:
 
 
 def test_a_reaction_headline_is_never_a_signal() -> None:
-    ex = _ex("m4_strike_on_site", place="Ras Laffan")
+    ex = _ex("m4_strike_on_site", place="Ras Laffan", country="Qatar", day="2026-10-14",
+             summary="A Houthi missile hit the Ras Laffan LNG plant.")
     title = "UN Security Council Members Strongly Condemn Houthi Attacks Against Saudi Arabia"
     label, rule, why = decide_label(ex, title)
     assert (label, rule) == ("weak_signal", "m4_strike_confirmed_reaction_headline")
@@ -1169,22 +1257,196 @@ def test_a_reaction_headline_is_never_a_signal() -> None:
 
 
 
-@pytest.mark.parametrize("by, body, label, rule", [
-    ("IRGC Navy", "The strait is closed to all ships.", "signal",
-     "m4_waterway_declared_by_controlling_party"),
-    ("Houthi military spokesman", "The Bab el-Mandeb is closed.", "signal",
-     "m4_waterway_declared_by_controlling_party"),
-    # The US is not the side that controls Hormuz...
-    ("US Navy Captain Tim Hawkins", "The strait is completely open.", "weak_signal",
-     "m4_waterway_unconfirmed_by_ship_counts"),
-    # ...unless ship-tracking figures in the article back the statement.
-    ("US Navy Captain Tim Hawkins", "Kpler data showed 400 vessels crossed in the past week.",
-     "signal", "m4_waterway_confirmed_by_ship_counts"),
+@pytest.mark.parametrize("code, place, by, body, status, label, rule", [
+    # A closure already alerted: the IRGC saying it again restates it (review point 1).
+    ("m4_waterway_closed", "Strait of Hormuz", "IRGC Navy", "The strait remains closed.",
+     {"hormuz": {"closed": True, "as_of": "since 12 October 2026", "said": {}}},
+     "noise", "m4_waterway_status_unchanged"),
+    # The Red Sea has no known status: the Houthis closing it is news.
+    ("m4_waterway_closed", "Bab el-Mandeb", "Houthi military spokesman", "The Bab el-Mandeb is closed.",
+     {}, "signal", "m4_waterway_closed_declared_by_controlling_party"),
+    # The US saying Hormuz is open is the other side of a contested status
+    # (review point 2) - shown, not an alert...
+    ("m4_waterway_reopened", "Strait of Hormuz", "US Navy Captain Tim Hawkins",
+     "The strait is completely open.",
+     {"hormuz": {"said": {True: {"by": "IRGC Navy", "date": date(2026, 10, 17)}}}},
+     "weak_signal", "m4_waterway_reopened_contested"),
+    # ...unless ship-tracking figures in the article back it.
+    ("m4_waterway_reopened", "Strait of Hormuz", "US Navy Captain Tim Hawkins",
+     "The strait is open: Kpler data showed 400 vessels crossed in the past week.", {},
+     "signal", "m4_waterway_reopened_confirmed_by_ship_counts"),
+    # Iran reopening the strait is a change.
+    ("m4_waterway_reopened", "Strait of Hormuz", "IRGC Navy", "Ships may pass from today.", {},
+     "signal", "m4_waterway_reopened_declared_by_controlling_party"),
+    # After a stored reopening, a new closure is a change again.
+    ("m4_waterway_closed", "Strait of Hormuz", "IRGC Navy", "The strait is closed.",
+     {"hormuz": {"closed": False, "as_of": "since 30 October 2026"}},
+     "signal", "m4_waterway_closed_declared_by_controlling_party"),
 ])
-def test_waterway_alerts(by, body, label, rule) -> None:
-    ex = _ex("m4_waterway_status", place="Strait of Hormuz")
+def test_waterway_alerts_need_a_change_of_status(code, place, by, body, status, label, rule) -> None:
+    ex = _ex(code, place=place, summary=body)
     ex["confirmation"] = {"level": "official", "by": by}
-    assert decide_label(ex, "Hormuz", body)[:2] == (label, rule)
+    got_label, got_rule, why = decide_label(ex, "Hormuz", body, status)
+    assert (got_label, got_rule) == (label, rule)
+    if rule.endswith("_contested"):
+        assert why == "Contested: IRGC Navy said on 17 October that the Strait of Hormuz is closed."
+
+
+def test_remains_closed_with_no_history_is_judged_by_its_date() -> None:
+    """With nothing stored, "closed since March" is old by its own date -
+    no hand-set starting status."""
+    ex = _ex("m4_waterway_closed", place="Strait of Hormuz", day="2026-03-02", by="IRGC Navy")
+    assert decide_label(ex, "", "The strait remains closed.", {}, "2026-10-17")[:2] == ("noise", "repeat")
+
+
+def test_current_waterway_status_comes_from_the_latest_alerted_change() -> None:
+    from pipeline.middle_east_signal_classifier import current_waterway_status
+    closed = _ev(1, "m4_waterway_closed", "Strait of Hormuz", label="signal")
+    reopened = _ev(2, "m4_waterway_reopened", "the Strait of Hormuz", hours=48, label="signal")
+    weak = _ev(3, "m4_waterway_closed", "Strait of Hormuz", hours=72)          # not alerted
+    folded = _ev(4, "m4_waterway_closed", "Strait of Hormuz", hours=80, label="signal")
+    folded["metadata"]["collapsed_into"] = 2
+    status = current_waterway_status([weak, reopened, closed, folded])
+    assert status["hormuz"]["closed"] is False and status["hormuz"]["as_of"].startswith("since ")
+    assert current_waterway_status([]) == {}
+
+
+# --- Review of 2026-10-23 -------------------------------------------------------------
+
+def test_the_alert_country_comes_from_the_event_country_not_a_city_list() -> None:
+    """Dhahran is in no list: its country, from the extraction, decides."""
+    ex = _ex("m4_strike_on_site", place="Dhahran", country="Saudi Arabia", day="2026-10-14")
+    assert decide_label(ex)[:2] == ("signal", "m4_strike_confirmed")
+    no_country = _ex("m4_strike_on_site", place="Dhahran")
+    assert decide_label(no_country)[:2] == ("weak_signal", "m4_strike_outside_alert_countries")
+
+
+def test_an_outlet_written_with_spaces_still_cannot_confirm() -> None:
+    names, tickers = _index()
+    body = _BODY + " NDTV Profit reported the switch-on."
+    ex, _ = check_extraction(_answer(confirmation={"level": "official", "by": "NDTV Profit"}),
+                             "G42 switches on", body, names, tickers, outlet="ndtvprofit")
+    assert ex["confirmation"]["level"] == "named_source"
+
+
+@pytest.mark.parametrize("place, country, outside", [
+    ("Khamis Mushait", "Saudi Arabia", False),
+    ("Ras Laffan", None, False),                 # no country given is not evidence
+    ("Strait of Hormuz", None, False),           # the region's sea routes
+    ("Gulf of Oman", None, False),
+    ("Black Sea", None, True),                   # another sea
+    ("Sulina Anchorage", "Romania", True),       # another country
+])
+def test_region_is_judged_by_country_or_sea_route(place, country, outside) -> None:
+    rule = decide_label(_ex("m4_ship_incident", place=place, country=country))[1]
+    assert (rule == "m4_outside_middle_east") is outside
+
+
+def test_place_is_kept_when_the_text_names_it_without_its_kind_word() -> None:
+    names, tickers = _index()
+    body = "Iran's navy said a tanker hit a mine in Hormuz on Saturday."
+    ex, dropped = check_extraction(
+        _answer(event="m4_ship_incident", place="Strait of Hormuz", summary="A tanker hit a mine.",
+                reason_facts="A tanker hit a mine."),
+        "Tanker hit", body, names, tickers)
+    assert ex["event"]["place"] == "Strait of Hormuz" and "event.place" not in dropped
+    ex, dropped = check_extraction(
+        _answer(event="m4_ship_incident", place="Strait of Malacca", summary="A tanker hit a mine.",
+                reason_facts="A tanker hit a mine."),
+        "Tanker hit", body, names, tickers)
+    assert "place" not in ex["event"] and "event.place" in dropped
+
+
+def test_abbreviation_dots_do_not_hide_a_confirmer() -> None:
+    from pipeline.middle_east_signal_classifier import normalize_text
+    body = normalize_text("The U.K. Maritime Trade Operations Agency (UKMTO) said 12 ships were hit.")
+    assert "uk maritime trade operations agency" in body
+    # Decimals and multi-letter abbreviations keep their dots.
+    assert normalize_text("$1.5 billion, Acme Inc. said") == "$1.5 billion, acme inc. said"
+
+
+def test_an_intel_site_event_written_as_intel_names_intel_only() -> None:
+    names, _ = _index()
+    intel = {"name": "Intel", "ticker": "INTC", "country": None, "tracked": False}
+    got = read_through(_ex("m7_site_incident", companies=[intel]), names)
+    assert [a["ticker"] for a in got] == ["INTC"]
+    # With no company named, the spec's Israel row stands.
+    assert {a["ticker"] for a in read_through(_ex("m7_site_incident"), names)} == {"NVDA", "INTC", "TSEM"}
+
+
+def test_a_funds_holdings_are_never_its_read_through() -> None:
+    """Together AI's Abu Dhabi office named GlobalFoundries through
+    Mubadala (review point 23)."""
+    names, _ = _index()
+    mubadala = {"name": "Mubadala", "ticker": None, "country": "UAE", "tracked": True}
+    deal = _ex("m2_deal_or_construction", news="good", deal_level=2, companies=[mubadala])
+    assert "GFS" not in {a["ticker"] for a in read_through(deal, names)}
+
+
+def test_an_intel_fab_event_names_intel_only() -> None:
+    """Review point 22: every Intel fab row named Nvidia, Intel and Tower."""
+    names, _ = _index()
+    fab = {"name": "Intel Kiryat Gat", "ticker": None, "country": "Israel", "tracked": True}
+    got = read_through(_ex("m7_site_incident", companies=[fab]), names)
+    assert [(a["ticker"], a["share_price"]) for a in got] == [("INTC", "fall")]
+
+
+def test_a_site_incident_and_its_follow_up_days_later_are_one_story() -> None:
+    blast = _ev(1, "m7_site_incident", "Kiryat Gat", subjects=["Intel Kiryat Gat"], label="signal")
+    leak = _ev(2, "m7_site_incident", "Kiryat Gat", subjects=["Intel Kiryat Gat"], hours=5 * 24)
+    [story] = build_middle_east_stories([blast, leak])
+    assert story["seed"]["id"] == 1
+    # Other event types keep the 72-hour window.
+    a = _row(3, "M4", "Strait of Hormuz", label="signal")
+    b = _row(4, "M4", "Strait of Hormuz", hours=5 * 24)
+    assert build_middle_east_stories([a, b]) == []
+
+
+def test_the_better_confirmed_report_leads_a_story() -> None:
+    first = _ev(1, "m4_ship_incident", "Strait of Hormuz", conf="named_source")
+    official = _ev(2, "m4_ship_incident", "Strait of Hormuz", hours=6, conf="official")
+    [story] = build_middle_east_stories([first, official])
+    assert story["seed"]["id"] == 2
+
+
+def _history(ticker_moves):
+    """{ticker: [daily % moves]} -> price-history rows, oldest move first."""
+    out = {}
+    for t, moves in ticker_moves.items():
+        price, rows = 100.0, []
+        for i, m in enumerate([0.0] + moves):
+            price *= 1 + m / 100
+            rows.append({"date": f"2026-{8 + (i // 28):02d}-{1 + i % 28:02d}", "adjusted_close": price})
+        out[t] = rows
+    return out
+
+
+def test_an_unusual_day_is_oil_or_several_stocks_far_beyond_normal() -> None:
+    from pipeline.middle_east_signal_classifier import missed_move_lines, unusual_market_days
+    quiet = [0.5, -0.5] * 15                              # normal move 0.5%
+    hist = _history({"BNO": quiet + [2.0, 0.4],           # oil 4x normal on day 31
+                     "INTC": quiet + [0.2, -2.0], "MU": quiet + [0.1, -1.9], "NVDA": quiet + [0.3, -1.8],
+                     "AMD": quiet + [0.2, 2.5]})          # 4 stocks unusual on day 32; one alone earlier
+    days = unusual_market_days(hist, ["BNO", "INTC", "MU", "NVDA", "AMD"], since="2026-09-01")
+    assert [(d["day"], bool(d["oil"]), len(d["stocks"])) for d in days] == [
+        ("2026-09-04", True, 0), ("2026-09-05", False, 4)]
+    lines = missed_move_lines(days, "BNO", {"2026-09-04": 2})
+    assert lines[0].startswith("COVERED 2026-09-04") and lines[1].startswith("COVERED 2026-09-05")
+    assert missed_move_lines(days, "BNO", {})[-1] == "missed-move score: 2 of 2 unusual days had no Middle East signal"
+
+
+def test_a_single_stock_move_is_company_news_not_an_unusual_day() -> None:
+    from pipeline.middle_east_signal_classifier import unusual_market_days
+    quiet = [0.5, -0.5] * 15
+    hist = _history({"BNO": quiet + [0.4], "AMZN": quiet + [5.0], "MU": quiet + [0.3]})
+    assert unusual_market_days(hist, ["BNO", "AMZN", "MU"], since="2026-09-01") == []
+
+
+def test_market_reference_tickers_come_from_the_tables() -> None:
+    from pipeline.middle_east_signal_classifier import market_reference_tickers
+    tickers = market_reference_tickers(_news_retrieval_company_table())
+    assert tickers[0] == "BNO" and {"NVDA", "INTC", "MU", "GFS"} <= set(tickers)
+    assert len(tickers) == len(set(tickers))
 
 
 # --- Same-event duplicates: one row per event (tombstones) ---------------------------
@@ -1205,9 +1467,9 @@ def _ev(id_, code, place=None, subjects=(), hours=0, label="weak_signal", conf="
 
 
 def test_three_reports_of_the_hormuz_closure_fold_into_the_best_one() -> None:
-    rows = [_ev(1, "m4_waterway_status", "Strait of Hormuz", hours=0, conf="unnamed"),
-            _ev(2, "m4_waterway_status", "the Strait of Hormuz", hours=3, label="signal"),
-            _ev(3, "m4_waterway_status", "Strait of Hormuz", hours=20, label="signal", count=4)]
+    rows = [_ev(1, "m4_waterway_closed", "Strait of Hormuz", hours=0, conf="unnamed"),
+            _ev(2, "m4_waterway_closed", "the Strait of Hormuz", hours=3, label="signal"),
+            _ev(3, "m4_waterway_closed", "Strait of Hormuz", hours=20, label="signal", count=4)]
     [group] = find_same_event_groups(rows)
     # A signal before a weak one; among signals, the better corroborated.
     assert group["kept"]["id"] == 3
@@ -1224,7 +1486,7 @@ def test_three_reports_of_the_hormuz_closure_fold_into_the_best_one() -> None:
     (_ev(1, "m4_threat_or_statement", "Strait of Hormuz", subjects=["Iran"]),
      _ev(2, "m4_threat_or_statement", "Strait of Hormuz", subjects=["IMO"], hours=3)),
     # Same place, different event code.
-    (_ev(1, "m4_waterway_status", "Strait of Hormuz"), _ev(2, "m4_threat_or_statement", "Strait of Hormuz")),
+    (_ev(1, "m4_waterway_closed", "Strait of Hormuz"), _ev(2, "m4_threat_or_statement", "Strait of Hormuz")),
     # More than 48 hours apart.
     (_ev(1, "m7_site_incident", "Kiryat Gat"), _ev(2, "m7_site_incident", "Kiryat Gat", hours=60)),
 ])
@@ -1361,3 +1623,515 @@ def test_results_events_view_paginates_over_visible_rows_only() -> None:
     finally:
         with get_db() as conn:
             conn.execute("DELETE FROM agent_classifications WHERE source_id = ANY(%s)", (urls,))
+
+
+# --- Generalised fixes (2026-10-23): event date, combined confirmation ----------------
+
+def test_reports_of_one_event_fold_by_its_own_date_days_apart() -> None:
+    """A sinking on the 13th re-reported on the 19th is one event."""
+    a = _ev(1, "m4_ship_sunk_or_crew_killed", "Strait of Hormuz", subjects=["GFS Pride"], label="signal")
+    b = _ev(2, "m4_ship_sunk_or_crew_killed", "Strait of Hormuz", subjects=["GFS Pride"], hours=6 * 24)
+    for r in (a, b):
+        r["metadata"]["event"]["date"] = "2026-10-13"
+    assert len(find_same_event_groups([a, b])) == 1
+    c = _ev(3, "m4_ship_sunk_or_crew_killed", "Strait of Hormuz", subjects=["GFS Pride"], hours=6 * 24)
+    c["metadata"]["event"]["date"] = "2026-10-19"           # a different day: another event
+    assert find_same_event_groups([a, c]) == []
+
+
+def test_the_same_attack_count_repeated_for_days_is_one_event() -> None:
+    rows = [_ev(i, "m4_attack_tally", "Strait of Hormuz", hours=24 * i, label="signal") for i in range(3)]
+    for r in rows:
+        r["metadata"]["event"]["date"] = "2026-10-16"
+    [group] = find_same_event_groups(rows)
+    assert len(group["duplicates"]) == 2
+
+
+@pytest.mark.parametrize("confs, expected", [
+    # Lead unnamed, another report official -> official.
+    ([{"level": "unnamed"}, {"level": "official", "by": "UKMTO"}], ["UKMTO"]),
+    # Two different named sources -> confirmed.
+    ([{"level": "named_source", "by": "IRGC Navy"},
+      {"level": "named_source", "by": "Maritime and Port Authority of Singapore"}],
+     ["IRGC Navy", "Maritime and Port Authority of Singapore"]),
+    # One source repeated by many outlets -> no change.
+    ([{"level": "named_source", "by": "IRGC Navy"}, {"level": "named_source", "by": "IRGC"}], None),
+    # Unnamed only -> no change.
+    ([{"level": "unnamed"}, {"level": "unnamed"}], None),
+    # The lead is already official -> nothing to raise.
+    ([{"level": "official", "by": "UKMTO"}, {"level": "named_source", "by": "Reuters"}], None),
+])
+def test_confirmed_across_reports(confs, expected) -> None:
+    from pipeline.middle_east_signal_classifier import confirmed_across_reports
+    reports = [{"metadata": {"confirmation": c}} for c in confs]
+    got = confirmed_across_reports(reports)
+    assert (got["by"] if got else None) == expected
+
+
+def test_combined_confirmation_raises_the_lead_rows_label_and_says_who() -> None:
+    from pipeline.middle_east_signal_classifier import relabel_confirmed
+    names, _ = _index()
+    kept = _ev(1, "m4_ship_sunk_or_crew_killed", "Strait of Hormuz", conf="unnamed")
+    kept["metadata"]["confirmation"] = {"level": "unnamed"}
+    kept["metadata"]["event"]["date"] = "2026-10-13"
+    kept["signal_reason"] = "Nine ships were attacked and one sank. Only unnamed sources report it so far."
+    got = relabel_confirmed(kept, {"level": "official", "by": ["UKMTO"]}, names)
+    assert got[0] == "signal" and got[1].endswith("_confirmed_across_reports")
+    assert got[2].startswith("Nine ships were attacked and one sank. A ship was sunk")
+    assert got[2].endswith("Confirmed across reports by UKMTO.")
+    # Already a signal: nothing to raise.
+    kept["signal_detection"] = "signal"
+    assert relabel_confirmed(kept, {"level": "official", "by": ["UKMTO"]}, names) is None
+
+
+def test_one_attack_coded_two_ways_is_one_event() -> None:
+    a = _ev(1, "m4_ship_incident", "Strait of Hormuz", subjects=["IRGC Navy"], label="signal")
+    b = _ev(2, "m4_strike_on_site", "Strait of Hormuz", subjects=["IRGC Navy"], hours=5)
+    for r in (a, b):
+        r["metadata"]["event"]["date"] = "2026-10-22"
+    assert len(find_same_event_groups([a, b])) == 1
+    # A threat about the same place is not the attack.
+    c = _ev(3, "m4_threat_or_statement", "Strait of Hormuz", subjects=["IRGC Navy"], hours=5)
+    assert find_same_event_groups([a, c]) == []
+
+
+def test_a_tracked_company_in_both_headlines_joins_one_strike() -> None:
+    names, _ = _index()
+    a = _ev(1, "m4_strike_on_site", "Aramco compound, Eastern Province", label="signal")
+    b = _ev(2, "m4_strike_on_site", "Dhahran", hours=20)
+    a["title"] = "Saudi Ministry of Energy reports limited fire in building at Aramco compound"
+    b["title"] = "Houthis vow more attacks after Aramco headquarters strike"
+    a["metadata"]["event"]["date"], b["metadata"]["event"]["date"] = "2026-10-13", "2026-10-14"
+    assert find_same_event_groups([a, b]) == []                 # without the company table
+    assert len(find_same_event_groups([a, b], names)) == 1
+
+
+@pytest.mark.parametrize("day_b, by_b, same", [
+    ("2026-10-17", "IRGC Navy", True),      # same day, place and source
+    ("2026-10-18", "IRGC Navy", False),     # the next day's mine strike is another event
+    ("2026-10-17", "UKMTO", False),         # a different source may be a different tanker
+])
+def test_unnamed_ship_attacks_fold_only_on_same_day_place_and_source(day_b, by_b, same) -> None:
+    a = _ev(1, "m4_ship_incident", "Strait of Hormuz", label="signal")
+    b = _ev(2, "m4_ship_incident", "southern Strait of Hormuz", hours=10)
+    a["metadata"]["event"]["date"], b["metadata"]["event"]["date"] = "2026-10-17", day_b
+    a["metadata"]["confirmation"] = {"level": "official", "by": "IRGC Navy"}
+    b["metadata"]["confirmation"] = {"level": "official", "by": by_b}
+    assert (len(find_same_event_groups([a, b])) == 1) is same
+
+
+def test_a_place_inside_another_is_the_same_place_for_a_count() -> None:
+    a = _ev(1, "m4_attack_tally", "Persian Gulf and Strait of Hormuz", label="signal")
+    b = _ev(2, "m4_attack_tally", "Strait of Hormuz", hours=12, label="signal")
+    a["metadata"]["event"]["date"], b["metadata"]["event"]["date"] = "2026-10-21", "2026-10-22"
+    assert len(find_same_event_groups([a, b])) == 1
+    c = _ev(3, "m4_attack_tally", "Red Sea", hours=12, label="signal")
+    c["metadata"]["event"]["date"] = "2026-10-22"
+    assert find_same_event_groups([a, c]) == []
+
+
+def test_a_country_alone_never_joins_two_strikes() -> None:
+    a = _ev(1, "m4_strike_on_site", "Shaybah oil field, Saudi Arabia", label="signal")
+    b = _ev(2, "m4_strike_on_site", "Saudi Arabia", hours=3)
+    for r in (a, b):
+        r["metadata"]["event"]["date"] = "2026-10-21"
+    assert find_same_event_groups([a, b]) == []
+
+
+def test_separate_weak_ship_attacks_add_up_to_one_wave_alert() -> None:
+    """Review point 13: a week of tanker attacks stayed weak, row by row."""
+    from pipeline.middle_east_signal_classifier import attack_wave_raises
+    rows = []
+    for i, day in enumerate(["2026-10-14", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19"]):
+        r = _ev(i, "m4_ship_incident", "Strait of Hormuz", hours=24 * i)
+        r["metadata"]["event"]["date"] = day
+        rows.append(r)
+    raises = attack_wave_raises(rows)
+    # The third attack in 7 days completes the wave; the 4th and 5th are the
+    # same week - one alert, not one per ship.
+    assert [r[0] for r in raises] == [2]
+    assert raises[0][1] == "signal" and "attack number 3" in raises[0][3]
+    # Spread out over weeks: no wave.
+    spread = []
+    for i, day in enumerate(["2026-09-01", "2026-09-12", "2026-09-25"]):
+        r = _ev(10 + i, "m4_ship_incident", "Strait of Hormuz")
+        r["metadata"]["event"]["date"] = day
+        spread.append(r)
+    assert attack_wave_raises(spread) == []
+    # Other waterways are counted apart.
+    red = []
+    for i in range(2):
+        r = _ev(20 + i, "m4_ship_incident", "Red Sea")
+        r["metadata"]["event"]["date"] = "2026-10-17"
+        red.append(r)
+    assert all(rid not in (20, 21) for rid, *_ in attack_wave_raises(rows[:2] + red))
+
+
+@pytest.mark.parametrize("place, outside", [
+    ("off Saudi Arabia's Gulf coast", False), ("Gulf", False), ("Gulf of Mexico", True)])
+def test_the_gulf_and_a_named_country_are_in_the_region(place, outside) -> None:
+    rule = decide_label(_ex("m4_ship_incident", place=place))[1]
+    assert (rule == "m4_outside_middle_east") is outside
+
+
+def test_a_source_and_its_adjective_are_one_source() -> None:
+    from pipeline.middle_east_signal_classifier import _same_source
+    assert _same_source("Iran's navy", "Iranian Navy")
+    assert _same_source("IRGC Navy", "IRGC")
+    assert not _same_source("UKMTO", "Maritime and Port Authority of Singapore")
+    assert not _same_source("Saudi Ministry of Energy", "Saudi Ministry of Defence")
+
+
+def test_a_named_ship_is_one_event_across_a_few_days() -> None:
+    a = _ev(1, "m4_ship_sunk_or_crew_killed", "Strait of Hormuz", subjects=["GFS Pride"], label="signal")
+    b = _ev(2, "m4_ship_sunk_or_crew_killed", "Strait of Hormuz", subjects=["GFS Pride"], hours=24)
+    a["metadata"]["event"]["date"], b["metadata"]["event"]["date"] = "2026-10-13", "2026-10-15"
+    assert len(find_same_event_groups([a, b])) == 1
+
+
+def test_no_wave_alert_in_a_week_that_already_has_a_signal() -> None:
+    from pipeline.middle_east_signal_classifier import attack_wave_raises
+    rows = []
+    for i, (day, label) in enumerate([("2026-10-14", "signal"), ("2026-10-16", "weak_signal"),
+                                      ("2026-10-17", "weak_signal")]):
+        r = _ev(i, "m4_ship_incident", "Strait of Hormuz", label=label)
+        r["metadata"]["event"]["date"] = day
+        rows.append(r)
+    assert attack_wave_raises(rows) == []
+
+
+def test_a_tracked_site_as_the_place_names_its_owner() -> None:
+    """The model listed no company for an incident at Kiryat Gat; the
+    company table knows it as Intel's fab."""
+    names, tickers = _index()
+    body = "Fire and rescue services responded to hazardous materials detected at the factory in Kiryat Gat."
+    ex, _ = check_extraction(
+        _answer(event="m7_site_incident", place="Kiryat Gat", companies=[],
+                confirmation={"level": "official", "by": "Fire and rescue services"},
+                summary="Hazardous materials were detected at the factory.",
+                reason_facts="Hazardous materials were detected at the factory."),
+        "Rescue services on site", body, names, tickers)
+    assert [c["name"] for c in ex["companies"]] == ["Intel Kiryat Gat"]
+    assert [a["ticker"] for a in read_through({**ex, "news_effect": "bad"}, names)] == ["INTC"]
+
+
+def test_other_events_are_checked_like_the_main_event() -> None:
+    names, tickers = _index()
+    body = ("The IRGC said the Strait of Hormuz is closed to all shipping from today. "
+            "UKMTO said three tankers were struck near Hormuz on 17 October.")
+    raw = _answer(event="m4_attack_tally", place="Hormuz", date="2026-10-17", country=None,
+                  confirmation={"level": "official", "by": "UKMTO"},
+                  summary="Three tankers were struck near Hormuz.", reason_facts="Three tankers were struck.",
+                  other_events=[
+                      {"code": "m4_waterway_closed", "place": "Strait of Hormuz", "date": "2026-10-17",
+                       "confirmation": {"level": "official", "by": "IRGC"}, "facts": "The IRGC closed the strait."},
+                      {"code": "m4_commentary", "place": "Hormuz"},                    # never an event
+                      {"code": "m4_attack_tally", "place": "Hormuz"},                  # same code as main
+                      {"code": "m4_threat_or_statement", "place": "Strait of Malacca",  # place not in text
+                       "confirmation": {"level": "official", "by": "Someone Absent"}}])
+    ex, dropped = check_extraction(raw, "Hormuz closed", body, names, tickers, published="2026-10-17")
+    codes = [o["event"]["code"] for o in ex["other_events"]]
+    assert codes == ["m4_waterway_closed", "m4_threat_or_statement"]
+    assert ex["other_events"][0]["confirmation"] == {"level": "official", "by": "IRGC"}
+    assert "place" not in ex["other_events"][1]["event"]
+    assert ex["other_events"][1]["confirmation"] == {"level": "unnamed"}
+    assert "other_events[3].place" in dropped
+
+
+def test_the_strongest_event_in_an_article_becomes_its_label(monkeypatch) -> None:
+    """Main event a threat (weak); the article also reports a sinking
+    confirmed by an authority (signal) - the row is the sinking."""
+    answer = json.loads(_answer(
+        event="m4_threat_or_statement", place="Strait of Hormuz", date="2026-10-17", country=None,
+        companies=[], deal=None, news_effect="bad",
+        confirmation={"level": "official", "by": "IRGC"},
+        reason_facts="Iran warned ships to stay away.", summary="Iran warned ships to stay away."))
+    answer["other_events"] = [{"code": "m4_ship_sunk_or_crew_killed", "place": "Strait of Hormuz",
+                               "date": "2026-10-17", "confirmation": {"level": "official", "by": "UKMTO"},
+                               "facts": "A tanker sank after a mine strike, UKMTO said."}]
+    monkeypatch.setattr(mec, "_call_model", lambda system, user: json.dumps(answer))
+    article = {"url": "er-me://77", "title": "Iran warns ships", "published": "2026-10-17T12:00:00+00:00",
+               "body": "Iran warned ships to stay away from Hormuz. UKMTO said a tanker sank after a mine strike in the Strait of Hormuz.",
+               "metadata": {"source_type": "eventregistry", "er_query": "eventregistry:me_shipping"}}
+    [out] = mec.classify_middle_east_signal_batch([article], _news_retrieval_company_table())
+    r = out["result"]
+    assert r["signal"] == "signal" and r["metadata"]["event"]["code"] == "m4_ship_sunk_or_crew_killed"
+    assert r["reason"].startswith("A tanker sank after a mine strike, UKMTO said.")
+    assert [o["event"]["code"] for o in r["metadata"]["other_events"]] == ["m4_threat_or_statement"]
+
+
+# --- Full-run fixes (2026-10-23) -------------------------------------------------------
+
+@pytest.mark.parametrize("companies, by, label", [
+    ([{"name": "Maersk", "ticker": None, "country": "Denmark", "tracked": False}], "Maersk", "signal"),
+    ([], "Baltic Exchange", "weak_signal"),                                     # a rate report
+    ([{"name": "South Korea's Ministry of Oceans and Fisheries", "ticker": None,
+       "country": "South Korea", "tracked": False}], "Ministry of Transport", "weak_signal"),
+])
+def test_a_route_change_needs_the_line_or_insurer_itself(companies, by, label) -> None:
+    ex = _ex("m4_shipping_or_insurance", companies=companies, by=by)
+    assert decide_label(ex)[0] == label
+
+
+def test_an_amount_alone_is_not_a_data_centre_deal_and_a_gulf_party_is_needed() -> None:
+    port = _ex("m2_deal_or_construction", deal_level=4, amount="$100 million",
+               companies=[{"name": "CMA CGM", "ticker": None, "country": "France", "tracked": False}])
+    assert decide_label(port, "", "CMA CGM will expand the container terminal at Beirut Port.")[0] == "noise"
+    no_gulf = _ex("m2_deal_or_construction", deal_level=4, amount="$100 million", capacity="20MW",
+                  companies=[{"name": "Acme", "ticker": None, "country": "France", "tracked": False}])
+    assert decide_label(no_gulf)[:2] == ("noise", "m2_no_gulf_company")
+
+
+def test_a_completed_investment_names_who_was_invested_in() -> None:
+    mgx = {"name": "MGX", "ticker": None, "country": "UAE", "tracked": True}
+    alone = _ex("m3_investment", deal_level=4, amount="$65 billion", companies=[mgx])
+    assert decide_label(alone)[0] == "weak_signal"
+    both = _ex("m3_investment", deal_level=4, amount="$65 billion",
+               companies=[mgx, {"name": "Anthropic", "ticker": None, "country": "United States", "tracked": False}])
+    assert decide_label(both)[0] == "signal"
+
+
+def test_sanctions_over_oil_shipping_are_not_chip_enforcement() -> None:
+    ex = _ex("m8_enforcement", companies=[{"name": "Whales Shipping Line LLC", "ticker": None,
+                                           "country": "UAE", "tracked": False}])
+    oil = "The Treasury sanctioned shipping agents and nine vessels in Iran's shadow fleet carrying oil."
+    assert decide_label(ex, "", oil)[:2] == ("noise", "m8_not_chips_or_technology")
+    chips = "Commerce added the UAE firm to the Entity List for diverting Nvidia chips to China."
+    assert decide_label(ex, "", chips)[0] == "signal"
+
+
+def test_an_undated_force_majeure_is_background_and_rationing_needs_the_supplier() -> None:
+    fm = _ex("m5_qatar_force_majeure", by="QatarEnergy")
+    assert decide_label(fm)[:2] == ("weak_signal", "m5_force_majeure_undated")
+    assert decide_label(_ex("m5_supplier_rationing", confirmation="named_source"))[0] == "weak_signal"
+    assert decide_label(_ex("m5_supplier_rationing"))[0] == "signal"
+
+
+def test_a_deal_confirmed_by_a_non_party_is_a_named_source() -> None:
+    names, tickers = _index()
+    body = _BODY + " S&P Global Ratings said in a report."
+    ex, dropped = check_extraction(_answer(confirmation={"level": "official", "by": "S&P Global Ratings"}),
+                                   "G42 switches on", body, names, tickers)
+    assert ex["confirmation"]["level"] == "named_source" and "confirmation.not_a_party" in dropped
+
+
+def test_the_target_confirming_leads_over_the_attackers_claim() -> None:
+    claim = _ev(1, "m4_strike_on_site", "Dhahran", subjects=["Saudi Aramco"], label="signal", hours=0)
+    target = _ev(2, "m4_strike_on_site", "Dhahran", subjects=["Saudi Aramco"], label="signal", hours=5)
+    claim["metadata"]["confirmation"] = {"level": "official", "by": "Houthi spokesman Yahya Saree"}
+    target["metadata"]["confirmation"] = {"level": "official", "by": "Saudi Energy Ministry"}
+    for r in (claim, target):
+        r["metadata"]["event"]["date"] = "2026-10-14"
+    [group] = find_same_event_groups([claim, target])
+    assert group["kept"]["id"] == 2
+
+
+@pytest.mark.parametrize("code, title, summary, place, want_rule_prefix", [
+    # A tanker that exploded but did not sink is a ship attack, not a sinking.
+    ("m4_ship_sunk_or_crew_killed", "Tanker explodes after hitting mine",
+     "An oil tanker exploded and caught fire after hitting a mine.", "Strait of Hormuz", "m4_ship_incident"),
+    # A helicopter shot down is not a ship.
+    ("m4_ship_sunk_or_crew_killed", "Helicopter shot down",
+     "Forces shot down a helicopter, killing both pilots.", "Saudi border", "m4_no_economic_target"),
+    # A real sinking stands.
+    ("m4_ship_sunk_or_crew_killed", "Ship sinks after strike",
+     "The container ship sank after being hit by a projectile.", "Strait of Hormuz", "m4_ship_sunk"),
+    # An oil spill is no attack.
+    ("m4_strike_on_site", "Beaches shut after oil spill",
+     "Authorities closed beaches after an oil spill from a tanker.", "Umm Al Quwain", "guard_no_attack"),
+    # An attack with no site named is another strike - noise.
+    ("m4_strike_on_site", "Launcher destroyed",
+     "The coalition destroyed a missile launcher used in an attack on Riyadh.", "Riyadh", "m4_no_economic"),
+    # A strike on a named site stands.
+    ("m4_strike_on_site", "Drone hits Aramco oilfield",
+     "A drone struck the Shaybah oil field, killing two.", "Shaybah oil field", "m4_strike_confirmed"),
+])
+def test_guardrails_need_the_words_that_make_a_code_true(code, title, summary, place, want_rule_prefix) -> None:
+    ex = _ex(code, place=place, country="Saudi Arabia", summary=summary, reason_facts=summary)
+    assert decide_label(ex, title, summary)[1].startswith(want_rule_prefix)
+
+
+def test_a_list_of_investments_is_not_one_new_investment() -> None:
+    mgx = {"name": "MGX", "ticker": None, "country": "UAE", "tracked": True}
+    us = [{"name": n, "ticker": None, "country": "United States", "tracked": False}
+          for n in ("Anthropic", "Databricks")]
+    ex = _ex("m3_investment", deal_level=4, amount="$65 billion", companies=[mgx, *us])
+    assert decide_label(ex)[:2] == ("weak_signal", "m3_several_investments_listed")
+
+
+
+@pytest.mark.parametrize("code, summary, place, want", [
+    ("m4_strike_on_site", "Authorities closed beaches after a tanker attacked offshore spilled oil.",
+     "Umm Al Quwain coast", "noise"),                                   # "oil" is no site
+    ("m4_waterway_closed", "Unverified claims of mine threats to two oil tankers near Hormuz.",
+     "Strait of Hormuz", "m4_threat"),                                  # no closure in the text
+    ("m5_asia_shortfall", "South Korea will burn more coal to cut winter LNG use.", "South Korea",
+     "m5_commentary"),                                                  # gas, not helium
+])
+def test_more_guardrails_on_real_misreadings(code, summary, place, want) -> None:
+    ex = _ex(code, place=place, summary=summary, reason_facts=summary, by="IRGC Navy")
+    label, rule, _ = decide_label(ex, "headline", summary)
+    assert rule.startswith(want) or label == want
+
+
+def test_an_undated_attack_count_is_weak() -> None:
+    assert decide_label(_ex("m4_attack_tally", confirmation="named_source"))[:2] == (
+        "weak_signal", "m4_attack_tally_undated")
+    assert decide_label(_ex("m4_attack_tally", confirmation="named_source", day="2026-10-16"))[0] == "signal"
+
+
+def test_an_attack_without_its_day_is_not_an_alert() -> None:
+    sunk = _ex("m4_ship_sunk_or_crew_killed", place="Strait of Hormuz", confirmation="named_source",
+               summary="A container ship sank after a strike earlier.", reason_facts="A ship sank.")
+    assert decide_label(sunk)[0] == "weak_signal"
+    month = {**sunk, "event": {**sunk["event"], "date": "2026-10"}}
+    assert decide_label(month)[0] == "weak_signal"
+    dated = {**sunk, "event": {**sunk["event"], "date": "2026-10-13"}}
+    assert decide_label(dated)[0] == "signal"
+
+
+def test_reports_of_one_attack_never_make_a_wave() -> None:
+    """Three unfolded reports of one tanker attack, same source, a day
+    apart, are one attack - no wave."""
+    from pipeline.middle_east_signal_classifier import attack_wave_raises
+    rows = []
+    for i, (day, place) in enumerate([("2026-10-07", "off Qatar"), ("2026-10-08", "north coast of Qatar"),
+                                      ("2026-10-07", "off the coast of Qatar")]):
+        r = _ev(i, "m4_ship_incident", place)
+        r["metadata"]["event"]["date"] = day
+        r["metadata"]["confirmation"] = {"level": "official", "by": "UKMTO"}
+        rows.append(r)
+    assert attack_wave_raises(rows) == []
+
+
+def test_several_counts_of_one_escalation_alert_once() -> None:
+    from pipeline.middle_east_signal_classifier import repeated_count_lowers
+    rows = []
+    for i, day in enumerate(["2026-10-13", "2026-10-16", "2026-10-17", "2026-10-25"]):
+        r = _ev(i, "m4_attack_tally", "Strait of Hormuz", label="signal")
+        r["metadata"]["event"]["date"] = day
+        rows.append(r)
+    lowered = [rid for rid, *_ in repeated_count_lowers(rows)]
+    assert lowered == [1, 2]            # the 13th alerts; the 25th starts a new window
+
+
+# --- Fixes from reviewing every visible row of the full run (2026-10-24) ------------
+
+@pytest.mark.parametrize("by, anonymous", [
+    ("an Arab diplomat posted to a major Middle Eastern country", True),
+    ("a senior Iranian official", True),
+    ("two people familiar with the plans", True),
+    ("a spokesperson for the Houthi armed forces", False),
+    ("a Pentagon spokesperson", False),
+    ("Kpler", False),
+])
+def test_an_indefinite_person_described_only_by_nationality_names_nobody(by, anonymous) -> None:
+    assert mec.is_anonymous_source(by) is anonymous
+
+
+def test_another_governments_export_rule_is_not_a_us_decision() -> None:
+    got = decide_label(_ex("m1_draft_or_hearing", place="China", country="China"))
+    assert got[:2] == ("noise", "m1_not_a_us_decision")
+    us = decide_label(_ex("m1_rule_or_licence", country="United States"))
+    assert us[:2] == ("signal", "m1_final_decision")
+
+
+_MEEZA = {"name": "MEEZA", "ticker": None, "country": "Qatar", "tracked": False}
+
+
+def test_a_signed_order_mentioned_by_a_third_party_is_weak() -> None:
+    kw = dict(deal_level=4, amount="over QR1bn", capacity="8 MW", companies=[_MEEZA])
+    got = decide_label(_ex("m2_deal_or_construction", confirmation="named_source", by="S&P Global Ratings", **kw))
+    assert got[:2] == ("weak_signal", "m2_signed_reported_by_third_party")
+    got = decide_label(_ex("m2_deal_or_construction", confirmation="named_source", by="MEEZA", **kw))
+    assert got[:2] == ("signal", "m2_signed_with_amount")
+
+
+def test_a_capacity_that_is_not_compute_is_not_a_data_centre_deal() -> None:
+    ex = _ex("m2_deal_or_construction", deal_level=4, capacity="up to 4 million tonnes per annum",
+             companies=[{"name": "QatarEnergy", "ticker": None, "country": "Qatar", "tracked": True}])
+    ex["summary"] = ("QatarEnergy signed two long-term agreements with Cheniere Energy to buy LNG"
+                     " from Sabine Pass and Corpus Christi through 2054.")
+    assert decide_label(ex, "QatarEnergy to buy up to 4 MTPA of U.S. LNG from Cheniere")[:2] == \
+        ("noise", "m2_not_hardware")
+
+
+def test_a_canal_authority_relaying_a_shipping_line_is_not_the_line() -> None:
+    hapag = {"name": "Hapag-Lloyd", "ticker": None, "country": "Germany", "tracked": False}
+    sca = {"name": "Suez Canal Authority", "ticker": None, "country": "Egypt", "tracked": False}
+    got = decide_label(_ex("m4_shipping_or_insurance", place="Suez Canal", by="Suez Canal Authority",
+                           companies=[hapag, sca]))
+    assert got[:2] == ("weak_signal", "m4_shipping_not_announced_by_line")
+    got = decide_label(_ex("m4_shipping_or_insurance", place="Suez Canal", by="Hapag-Lloyd",
+                           companies=[hapag, sca]))
+    assert got[:2] == ("signal", "m4_shipping_line_or_insurer")
+
+
+def _dated(row, day, by=None, country=None):
+    row["metadata"]["event"]["date"] = day
+    if by:
+        row["metadata"]["confirmation"]["by"] = by
+    if country:
+        row["metadata"]["event"]["country"] = country
+    return row
+
+
+def test_one_sides_claim_reported_with_different_places_and_names_is_one_count() -> None:
+    rows = [_dated(_ev(1, "m4_attack_tally", "wider Gulf", label="signal"), "2026-10-22", "Iranian forces"),
+            _dated(_ev(2, "m4_attack_tally", "northern Arabian Gulf", hours=15, label="signal"), "2026-10-22", "IRGC"),
+            _dated(_ev(3, "m4_attack_tally", "northern Persian Gulf", hours=19), "2026-10-22", "IRGC Navy")]
+    [group] = find_same_event_groups(rows)
+    assert len(group["duplicates"]) == 2
+    # A different source on other waters the same day is another count.
+    other = _dated(_ev(4, "m4_attack_tally", "Red Sea", hours=2, label="signal"), "2026-10-22", "UKMTO")
+    assert len(find_same_event_groups([rows[0], other])) == 0
+
+
+def test_an_attackers_new_claim_is_not_lowered_as_a_recount() -> None:
+    from pipeline.middle_east_signal_classifier import repeated_count_lowers
+    kpler = _dated(_ev(1, "m4_attack_tally", "Strait of Hormuz", label="signal"), "2026-10-19", "Kpler")
+    irgc = _dated(_ev(2, "m4_attack_tally", "Strait of Hormuz", label="signal"), "2026-10-22", "IRGC Navy")
+    ukmto = _dated(_ev(3, "m4_attack_tally", "Strait of Hormuz", label="signal"), "2026-10-21", "UKMTO")
+    assert [rid for rid, *_ in repeated_count_lowers([kpler, irgc, ukmto])] == [3]
+
+
+def test_reports_of_one_strike_plan_fold_within_three_days() -> None:
+    a = _dated(_ev(1, "m4_strike_plan", "Iran", label="signal"), "2026-10-20", country="Iran")
+    b = _dated(_ev(2, "m4_strike_plan", "Iran", hours=53, label="signal"), "2026-10-22", country="Iran")
+    assert len(find_same_event_groups([a, b])) == 1
+    late = _dated(_ev(3, "m4_strike_plan", "Iran", hours=24 * 5, label="signal"), "2026-10-25", country="Iran")
+    assert find_same_event_groups([a, late]) == []
+
+
+def test_an_interception_report_folds_into_the_strike_only_on_the_same_day_and_place() -> None:
+    strike = _dated(_ev(1, "m4_strike_on_site", "Shaybah oil field", label="signal"), "2026-10-21")
+    same = _dated(_ev(2, "m4_interception", "Shaybah", hours=-11, label="noise"), "2026-10-21")
+    next_day = _dated(_ev(3, "m4_interception", "Shaybah", hours=20, label="noise"), "2026-10-22")
+    [group] = find_same_event_groups([strike, same, next_day])
+    assert group["kept"]["id"] == 1 and [d["id"] for d in group["duplicates"]] == [2]
+
+
+def test_noise_never_leads_and_old_background_never_folds() -> None:
+    a = _dated(_ev(1, "m4_interception", "Shaybah", label="noise"), "2026-10-21")
+    b = _dated(_ev(2, "m4_interception", "Shaybah", hours=2, label="noise"), "2026-10-21")
+    assert find_same_event_groups([a, b]) == []
+    fm = _ev(3, "m5_qatar_force_majeure", "Ras Laffan", hours=0)
+    background = _dated(_ev(4, "m5_qatar_force_majeure", "Ras Laffan", hours=10, label="noise"), "2026-03")
+    assert find_same_event_groups([fm, background]) == []
+
+
+def test_two_deals_by_one_gulf_company_are_two_deals() -> None:
+    nvidia = _ev(1, "m2_deal_or_construction", "Saudi Arabia", subjects=("Humain", "Nvidia"))
+    nebius = _ev(2, "m2_deal_or_construction", "NEOM", subjects=("Humain", "DataVolt", "Nebius"), hours=5)
+    assert find_same_event_groups([nvidia, nebius]) == []
+    again = _ev(3, "m2_deal_or_construction", "Saudi Arabia", subjects=("Humain", "Nvidia"), hours=8)
+    assert len(find_same_event_groups([nvidia, again])) == 1
+
+
+def test_a_force_majeure_alert_needs_the_day() -> None:
+    qatar = {"name": "QatarEnergy", "ticker": None, "country": "Qatar", "tracked": True}
+    kw = dict(place="Ras Laffan", country="Qatar", by="QatarEnergy", companies=[qatar])
+    assert decide_label(_ex("m5_qatar_force_majeure", day="2026-10-05", **kw),
+                        published="2026-10-06")[0] == "signal"
+    got = decide_label(_ex("m5_qatar_force_majeure", day="2026-10", **kw), published="2026-10-13")
+    assert got[:2] == ("weak_signal", "m5_qatar_force_majeure_undated")

@@ -583,6 +583,37 @@ def get_middle_east_story_candidates() -> list[dict[str, Any]]:
     return out
 
 
+def get_middle_east_fold_candidates() -> list[dict[str, Any]]:
+    """The story candidates plus every noise row that names an event and is
+    not already folded: a noise report of an alerted event (an interception
+    report of a confirmed strike) folds into that alert instead of showing
+    as a row of its own. Noise rows only ever join; they never lead."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, title, url, published, signal_detection, signal_reason,
+                   entities_json, metadata
+            FROM agent_classifications
+            WHERE source_type = 'middle_east_market_signal'
+              AND signal_detection = 'noise'
+              AND metadata -> 'event' ->> 'code' IS NOT NULL
+              AND NOT jsonb_exists(metadata, 'collapsed_into')
+            ORDER BY published
+            """,
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["entities"] = json.loads(d.get("entities_json") or "[]")
+        except (ValueError, TypeError):
+            d["entities"] = []
+        if not isinstance(d.get("metadata"), dict):
+            d["metadata"] = json.loads(d.get("metadata") or "{}")
+        out.append(d)
+    return get_middle_east_story_candidates() + out
+
+
 def clear_middle_east_story_fields() -> int:
     """Remove the story keys from every row of this domain before
     regrouping, so a row that left a story is never hidden by a stale
@@ -625,13 +656,16 @@ def apply_middle_east_story(seed_row_id: int, *, development: dict[str, Any],
 
 
 def collapse_middle_east_same_event(kept_row_id: int, corroboration: dict[str, Any],
-                                    duplicate_ids: list[int]) -> int:
+                                    duplicate_ids: list[int],
+                                    relabel: tuple[str, str, str] | None = None) -> int:
     """Fold same-event duplicates into one row, in ONE transaction: the kept
     row's corroboration gains each duplicate's outlet, headline and link,
     and the duplicates are TOMBSTONED - noise, metadata.collapsed_into =
     kept row id - never deleted (geopolitical Stage B's pattern: the
     already-judged skip reads their source_id, and a wrong fold stays
-    reversible). Returns how many rows were tombstoned."""
+    reversible). `relabel` = (label, rule, reason) when the reports together
+    confirm the event (confirmed_across_reports) - written to the kept row
+    in the same transaction. Returns how many rows were tombstoned."""
     if not duplicate_ids:
         return 0
     with get_db() as conn:
@@ -643,6 +677,17 @@ def collapse_middle_east_same_event(kept_row_id: int, corroboration: dict[str, A
             """,
             (json.dumps(corroboration, ensure_ascii=False), kept_row_id),
         )
+        if relabel:
+            label, rule, reason = relabel
+            conn.execute(
+                """
+                UPDATE agent_classifications
+                SET signal_detection = %s, signal_reason = %s,
+                    metadata = metadata || jsonb_build_object('rule', %s::text)
+                WHERE id = %s
+                """,
+                (label, reason, rule, kept_row_id),
+            )
         cur = conn.execute(
             """
             UPDATE agent_classifications
@@ -656,6 +701,44 @@ def collapse_middle_east_same_event(kept_row_id: int, corroboration: dict[str, A
              " and link are listed there." % kept_row_id, kept_row_id, duplicate_ids),
         )
     return cur.rowcount if cur.rowcount is not None else len(duplicate_ids)
+
+
+def update_middle_east_label(row_id: int, label: str, rule: str, reason: str) -> None:
+    """Raise one row's label after the fact (an attack wave completed by
+    later rows) - label, reason and metadata.rule, nothing else."""
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE agent_classifications
+            SET signal_detection = %s, signal_reason = %s,
+                metadata = metadata || jsonb_build_object('rule', %s::text)
+            WHERE id = %s AND source_type = 'middle_east_market_signal'
+            """,
+            (label, reason, rule, row_id),
+        )
+
+
+def get_middle_east_folded_into(kept_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    """{kept row id: [rows folded into it in earlier runs]} - id and
+    metadata only, so an event's confirmation counts every report it ever
+    had, not just this run's (confirmed_across_reports)."""
+    if not kept_ids:
+        return {}
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, metadata, (metadata->>'collapsed_into')::int AS kept_id
+            FROM agent_classifications
+            WHERE source_type = 'middle_east_market_signal'
+              AND (metadata->>'collapsed_into')::int = ANY(%s)
+            """,
+            (kept_ids,),
+        ).fetchall()
+    out: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        md = r["metadata"] if isinstance(r["metadata"], dict) else json.loads(r["metadata"] or "{}")
+        out.setdefault(r["kept_id"], []).append({"id": r["id"], "metadata": md})
+    return out
 
 
 def get_existing_middle_east_signal_source_ids(source_ids: list[str]) -> set[str]:
