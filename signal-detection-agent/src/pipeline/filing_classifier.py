@@ -632,6 +632,13 @@ def classify_filing_two_stage(
     being validated on its own - every filing gets a placeholder
     classification and only the real stage 1 summary in filing_summary.
     Uncomment the classify_filing() call and its return to re-enable.
+
+    The placeholder's signal_detection is 'waiting' (not judged yet), never
+    'noise' (judged and found ordinary) - same meaning 'waiting' has for
+    geopolitical_signal and china_market_signal. It bypasses
+    validate_filing_classification (ALLOWED_SIGNAL is stage 2's output set);
+    the DB CHECK already allows 'waiting'. The extraction_found=False path
+    above still returns classify_filing()'s real 'noise' result.
     """
     if not extraction_found:
         return classify_filing(
@@ -682,7 +689,7 @@ def classify_filing_two_stage(
     # return result
 
     return {
-        'signal_detection': 'noise',
+        'signal_detection': 'waiting',
         'signal_score': 0.0,
         'signal_reason': 'Stage 2 classification is disabled - this row holds only the stage 1 summary, not a real classification.',
         'materiality': 'none',

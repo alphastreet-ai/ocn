@@ -61,6 +61,26 @@ def test_no_match_terms_keeps_everything() -> None:
     assert pl._me_matches({"config": {}}, "anything at all")
 
 
+def test_wire_reaction_headlines_are_excluded_on_the_headline_only() -> None:
+    from seed import _ME_WIRE_REACTION_TERMS
+    s = {"config": {"exclude_title_terms": _ME_WIRE_REACTION_TERMS}}
+    assert pl._me_excluded(s, "Bahrain Condemns Houthi Attacks on Saudi Arabia")
+    assert pl._me_excluded(s, "Kuwait Welcomes UN Security Council Statement on Houthi Attacks")
+    assert pl._me_excluded(s, "Foreign Minister Receives Phone Call from Japanese Counterpart")
+    assert not pl._me_excluded(s, "Coalition: Two Houthi Ballistic Missiles Intercepted")
+    assert not pl._me_excluded({"config": {}}, "Bahrain Condemns Houthi Attacks")
+
+
+def test_wire_ai_and_red_sea_alone_no_longer_match() -> None:
+    """Bare "AI" and "Red Sea" admitted only ceremonies and tourism (2026-10-19 run)."""
+    from seed import _ME_MATCH_TERMS
+    s = _source(_ME_MATCH_TERMS)
+    assert not pl._me_matches(s, "Dubai launches first family AI literacy platform")
+    assert not pl._me_matches(s, "Salman Bay in Northern Jeddah Defines Beauty of Red Sea Coast")
+    assert pl._me_matches(s, "G42 switches on Stargate UAE campus")
+    assert pl._me_matches(s, "Houthi missiles intercepted over the Red Sea")
+
+
 # --- SEC 13D/13G ---------------------------------------------------------------
 
 _13G = """<edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13g">

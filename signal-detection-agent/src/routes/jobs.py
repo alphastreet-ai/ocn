@@ -28,6 +28,13 @@ _CHANNEL_QUERY_DESCRIPTION = (
     + " (geopolitical_signal rows only; null when the article names no"
     " instrument from this list)"
 )
+# Same four values the agent_classifications CHECK constraint allows, for
+# every source_type. 'waiting' = stored but not judged yet (sec_filing rows
+# while stage 2 is disabled; geopolitical_signal Stage A rows before Stage B).
+_SIGNAL_DETECTION_QUERY_DESCRIPTION = (
+    "Filter by signal_detection: 'signal', 'weak_signal', 'noise', or 'waiting'"
+    " (stored but not judged yet). Works for every source_type."
+)
 from pipeline.japan_companies import japan_ticker_universe
 
 router = APIRouter()
@@ -37,7 +44,7 @@ router = APIRouter()
 async def get_all_results(
     limit: int = Query(default=50, ge=1, le=500),
     cursor: str | None = Query(default=None),
-    signal_detection: str | None = Query(default=None),
+    signal_detection: str | None = Query(default=None, description=_SIGNAL_DETECTION_QUERY_DESCRIPTION),
     source_type: str | None = Query(default=None, description="Filter by source_type, e.g. 'news' or 'sec_filing'"),
     ticker: str | None = Query(default=None, description="Filter by ticker (only populated for source_type='sec_filing' today)"),
     code: str | None = Query(default=None, description="Filter by metadata.code - the exchange code a market-signal domain files a company under, NOT the same field as ticker. japan_market_signal stores a TSE code ('6857', or Kioxia\'s '285A'); china_market_signal stores a mainland or HK code ('688981' SMIC, '09988' Alibaba). Case-insensitive."),
@@ -208,7 +215,7 @@ async def get_taiwan_signal_universe(
 async def get_japan_signal_results(
     limit: int = Query(default=50, ge=1, le=500),
     cursor: str | None = Query(default=None),
-    signal_detection: str | None = Query(default=None, description="Filter by signal_detection: 'signal', 'weak_signal', or 'noise'"),
+    signal_detection: str | None = Query(default=None, description=_SIGNAL_DETECTION_QUERY_DESCRIPTION),
     code: str | None = Query(default=None, description="Filter to one tracked company's TSE code, e.g. '6857' (Advantest) or '285A' (Kioxia) - case-insensitive, matches metadata.code"),
     source_category: str | None = Query(default=None, description="Filter by metadata.source_category: 'jp_forecast' (J1/J2), 'jp_missing_revision' (J3), 'jp_industry' (J4), 'jp_capex' (J5), 'jp_buyback'/'jp_ownership' (J6), 'jp_press' (J7), or 'jp_watching'"),
     published_from: str | None = Query(default=None, description="Filter to rows with published >= this date (YYYY-MM-DD), inclusive"),
@@ -340,7 +347,7 @@ async def get_job_results(
     job_id: int,
     limit: int = Query(default=100, ge=1, le=500),
     cursor: str | None = Query(default=None),
-    signal_detection: str | None = Query(default=None),
+    signal_detection: str | None = Query(default=None, description=_SIGNAL_DETECTION_QUERY_DESCRIPTION),
     source_type: str | None = Query(default=None, description="Filter by source_type, e.g. 'news' or 'sec_filing'"),
     ticker: str | None = Query(default=None, description="Filter by ticker (only populated for source_type='sec_filing' today)"),
     period: str | None = Query(default=None, description="Filter by metadata.period_gregorian, e.g. '2026-07' (only populated for taiwan_market_signal mops_revenue rows)"),

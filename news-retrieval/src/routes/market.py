@@ -6,7 +6,7 @@ from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Key
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from pipeline import _normalize_av_ticker
 
@@ -93,13 +93,15 @@ def get_overview(ticker: str) -> dict:
 
 
 @router.get("/market/price-history/{ticker}")
-def get_price_history(ticker: str) -> dict:
-    """Last 10 trading days of adjusted close prices."""
+def get_price_history(ticker: str, days: int = Query(default=10, ge=1, le=260)) -> dict:
+    """The last `days` trading days of adjusted close prices, newest first
+    (default 10). The table keeps a year; signal-detection-agent reads ~90
+    days to judge what an unusual move is for each stock."""
     key = _dynamo_key(ticker)
     result = _table("price_history").query(
         KeyConditionExpression=Key("ticker").eq(key),
         ScanIndexForward=False,
-        Limit=10,
+        Limit=days,
     )
     items = result.get("Items", [])
     if not items:
@@ -209,8 +211,11 @@ def taiwan_revenue_history() -> dict:
 @router.get("/market/taiwan/universe")
 def taiwan_universe() -> dict:
     """The Taiwan company table (seed.TAIWAN_TICKER_UNIVERSE): each
-    company's ticker, Chinese name, English name and verified customers
-    ({name, relationship}; [] = checked, none verified).
+    company's ticker, Chinese name, English name, supply-chain segment and
+    customers. Every customer carries its evidence - status (verified /
+    partial / unverified), source_type, source, source_date, source_url - and
+    all statuses are returned: a consumer shows `verified` by default and
+    may badge the rest, never presents them as confirmed.
 
     Served rather than copied onto articles: a copy is frozen at fetch
     time, so rows fetched before a customer was verified (or corrected)
@@ -226,6 +231,7 @@ def taiwan_universe() -> dict:
             "ticker": t["ticker"],
             "company_name": t["native_name"],
             "translated_company_name": t["company"],
+            "segment": t["segment"],
             "customers": t["customers"],
         }
         for t in TAIWAN_TICKER_UNIVERSE

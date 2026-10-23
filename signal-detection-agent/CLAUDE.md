@@ -159,10 +159,11 @@ translated once (stored translations reused; identical texts in a batch share on
 
 ### Customers (`GET /taiwan-signals/universe`)
 
-The company's verified customers, `[{name, relationship}]`, are served per company by
-`GET /taiwan-signals/universe` (`ticker`, `company_name`, `translated_company_name`, `customers`),
+Each company's customers are served by `GET /taiwan-signals/universe` (`ticker`, `company_name`,
+`translated_company_name`, `segment`, `customers`); each customer carries `name`, `relationship`,
+`status` (verified / partial / unverified), `source_type`, `source`, `source_date`, `source_url`,
 read live from news-retrieval's `GET /market/taiwan/universe` (`TAIWAN_TICKER_UNIVERSE` in
-`news-retrieval/src/seed.py` - the one source of truth). `[]` means checked and none verified; 503
+`news-retrieval/src/seed.py` - the one source of truth). All statuses are returned - show `verified` by default; 503
 if news-retrieval is unreachable. A consumer joins on `metadata.ticker`. Customers are not stored on
 rows and no classification step reads them; rows classified before 2026-10-22 may still carry a
 `metadata.customers` copy, which nothing reads.
@@ -896,9 +897,10 @@ no reliable age to judge them by) - same rule news-retrieval's `expire-articles`
 
 | `source_type` | Domain classified | Retention | Schedule (CloudWatch) | Rationale |
 |---|---|-----------|------------------------|-----------|
-| `news` | `ai_news` (`NEWS_DOMAIN`) | 180 days | Sunday 07:30 UTC | Deliberately longer than news-retrieval's 30-day `ai_news` article retention - classification is allowed to outlive its source article |
+| `news` | `ai_news` (`NEWS_DOMAIN`) | ~~180 days~~ retained indefinitely | Sunday 07:30 UTC - **rule DISABLED (2026-10-23)** | Expiry stopped; rule kept in Terraform with `state = "DISABLED"` so it can be re-enabled. Original 180 days was deliberately longer than news-retrieval's 30-day `ai_news` article retention - classification is allowed to outlive its source article |
 
-This schedule runs 1 hour after its corresponding `news_retrieval_ai_news_expire_weekly`
+Both this rule and `news_retrieval_ai_news_expire_weekly` are DISABLED as of 2026-10-23.
+When enabled, this schedule runs 1 hour after its corresponding `news_retrieval_ai_news_expire_weekly`
 job (06:30 UTC - see `news-retrieval/CLAUDE.md`), so a classification is only ever expired
 after its source article has already been deleted in news-retrieval, never the other way
 around - the longer window just means the classification survives on its own for a while

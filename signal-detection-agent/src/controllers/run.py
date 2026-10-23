@@ -23,6 +23,7 @@ from adapters.news_client import (
     fetch_china_revenue_history,
     fetch_middle_east_universe,
     fetch_taiwan_revenue_history,
+    get_price_history,
 )
 from models.geopolitical_signal_companies import get_companies_for_name_matching
 from models.jobs import (
@@ -37,10 +38,13 @@ from models.jobs import (
     get_existing_macro_signal_source_ids,
     get_existing_middle_east_signal_source_ids,
     get_middle_east_event_members,
+    get_middle_east_fold_candidates,
     get_middle_east_story_candidates,
     clear_middle_east_story_fields,
     apply_middle_east_story,
     collapse_middle_east_same_event,
+    get_middle_east_folded_into,
+    update_middle_east_label,
     get_existing_taiwan_source_ids,
     get_taiwan_recent_remarks,
     get_taiwan_remark_translations,
@@ -103,8 +107,17 @@ from pipeline.china_signal_classifier import (
 from models.market_baselines import load_baselines, upsert_baselines
 from pipeline.middle_east_signal_classifier import (
     build_middle_east_stories,
+    attack_wave_raises,
     classify_middle_east_signal_batch,
+    company_name_index,
+    confirmed_across_reports,
+    current_waterway_status,
     find_same_event_groups,
+    missed_move_lines,
+    unusual_market_days,
+    market_reference_tickers,
+    relabel_confirmed,
+    repeated_count_lowers,
     folded_corroboration,
     company_table_problems,
     describe_pool,
@@ -1394,9 +1407,12 @@ async def run_middle_east_signal_classification(
     stored_event_members = {
         uri: [stored_member(r) for r in rows]
         for uri, rows in get_middle_east_event_members(event_uris).items()}
+    # A closure or reopening is judged against the waterway's current
+    # status: the latest one already alerted, else the starting status.
+    waterway_status = current_waterway_status(get_middle_east_story_candidates())
     classified = await asyncio.to_thread(
         classify_middle_east_signal_batch, pool["new"], companies, us_universe,
-        stored_event_members)
+        stored_event_members, waterway_status)
     stored_meanwhile = get_existing_middle_east_signal_source_ids(
         [c["article"]["url"] for c in classified])
     to_insert = [c for c in classified if c["article"]["url"] not in stored_meanwhile]
@@ -1417,27 +1433,93 @@ async def run_middle_east_signal_classification(
         job_id, len(classified), len(stored_meanwhile), inserted,
         len(pool["new"]) - len(classified))
     if inserted:
-        regroup_middle_east_stories(job_id)
+        regroup_middle_east_stories(job_id, companies)
+    await log_middle_east_market_reference(job_id, companies)
     update_job_status(job_id, "completed", article_count=inserted, set_completed_at=True)
 
 
-def regroup_middle_east_stories(job_id: int) -> None:
+# Days of prices read for the missed-move check: a 60-trading-day baseline
+# before the 10 days checked, with room for holidays.
+_MOVE_HISTORY_DAYS = 90
+
+
+async def log_middle_east_market_reference(job_id: int, companies: list[dict[str, Any]]) -> None:
+    """The missed-move check: every unusual market day of the last 10
+    trading days (oil, or several of the US stocks this module can name,
+    moving far beyond their normal daily move) and whether a Middle East
+    signal was stored that day or the day before - a MISS is a day to look
+    at by hand. Never a label input (see unusual_market_days). Prices are
+    news-retrieval's DynamoDB market data (GET /market/price-history); the
+    tickers come from the company and events tables, not a hand list."""
+    tickers = market_reference_tickers(companies)
+    histories = dict(zip(tickers, await asyncio.gather(
+        *(get_price_history(t, days=_MOVE_HISTORY_DAYS) for t in tickers))))
+    signals_by_day: dict[str, int] = {}
+    for r in get_middle_east_story_candidates():
+        if (r["signal_detection"] == "signal" and r.get("published")
+                and "collapsed_into" not in (r.get("metadata") or {})):
+            day = f"{r['published']:%Y-%m-%d}"
+            signals_by_day[day] = signals_by_day.get(day, 0) + 1
+    closes = sorted({h["date"] for h in histories.get(tickers[0]) or []} |
+                    {h["date"] for t in tickers[1:] for h in histories.get(t) or []})
+    since = closes[-10] if len(closes) >= 10 else (closes[0] if closes else "9999")
+    for line in missed_move_lines(unusual_market_days(histories, tickers, since), tickers[0],
+                                  signals_by_day):
+        logger.info("[MIDDLE_EAST_SIGNAL] missed-move check job=%d: %s", job_id, line)
+
+
+def regroup_middle_east_stories(job_id: int, companies: list[dict[str, Any]] | None = None) -> None:
     """After each insert: fold same-event duplicates into one row
     (tombstones), then regroup the remaining signal/weak_signal rows into
     stories, from scratch - a later arrival can change which story an
     earlier row belongs to. Nothing is deleted; see
-    pipeline/middle_east_signal_classifier.py."""
-    folded = 0
-    for group in find_same_event_groups(get_middle_east_story_candidates()):
+    pipeline/middle_east_signal_classifier.py.
+
+    When folding, the event is judged on ALL its reports' confirmers
+    (confirmed_across_reports): an official report, or two different named
+    sources, raise the lead row's label - reports folded in earlier runs
+    count too (get_middle_east_folded_into)."""
+    candidates = get_middle_east_story_candidates()
+    name_index = company_name_index(companies or [])
+    groups = find_same_event_groups(get_middle_east_fold_candidates(), name_index)
+    earlier = get_middle_east_folded_into([g["kept"]["id"] for g in groups])
+    waterways = current_waterway_status(candidates)
+    folded = raised = 0
+    for group in groups:
+        kept = group["kept"]
+        combined = confirmed_across_reports([kept, *group["duplicates"], *earlier.get(kept["id"], [])])
+        relabel = relabel_confirmed(kept, combined, name_index, waterways) if combined else None
         try:
             folded += collapse_middle_east_same_event(
-                group["kept"]["id"],
-                folded_corroboration(group["kept"], group["duplicates"]),
-                [d["id"] for d in group["duplicates"]])
+                kept["id"], folded_corroboration(kept, group["duplicates"]),
+                [d["id"] for d in group["duplicates"]], relabel)
+            raised += relabel is not None
         except Exception:
             logger.exception("[MIDDLE_EAST_SIGNAL] failed to fold duplicates into row %s (job %d)",
-                             group["kept"]["id"], job_id)
-    logger.info("[MIDDLE_EAST_SIGNAL] same-event duplicates folded: job=%d rows=%d", job_id, folded)
+                             kept["id"], job_id)
+    logger.info("[MIDDLE_EAST_SIGNAL] same-event duplicates folded: job=%d rows=%d"
+                " raised_by_combined_confirmation=%d", job_id, folded, raised)
+
+    # Separate weak ship attacks on one waterway adding up to a wave.
+    waves = 0
+    for row_id, label, rule, reason in attack_wave_raises(get_middle_east_story_candidates()):
+        try:
+            update_middle_east_label(row_id, label, rule, reason)
+            waves += 1
+        except Exception:
+            logger.exception("[MIDDLE_EAST_SIGNAL] failed to raise attack-wave row %s (job %d)",
+                             row_id, job_id)
+    logger.info("[MIDDLE_EAST_SIGNAL] attack waves raised: job=%d rows=%d", job_id, waves)
+    # Several counts of one escalation: one alert per waterway per window.
+    lowered = 0
+    for row_id, label, rule, reason in repeated_count_lowers(get_middle_east_story_candidates()):
+        try:
+            update_middle_east_label(row_id, label, rule, reason)
+            lowered += 1
+        except Exception:
+            logger.exception("[MIDDLE_EAST_SIGNAL] failed to lower repeated count row %s (job %d)",
+                             row_id, job_id)
+    logger.info("[MIDDLE_EAST_SIGNAL] repeated attack counts lowered: job=%d rows=%d", job_id, lowered)
 
     rows = get_middle_east_story_candidates()
     cleared = clear_middle_east_story_fields()

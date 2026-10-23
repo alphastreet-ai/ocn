@@ -277,6 +277,24 @@ async def get_company_overview(ticker: str) -> dict[str, Any] | None:
         return None
 
 
+async def get_price_history(ticker: str, days: int = 10) -> list[dict[str, Any]]:
+    """GET /market/price-history/{ticker}?days= - the last `days` trading
+    days of adjusted closes, newest first. [] when unavailable: market
+    prices are a reference for a run's log, never an input a run should
+    fail over."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{config.NEWS_RETRIEVAL_URL}/market/price-history/{ticker}",
+                                    params={"days": days})
+        if resp.status_code == 503:
+            return []
+        resp.raise_for_status()
+        return resp.json().get("history", [])
+    except httpx.HTTPError as exc:
+        logger.warning("Failed to fetch price history for %s: %s", ticker, exc)
+        return []
+
+
 async def get_sec_filings(ticker: str) -> list[dict[str, Any]]:
     """GET /market/sec-filings/{ticker} from news-retrieval - filing metadata
     (form_type, filed_at, accession_number, primary_doc_url) fetched from EDGAR

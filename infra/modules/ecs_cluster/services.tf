@@ -306,8 +306,12 @@ resource "aws_ecs_service" "news_retrieval" {
 }
 
 resource "aws_cloudwatch_event_rule" "news_retrieval_company_news_daily" {
-  name                = "${var.env}-news-retrieval-company-news-daily"
-  schedule_expression = "cron(0 1 * * ? *)"
+  name = "${var.env}-news-retrieval-company-news-daily"
+  # 02:30 UTC, clear of market_poll_daily (00:30, runs ~52 min, latest end
+  # seen 01:29). Both share one Alpha Vantage key; at 01:00 they overlapped
+  # every day and NEWS_SENTIMENT returned no feed for tickers that had news.
+  # Nothing else calls Alpha Vantage until market_poll_quotes at 14:00.
+  schedule_expression = "cron(30 2 * * ? *)"
 }
 
 resource "aws_cloudwatch_event_target" "news_retrieval_company_news_daily" {
@@ -339,9 +343,10 @@ resource "aws_cloudwatch_event_target" "news_retrieval_company_news_daily" {
 
 resource "aws_cloudwatch_event_rule" "news_retrieval_geopolitical_news_daily" {
   name = "${var.env}-news-retrieval-geopolitical-news-daily"
-  # Offset an hour after company_news (01:00 UTC) - geopolitical_news's GDELT
-  # source runs 27 sequential theme queries with round-robin retries on rate
-  # limiting, so it can take much longer than company_news's ticker fetch.
+  # geopolitical_news's GDELT source runs 27 sequential theme queries with
+  # round-robin retries on rate limiting, so it can take much longer than
+  # company_news's ticker fetch. It calls no Alpha Vantage endpoint, so
+  # running alongside company_news (02:30 UTC) shares no rate limit.
   schedule_expression = "cron(0 2 * * ? *)"
 }
 
@@ -1073,8 +1078,12 @@ resource "aws_cloudwatch_event_target" "news_retrieval_middle_east_market_signal
 }
 
 resource "aws_cloudwatch_event_rule" "news_retrieval_company_news_expire_weekly" {
-  name = "${var.env}-news-retrieval-company-news-expire-weekly"
-  # Sunday 05:00 UTC - after the daily 01:00 UTC company_news fetch and
+  # DISABLED (2026-10-23): company_news articles are now retained
+  # indefinitely - no 30-day expiry. Set to "ENABLED" to restore the
+  # weekly cleanup.
+  state = "DISABLED"
+  name  = "${var.env}-news-retrieval-company-news-expire-weekly"
+  # Sunday 05:00 UTC - after the daily 02:30 UTC company_news fetch and
   # after geopolitical_news's own 04:00 UTC expiry job, so neither cleanup
   # job overlaps with a fetch or with each other.
   schedule_expression = "cron(0 5 ? * SUN *)"
@@ -1181,7 +1190,11 @@ resource "aws_cloudwatch_event_target" "news_retrieval_adverse_media_expire_week
 }
 
 resource "aws_cloudwatch_event_rule" "news_retrieval_ai_news_expire_weekly" {
-  name = "${var.env}-news-retrieval-ai-news-expire-weekly"
+  # DISABLED (2026-10-23): ai_news articles are now retained
+  # indefinitely - no 30-day expiry. Set to "ENABLED" to restore the
+  # weekly cleanup.
+  state = "DISABLED"
+  name  = "${var.env}-news-retrieval-ai-news-expire-weekly"
   # Sunday 06:30 UTC - offset from adverse_media's own 06:15 UTC expiry job
   # above, so neither cleanup job overlaps with the other. ai_news has no
   # scheduled daily fetch job today (fetch is manual/CLI-only), so there is
@@ -2008,6 +2021,10 @@ resource "aws_cloudwatch_event_target" "signal_detection_agent_japan_habits_refr
 # days for ai_news - a classification is allowed to outlive its source
 # article.
 resource "aws_cloudwatch_event_rule" "signal_detection_agent_news_expire_weekly" {
+  # DISABLED (2026-10-23): news classifications are now retained
+  # indefinitely - no 180-day expiry. Set to "ENABLED" to restore the
+  # weekly cleanup.
+  state               = "DISABLED"
   name                = "${var.env}-signal-detection-agent-news-expire-weekly"
   description         = "Delete news classifications older than 180 days (longer than news-retrieval's 30-day ai_news article retention, by design)"
   schedule_expression = "cron(30 7 ? * SUN *)"

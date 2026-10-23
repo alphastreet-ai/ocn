@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=config.FILING_CLASSIFY_CONCURRENCY)
 
+# Every filing's text is still cut at _FILING_TEXT_MAX_CHARS, as before.
+# 10-K/10-Q/20-F/40-F keep up to _FULL_TEXT_MAX_CHARS in memory so section
+# extraction can retry on the whole document when the cut-off text has no
+# results window - measured on 59 extraction failures (2026-10-24): 18 were
+# 1.0-2.1M-char 10-K/20-F documents whose results section sat past the
+# 600K cut. The retry only runs when the first pass found nothing, so every
+# filing that already extracts gets the identical window as before.
+_FILING_TEXT_MAX_CHARS = 600_000
+_FULL_TEXT_MAX_CHARS = 3_000_000
+
 
 async def _fetch_all_filings(tickers: list[str]) -> list[dict[str, Any]]:
     """Fetch stored filing metadata for every tracked ticker from news-retrieval.
@@ -101,7 +111,10 @@ def _fetch_filing_text_and_extract(filing: dict[str, Any], last_call: list[float
     (e.g. 5.02, 5.07) are typically self-contained on the cover page and
     don't warrant the extra EDGAR round-trip.
     """
-    text = sec_edgar.fetch_filing_text(filing["primary_doc_url"], last_call)
+    full_text = sec_edgar.fetch_filing_text(
+        filing["primary_doc_url"], last_call, max_chars=_FULL_TEXT_MAX_CHARS,
+    )
+    text = full_text[:_FILING_TEXT_MAX_CHARS]
     if not text:
         return "", False, "not_applicable"
     if filing["form_type"] in ("10-K", "10-Q", "40-F", "20-F"):
@@ -121,6 +134,8 @@ def _fetch_filing_text_and_extract(filing: dict[str, Any], last_call: list[float
         # content on the first attempt) and only actually fires for
         # filers structured like AEM.
         section_text, found = sec_edgar.extract_filing_sections(text)
+        if not found and len(full_text) > len(text):
+            section_text, found = sec_edgar.extract_filing_sections(full_text)
         if not found and filing.get("cik"):
             # Some 10-K/40-F filers (confirmed empirically this session:
             # IBM's 10-K via EX-13, AEM's 40-F via EX-99.1/EX-99.2) file
@@ -155,6 +170,22 @@ def _fetch_filing_text_and_extract(filing: dict[str, Any], last_call: list[float
                 )
             if annual_report_text:
                 section_text, found = sec_edgar.extract_filing_sections(annual_report_text)
+        mdna_text = ""
+        if not found and filing["form_type"] in ("40-F", "20-F") and filing.get("cik"):
+            # The combined EX-99* text above is cut at 300K, so a large
+            # Annual Information Form in EX-99.1 can push the MD&A exhibit
+            # out of it - read the MD&A exhibit on its own instead.
+            mdna_text = sec_edgar.fetch_mdna_exhibit_text(
+                filing.get("cik", ""), filing.get("accession_number", ""), last_call,
+            )
+            if mdna_text:
+                section_text, found = sec_edgar.extract_filing_sections(mdna_text)
+        # Looser tiers only once the precise ones have failed on every text
+        # above (see sec_edgar._find_results_window's last_resort).
+        if not found:
+            section_text, found = sec_edgar.extract_filing_sections(full_text, last_resort=True)
+        if not found and mdna_text:
+            section_text, found = sec_edgar.extract_filing_sections(mdna_text, last_resort=True)
         return section_text, found, "not_applicable"
 
     if filing["form_type"] == "6-K":

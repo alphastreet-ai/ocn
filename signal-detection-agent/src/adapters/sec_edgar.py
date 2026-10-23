@@ -266,6 +266,70 @@ def fetch_annual_report_exhibit_text(
         return ""
 
 
+_MDNA_TITLE = re.compile(r"management[’'`]?s?\s+discussion\s+(?:and|&)\s+analysis|\bMD&A\b", re.I)
+_NOT_MDNA_TITLE = re.compile(
+    r"annual information form|management[’'`]?s?\s+responsibility for financial|report of independent"
+    r"|consolidated (?:audited )?financial statements",
+    re.I,
+)
+# The exhibit's own title sits in its first few hundred characters; a wider
+# head also catches cross-references - every real MD&A exhibit checked
+# (AEM, CCJ, DNN, HBM, KGC) mentions "Annual Information Form" within its
+# first 3,000 characters.
+_MDNA_EXHIBIT_HEAD_CHARS = 600
+_MDNA_EXHIBIT_MAX_TRIED = 8
+
+
+def fetch_mdna_exhibit_text(
+    cik: str, accession_number: str, last_call: list[float], *, max_chars: int = 3_000_000,
+) -> str:
+    """40-F/20-F fallback: return the ONE EX-99* exhibit that is the MD&A,
+    read whole, or "" if none is found.
+
+    A 40-F's primary document is a cover shell; the annual report is split
+    across EX-99* exhibits - typically an Annual Information Form, the
+    financial statements and the MD&A, in a filer-specific order
+    (confirmed on real 2025 40-Fs: AEM's MD&A is EX-99.3, KGC's EX-99.2,
+    TECK's EX-99.3). fetch_filing_exhibits_text concatenates them all and
+    cuts at max_chars, so a multi-MB AIF in EX-99.1 pushes the MD&A out of
+    the cut. The index page's descriptions are just "EX-99.2", so each
+    exhibit is identified by its own opening text instead: the first one
+    whose head names the MD&A before any AIF / financial-statements title
+    (those open with "Annual Information Form" or "Management's
+    Responsibility for Financial Statements") is returned. Tries at most
+    _MDNA_EXHIBIT_MAX_TRIED exhibits, in index order.
+    """
+    index_html = _fetch_filing_index(cik, accession_number, last_call)
+    if not index_html:
+        return ""
+
+    hrefs: list[str] = []
+    for row_html in _INDEX_ROW_PATTERN.findall(index_html):
+        cells = _INDEX_CELL_PATTERN.findall(row_html)
+        if not any(re.sub(r"<[^>]+>", "", cell).strip().upper().startswith("EX-99") for cell in cells):
+            continue
+        href_match = _INDEX_HREF_PATTERN.search(row_html)
+        if href_match and not href_match.group(1).lower().endswith(".pdf"):
+            hrefs.append(href_match.group(1).removeprefix("/ix?doc="))
+
+    for href in hrefs[:_MDNA_EXHIBIT_MAX_TRIED]:
+        _rate_sleep(last_call)
+        doc_url = href if href.startswith("http") else f"https://www.sec.gov{href}"
+        try:
+            resp = httpx.get(doc_url, headers={"User-Agent": _USER_AGENT}, timeout=60.0)
+            resp.raise_for_status()
+        except Exception as exc:
+            logger.warning("[SEC_EDGAR] MD&A exhibit fetch failed url=%s error=%s", doc_url, exc)
+            continue
+        text = _strip_html(resp.text)
+        head = text[:_MDNA_EXHIBIT_HEAD_CHARS]
+        mdna = _MDNA_TITLE.search(head)
+        other = _NOT_MDNA_TITLE.search(head)
+        if mdna and (not other or mdna.start() < other.start()):
+            return text[:max_chars]
+    return ""
+
+
 _RESULTS_MARKERS_PRECISE = [
     "net revenues increased",
     "net revenues decreased",
@@ -328,15 +392,65 @@ _RESULTS_STRUCTURAL_TABLE = re.compile(
     re.I,
 )
 
+# Last-resort tier, checked only when all three tiers above find nothing:
+# the period-comparison heading/sentence MD&A writes around its results
+# ("Three Months Ended March 31, 2026 Compared to...", "Comparison of the
+# Three Months Ended...", "revenues were $1,401,207 as compared to..."),
+# with amounts in "$ in thousands" tables or plain dollars that the
+# "$X million/billion" markers above never match. Measured on 59 extraction
+# failures (2026-10-24): found the MD&A results discussion in 26 of the 33
+# domestic 10-K/10-Q failures (APH, RPAY, TVTX, UAVS, NNE, LAC, ...).
+# Anchored after the MD&A heading because 10-Q financial-statement notes
+# come BEFORE the MD&A and use the same "three months ended ... compared to"
+# phrasing - on BNO and NEM the first match in the document was in a note.
+_RESULTS_MARKERS_PERIOD_COMPARISON = [
+    re.compile(r"(?:three|six|nine|twelve) months ended [A-Za-z]+ \d{1,2},? \d{4},? (?:as )?compared (?:to|with)", re.I),
+    re.compile(r"comparison of (?:the )?(?:three|six|nine|twelve) months ended", re.I),
+    re.compile(r"(?:years?|fiscal years?) ended [A-Za-z]+ \d{1,2},? \d{4},? (?:as )?compared (?:to|with)", re.I),
+    re.compile(r"(?:revenues?|net sales|sales|net loss|net income)\s+(?:was|were)\s+\$\s?[\d,.]+\s+(?:as )?compared (?:to|with)", re.I),
+]
+_MDNA_HEADING = re.compile(
+    r"item\s*[257]\s*[.:—–-]?\s*(?:management[’'`]?s?\s+discussion|operating and financial review)", re.I,
+)
+# After that, still last-resort: a results heading inside the MD&A that is
+# followed by real figures - the tabular layouts ("Operating Results Sales
+# ($ in millions) 2025 % Change ...", MRK; "(in thousands, except
+# percentages) Three months ended ...", RXRX). Requiring figures keeps it
+# off the many prose cross-references ("see Results of Operations in our
+# 10-K") - a filing whose MD&A is incorporated by reference (XNDU 20-F)
+# correctly stays not-found instead of getting an unrelated window.
+_RESULTS_HEADING = re.compile(r"results of operations|operating results", re.I)
+_RESULTS_FIGURE = re.compile(r"\$\s?[\d,]+(?:\.\d+)?|\d+(?:\.\d+)?\s?%")
+# "% of revenue" table row - "Revenue $ 511.0 100.0 % $ 404.6 100.0 %"
+# (AEIS), "Revenue, net 468.3 100.0 %" (WOLF): two numbers before the
+# percent, which _RESULTS_STRUCTURAL_TABLE (three numbers) never matches.
+# [\s​] because some filers separate table cells with zero-width
+# spaces (AEIS), which \s does not match.
+_RESULTS_PCT_OF_REVENUE_ROW = re.compile(
+    r"(?:net )?(?:revenues?|net sales)(?:,\s*net)?[\s​]*\$?[\s​]*[\d,]+(?:\.\d+)?[\s​]+100(?:\.0+)?\s?%",
+    re.I,
+)
+_RESULTS_HEADING_MIN_FIGURES = 3
+_RESULTS_HEADING_FIGURE_SPAN = 600
+_MDNA_SEARCH_SPAN = 200_000
+
 _RESULTS_WINDOW_BEFORE = 500
 _RESULTS_WINDOW_AFTER = 15_000
 
 
-def _find_results_window(text: str) -> tuple[int, int, bool]:
+def _find_results_window(text: str, *, last_resort: bool = False) -> tuple[int, int, bool]:
     """Locate the results-of-operations window's (start, end) offsets in text.
     Same marker logic as before extract_results_section was split into this
     helper + the note-based extraction below - see that function's docstring
     for why marker coverage (not position filtering) is what matters here.
+
+    last_resort=True adds the two looser tiers after the structural one
+    (period-comparison phrasing, then a results heading with figures). Off
+    by default: the caller must first try the three tiers on every text it
+    has (the whole document, exhibits) - on the 59 failures, running the
+    loose tiers on the 600K-cut text first put PONY, TEM and a KKR 10-Q on
+    risk-factor / macro text that the precise markers found correctly in
+    the full document.
     """
     low = text.lower()
 
@@ -365,6 +479,38 @@ def _find_results_window(text: str) -> tuple[int, int, bool]:
         idx = min(structural_positions)
         start = max(0, idx - _RESULTS_WINDOW_BEFORE)
         return start, idx + _RESULTS_WINDOW_AFTER, True
+
+    if not last_resort:
+        return 0, _RESULTS_WINDOW_AFTER, False
+
+    comparison_positions = sorted(
+        m.start() for pattern in _RESULTS_MARKERS_PERIOD_COMPARISON for m in pattern.finditer(text)
+    )
+    if comparison_positions:
+        # Earliest match after the LAST MD&A heading that has one after it -
+        # the table of contents lists the heading first, so the last heading
+        # with a match after it is the real section; no heading -> earliest.
+        idx = comparison_positions[0]
+        for heading in reversed(list(_MDNA_HEADING.finditer(text))):
+            after = [p for p in comparison_positions if p > heading.start()]
+            if after:
+                idx = after[0]
+                break
+        start = max(0, idx - _RESULTS_WINDOW_BEFORE)
+        return start, idx + _RESULTS_WINDOW_AFTER, True
+
+    mdna_headings = list(_MDNA_HEADING.finditer(text))
+    if mdna_headings:
+        mdna_start = mdna_headings[-1].start()
+        for heading in _RESULTS_HEADING.finditer(text, mdna_start, mdna_start + _MDNA_SEARCH_SPAN):
+            span = text[heading.start():heading.start() + _RESULTS_HEADING_FIGURE_SPAN]
+            if len(_RESULTS_FIGURE.findall(span)) >= _RESULTS_HEADING_MIN_FIGURES:
+                start = max(0, heading.start() - _RESULTS_WINDOW_BEFORE)
+                return start, heading.start() + _RESULTS_WINDOW_AFTER, True
+        row = _RESULTS_PCT_OF_REVENUE_ROW.search(text, mdna_start, mdna_start + _MDNA_SEARCH_SPAN)
+        if row:
+            start = max(0, row.start() - _RESULTS_WINDOW_BEFORE)
+            return start, row.start() + _RESULTS_WINDOW_AFTER, True
 
     return 0, _RESULTS_WINDOW_AFTER, False
 
@@ -422,7 +568,7 @@ def _extract_qualitative_notes(text: str) -> str:
     return "\n\n".join(sections)
 
 
-def extract_filing_sections(text: str) -> tuple[str, bool]:
+def extract_filing_sections(text: str, *, last_resort: bool = False) -> tuple[str, bool]:
     """Extract both the quantitative results-of-operations window AND the
     qualitative risk notes (income taxes, contingencies/legal, debt) from
     10-Q/10-K text, concatenated - replaces sending the full ~100K-500K char
@@ -432,9 +578,9 @@ def extract_filing_sections(text: str) -> tuple[str, bool]:
     extract_results_section's found flag (whether the numbers narrative was
     located); qualitative notes are additive best-effort and don't affect it,
     since their absence just means this filing didn't discuss those topics,
-    not that extraction failed.
+    not that extraction failed. last_resort: see _find_results_window.
     """
-    start, end, found = _find_results_window(text)
+    start, end, found = _find_results_window(text, last_resort=last_resort)
     results_section = text[start:end]
     qualitative = _extract_qualitative_notes(text)
     if not qualitative:
